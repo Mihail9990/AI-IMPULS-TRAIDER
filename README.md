@@ -1,5 +1,8 @@
 # Capital.com Gold hedge-cycle bot
 
+Полное описание фактической логики сценариев 1–9, формул, порядка **SL → trigger** и
+мест перехода на следующий сценарий: [`docs/SCENARIO_LOGIC_RU.md`](docs/SCENARIO_LOGIC_RU.md).
+
 Торговый бот девятисценарного hedge-цикла для Capital.com, рассчитанный на Python/Pydroid 3.
 Один и тот же код работает с demo и real API: меняется только `CAPITAL_DEMO` и набор учётных
 данных. Перед real-счётом обязательно прогоните все переходы на demo и минимальном размере.
