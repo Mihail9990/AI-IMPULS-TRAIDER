@@ -1,0 +1,19 @@
+{
+  "CAPITAL_API_KEY": "replace_with_demo_api_key",
+  "CAPITAL_IDENTIFIER": "replace_with_demo_login",
+  "CAPITAL_PASSWORD": "replace_with_demo_password",
+  "CAPITAL_DEMO": true,
+  "CAPITAL_EPIC": "GOLD",
+  "TELEGRAM_BOT_TOKEN": "replace_with_telegram_token",
+  "TELEGRAM_CHAT_ID": "replace_with_chat_id",
+  "BOT_DRY_RUN": true,
+  "POSITION_SIZE": "0.1",
+  "STOP_DISTANCE": "1",
+  "TARGET_PROFIT": "0.3",
+  "ENTRY_CANDLE_RANGE": "3",
+  "ENTRY_CANDLE_MINUTES": 1,
+  "MAX_SCENARIOS": 9,
+  "POLL_SECONDS": 0.5,
+  "STATE_FILE": "bot_state.json",
+  "DIAGNOSTIC_LOG_FILE": "bot_diagnostics.log"
+}
