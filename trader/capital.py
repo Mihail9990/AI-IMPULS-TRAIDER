@@ -225,8 +225,20 @@ class CapitalClient:
             body["profitLevel"] = float(target)
         return self.request("POST", "/workingorders", json=body)["dealReference"]
 
-    def delete_working_order(self, deal_id: str) -> None:
-        self.request("DELETE", f"/workingorders/{deal_id}")
+    def delete_working_order(self, deal_id: str) -> bool:
+        """Cancel a working order, treating an already absent order as an idempotent result.
+
+        A 404 is expected when TP and trigger race: the trigger may have executed between the
+        positions snapshot and DELETE.  The caller must inspect activity/positions after a False
+        result rather than crashing or assuming cancellation succeeded.
+        """
+        try:
+            self.request("DELETE", f"/workingorders/{deal_id}")
+            return True
+        except CapitalError as exc:
+            if "error.not-found.dealId" in str(exc):
+                return False
+            raise
 
     def activity(self, deal_id: str = "", last_period: int = 86400) -> list[dict]:
         params = {"lastPeriod": last_period, "detailed": "true"}

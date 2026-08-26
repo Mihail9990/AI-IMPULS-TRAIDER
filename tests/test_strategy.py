@@ -13,7 +13,12 @@ from trader.app import Bot
 from trader.capital import CapitalClient, CapitalError
 from trader.config import Settings
 from trader.engine import Strategy
-from trader.events import find_close_event, find_trigger_open_event, normalize_events
+from trader.events import (
+    find_close_event,
+    find_trigger_open_event,
+    find_working_order_execution,
+    normalize_events,
+)
 from trader.execution import ExecutionPolicy, is_crossed_level_rejection, trigger_level_passed
 from trader.model import CycleState, stop_slippage, trigger_slippage
 from trader.reconcile import RemoteSnapshot
@@ -51,6 +56,19 @@ class StrategyTest(unittest.TestCase):
         self.assertIsNotNone(event)
         self.assertEqual(event.deal_id, "new-buy")
         self.assertEqual(event.level, D("4622.63"))
+
+    def test_executed_trigger_is_detected_before_position_event_is_published(self):
+        activity = [{
+            "dateUTC": "2026-08-26T12:30:09.364",
+            "dealId": "trigger-sell",
+            "source": "USER",
+            "type": "WORKING_ORDER",
+            "status": "EXECUTED",
+            "details": {"direction": "SELL", "level": 4620.63},
+        }]
+        event = find_working_order_execution(activity, "trigger-sell")
+        self.assertIsNotNone(event)
+        self.assertEqual(event.level, D("4620.63"))
 
     def test_actual_initial_fills_define_immutable_trigger_anchors(self):
         self.strategy.confirm_initial_fills(D("4010.35"), D("4010.00"))
@@ -165,6 +183,23 @@ class StrategyTest(unittest.TestCase):
         self.assertEqual(restored.long.current_entry, D("4010.30"))
         self.assertEqual(restored.recovery, D("0.60"))
         self.assertEqual(restored.telegram_offset, 123)
+
+    def test_deal_ids_survive_reopen_reset_and_state_round_trip(self):
+        self.state.long.deal_id = "long-1"
+        self.state.long.deal_reference = "ref-1"
+        self.state.remember_deal(self.state.long)
+        self.strategy.stopped("SELL", D("4011.10"), "stop-short")
+        self.strategy.reopened("SELL", D("4009.90"), "short-2", "reopen-short")
+        self.state.remember_close("long-1", "TP", D("4012.70"))
+        self.state.reset()
+        with tempfile.NamedTemporaryFile() as file:
+            self.state.save(file.name)
+            restored = CycleState.load(file.name)
+        by_id = {item["deal_id"]: item for item in restored.deal_history}
+        self.assertIn("long-1", by_id)
+        self.assertIn("short-2", by_id)
+        self.assertEqual(by_id["long-1"]["close_source"], "TP")
+        self.assertEqual(by_id["long-1"]["close_level"], "4012.70")
 
     def test_slippage_helpers_use_absolute_deviation(self):
         self.assertEqual(stop_slippage("BUY", D("10"), D("9.9")), D("0.1"))
@@ -846,6 +881,17 @@ class EntryRetryTest(unittest.TestCase):
 
 
 class CapitalClientTest(unittest.TestCase):
+    def test_delete_missing_working_order_is_idempotent_but_other_errors_raise(self):
+        client = CapitalClient.__new__(CapitalClient)
+        client.request = Mock(side_effect=CapitalError(
+            'Capital API 404: {"errorCode":"error.not-found.dealId"}'
+        ))
+        self.assertFalse(client.delete_working_order("already-executed"))
+
+        client.request = Mock(side_effect=CapitalError("Capital API 500: unavailable"))
+        with self.assertRaises(CapitalError):
+            client.delete_working_order("unknown")
+
     def test_get_retries_transient_transport_failure_without_retrying_mutation(self):
         settings = Settings(api_key="key", identifier="id", password="password")
         client = CapitalClient(settings)

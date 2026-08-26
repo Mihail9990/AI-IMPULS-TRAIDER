@@ -85,6 +85,19 @@ def find_trigger_open_event(
     return matches[0] if matches else None
 
 
+def find_working_order_execution(
+    items: Iterable[dict], working_order_id: str
+) -> BrokerEvent | None:
+    """Find broker proof that a working order executed before its position is published."""
+    matches = [
+        event for event in normalize_events(items)
+        if event.deal_id == working_order_id
+        and event.event_type == "WORKING_ORDER"
+        and event.status == "EXECUTED"
+    ]
+    return matches[-1] if matches else None
+
+
 def _dicts(value: Any):
     if isinstance(value, dict):
         yield value

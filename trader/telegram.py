@@ -18,6 +18,7 @@ class Telegram:
         ("positions", "Открытые позиции"),
         ("orders", "Trigger-ордера"),
         ("pnl", "Прибыль и убыток"),
+        ("dealhistory", "История сделок по dealId"),
         ("profit200", "Целевой profit следующих 200 циклов"),
         ("cycleinfo", "Последние события"),
         ("recover", "Повторить защиту позиций"),
@@ -31,6 +32,7 @@ class Telegram:
         "keyboard": [
             [{"text": "/status"}, {"text": "/start"}, {"text": "/stop"}],
             [{"text": "/positions"}, {"text": "/orders"}, {"text": "/pnl"}],
+            [{"text": "/dealhistory"}],
             [{"text": "/profit200 0.4"}],
             [{"text": "/cycleinfo"}, {"text": "/help"}],
             [{"text": "/recover"}, {"text": "/automode"}],

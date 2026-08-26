@@ -57,7 +57,47 @@ class CycleState:
     completed_cycles: int = 0
     diagnostic_cleanup_cycle: int = 0
     processed_events: list[str] = field(default_factory=list)
+    # Durable broker ledger.  Leg.deal_id necessarily changes after every trigger fill, while
+    # Capital.com's deal-specific history remains addressable by every previous dealId.  Keep the
+    # IDs instead of losing them when a Leg is reopened or the cycle is reset.
+    deal_history: list[dict] = field(default_factory=list)
     events: list[str] = field(default_factory=list)
+
+    def remember_deal(self, leg: Leg, scenario: int | None = None) -> None:
+        if not leg.deal_id:
+            return
+        record = next(
+            (item for item in self.deal_history if item.get("deal_id") == leg.deal_id), None
+        )
+        values = {
+            "deal_id": leg.deal_id,
+            "deal_reference": leg.deal_reference,
+            "direction": leg.direction,
+            "entry": str(leg.current_entry),
+            "scenario": self.scenario if scenario is None else scenario,
+            "trigger_id": leg.trigger_id,
+            "close_source": "",
+            "close_level": None,
+        }
+        if record is None:
+            self.deal_history.append(values)
+        else:
+            # Preserve close information already learned from activity history.
+            values["close_source"] = record.get("close_source", "")
+            values["close_level"] = record.get("close_level")
+            record.update(values)
+        # This is diagnostic/recovery metadata rather than an unbounded transaction database.
+        del self.deal_history[:-500]
+
+    def remember_close(self, deal_id: str, source: str, level: Decimal) -> None:
+        record = next(
+            (item for item in self.deal_history if item.get("deal_id") == deal_id), None
+        )
+        if record is None:
+            record = {"deal_id": deal_id}
+            self.deal_history.append(record)
+        record.update({"close_source": source.upper(), "close_level": str(level)})
+        del self.deal_history[:-500]
 
     def save(self, path: str) -> None:
         payload = asdict(self)

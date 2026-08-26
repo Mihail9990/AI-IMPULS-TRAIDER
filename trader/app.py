@@ -10,7 +10,12 @@ from .capital import CapitalClient, CapitalError
 from .config import Settings
 from .diagnostics import clear_diagnostics, configure_diagnostics
 from .engine import Strategy
-from .events import find_close_event, find_trigger_open_event
+from .events import (
+    find_close_event,
+    find_trigger_open_event,
+    find_working_order_execution,
+    normalize_events,
+)
 from .execution import ExecutionPolicy, is_crossed_level_rejection, trigger_level_passed
 from .model import CycleState, Leg, stop_for
 from .reconcile import RemoteSnapshot
@@ -115,6 +120,7 @@ class Bot:
                 "/recover — повторно связать позиции и установить точные SL/TP\n"
                 "/automode — безопасно выйти из ручного режима\n"
                 "/profit200 VALUE — личный profit следующих 200 завершённых циклов\n"
+                "/dealhistory [DEAL_ID] — история сохранённых сделок или точного ID\n"
                 "/sendlog — прислать текущий диагностический файл\n"
                 "/setsl long|short PRICE /settp long|short PRICE\n"
                 "/settrigger long|short PRICE /canceltrigger long|short\n"
@@ -139,6 +145,8 @@ class Bot:
             self.telegram.send(pnl_text(
                 self.state, self.capital.positions(), self.capital.transactions()
             ))
+        elif command == "/dealhistory":
+            self._deal_history(args)
         elif command == "/recover":
             self._recover_manual_positions()
         elif command == "/automode":
@@ -182,6 +190,43 @@ class Bot:
             self._manual_command(command, args)
         else:
             self.telegram.send("Неизвестная или неполная команда. /help")
+
+    def _deal_history(self, args: list[str]) -> None:
+        """Show the durable local ledger or query Capital activity for one exact dealId."""
+        if len(args) > 1:
+            raise RuntimeError("Используйте /dealhistory или /dealhistory DEAL_ID")
+        if not args:
+            records = self.state.deal_history[-20:]
+            if not records:
+                self.telegram.send("История dealId бота пока пуста.")
+                return
+            lines = ["🧾 Последние dealId бота:"]
+            for item in records:
+                lines.append(
+                    f"scenario={item.get('scenario', '?')} {item.get('direction', '?')} "
+                    f"id={item.get('deal_id', '')}\n"
+                    f"entry={item.get('entry', '?')} close={item.get('close_source') or '-'} "
+                    f"{item.get('close_level') if item.get('close_level') is not None else ''}"
+                )
+            self.telegram.send("\n".join(lines))
+            return
+        deal_id = args[0]
+        activity = self.capital.activity(deal_id)
+        events = normalize_events(activity)
+        if not events:
+            self.telegram.send(f"Capital.com не вернул историю для dealId={deal_id}")
+            return
+        lines = [f"🧾 История dealId={deal_id}"]
+        for event in events[-12:]:
+            level = event.level if event.level is not None else "-"
+            lines.append(
+                f"{event.timestamp.isoformat()} {event.event_type} "
+                f"source={event.source or '-'} status={event.status or '-'} level={level}"
+            )
+            if event.source in {"SL", "TP"} and event.level is not None:
+                self.state.remember_close(deal_id, event.source, event.level)
+        self.state.save(self.cfg.state_file)
+        self.telegram.send("\n".join(lines))
 
     def status(self) -> str:
         return status_text(self.state)
@@ -577,7 +622,52 @@ class Bot:
                         )
                         return
                 if stopped.trigger_id:
-                    self.capital.delete_working_order(stopped.trigger_id)
+                    cancelled = self.capital.delete_working_order(stopped.trigger_id)
+                    if not cancelled:
+                        # The diagnostic from 2026-08-26 17:30 proves this exact race: TP was
+                        # published for the survivor, then the saved trigger executed before our
+                        # DELETE and Capital returned error.not-found.dealId.  Resolve the order
+                        # from durable activity by its ID; never call the cycle complete while an
+                        # untracked trigger-created position may exist.
+                        activity = self.capital.activity()
+                        opened = find_trigger_open_event(
+                            activity, stopped.trigger_id, stopped.direction
+                        )
+                        if opened is not None:
+                            if opened.deal_id:
+                                stopped.deal_id = opened.deal_id
+                            if opened.level is not None:
+                                stopped.current_entry = opened.level
+                            stopped.open = True
+                            self.state.remember_deal(stopped, self.state.scenario + 1)
+                            self.state.save(self.cfg.state_file)
+                            self._manual(
+                                "TP и trigger исполнились почти одновременно. "
+                                f"TP {survivor.direction}: {fill}; trigger {stopped.direction}: "
+                                f"dealId={opened.deal_id}, fill={opened.level}. "
+                                "Новая позиция сохранена и не потеряна; требуется ручная проверка."
+                            )
+                            return
+                        executed = find_working_order_execution(activity, stopped.trigger_id)
+                        if executed is not None:
+                            # Capital may publish WORKING_ORDER/EXECUTED before the resulting
+                            # POSITION event (and therefore before its permanent position dealId).
+                            # Keep the order identity and stop completion until that second event
+                            # can be reconciled; never erase it as if cancellation succeeded.
+                            self.state.save(self.cfg.state_file)
+                            self._manual(
+                                "TP и trigger исполнились почти одновременно. "
+                                f"TP {survivor.direction}: {fill}; workingOrderId="
+                                f"{stopped.trigger_id} уже EXECUTED, но Capital.com ещё не "
+                                "опубликовал dealId новой позиции. Trigger сохранён; "
+                                "проверьте /positions и /dealhistory после синхронизации."
+                            )
+                            return
+                        LOG.info(
+                            "Working order %s already absent; activity has no accepted trigger "
+                            "position, treating cancellation as idempotent",
+                            stopped.trigger_id,
+                        )
                     stopped.trigger_id = stopped.trigger_reference = ""
                 self._complete_cycle(survivor.direction, fill)
                 if self.state.paused:
@@ -1591,7 +1681,11 @@ class Bot:
 
     def _closing_fill(self, leg: Leg, expected_source: str = "SL") -> Decimal | None:
         event = find_close_event(self.capital.activity(leg.deal_id), leg.deal_id, expected_source)
-        return event.level if event else None
+        if event and event.level is not None:
+            self.state.remember_deal(leg)
+            self.state.remember_close(leg.deal_id, expected_source, event.level)
+            return event.level
+        return None
 
     def _wait_closing_fill(
         self, leg: Leg, expected_source: str = "SL", attempts: int = 4, delay: float = 0.5

@@ -57,6 +57,7 @@ class Strategy:
         for leg, fill in ((self.state.long, long_fill), (self.state.short, short_fill)):
             leg.original_trigger_level = leg.current_entry = fill
             leg.stop = stop_for(leg.direction, fill, self.cfg.stop_distance)
+            self.state.remember_deal(leg, 1)
         self._targets_from_opposite_stops()
         self.state.events.append(
             f"scenario 1 fills confirmed; raw_gap={raw_gap}; spread={spread}; "
@@ -75,6 +76,8 @@ class Strategy:
         )
         self.state.realized_losses += loss
         leg.open = False
+        self.state.remember_deal(leg)
+        self.state.remember_close(leg.deal_id, "SL", fill)
         self.state.recovery += slippage
         survivor = self._leg("SELL" if direction == "BUY" else "BUY")
         survivor.take_profit = self._survivor_target(survivor.direction)
@@ -100,6 +103,7 @@ class Strategy:
         leg.open = True
         leg.trigger_id = leg.trigger_reference = ""
         leg.stop = stop_for(direction, fill, self.cfg.stop_distance)
+        self.state.remember_deal(leg, self.state.scenario)
         self._targets_from_opposite_stops()
         self.state.phase = "BOTH_OPEN"
         if event_id:
@@ -115,6 +119,8 @@ class Strategy:
         leg = self._leg(direction)
         close = fill if fill is not None else leg.take_profit
         if close is not None:
+            self.state.remember_deal(leg)
+            self.state.remember_close(leg.deal_id, "TP", close)
             gross = close - leg.current_entry if direction == "BUY" else leg.current_entry - close
             self.state.gross_take_profit = max(Decimal("0"), gross)
             self.state.net_cycle_result = self.state.gross_take_profit - self.state.realized_losses
