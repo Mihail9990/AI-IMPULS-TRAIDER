@@ -241,6 +241,25 @@ class EntryRetryTest(unittest.TestCase):
         self.assertEqual(kwargs["stop_distance"], D("1"))
         self.assertNotIn("profit_distance", kwargs)
 
+    def test_trigger_transition_notification_precedes_protection_reports(self):
+        bot = self.make_bot()
+        bot.strategy.stopped("SELL", D("4011.00"), "stop-short")
+        bot.state.short.trigger_id = "trigger-short"
+        bot.telegram.reset_mock()
+        bot._apply_protection = Mock(return_value=True)
+        positions = {
+            "short-2": {
+                "dealId": "short-2", "direction": "SELL", "level": 4010.00,
+                "workingOrderId": "trigger-short",
+            }
+        }
+
+        bot._detect_trigger_fill(positions)
+
+        first_report = bot.telegram.send.call_args_list[0].args[0]
+        self.assertIn("Trigger исполнен — переход в сценарий 2", first_report)
+        self.assertEqual(bot._apply_protection.call_count, 2)
+
     def test_diagnostics_are_cleared_once_after_each_tenth_completed_cycle(self):
         bot = self.make_bot()
         bot.state.completed_cycles = 9

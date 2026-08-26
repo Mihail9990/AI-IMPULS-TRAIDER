@@ -821,6 +821,19 @@ class Bot:
         # A missing leg while both were open is a stop. A missing survivor while a trigger
         # is pending is handled by the branch below before this state can be mutated.
         stopped = self.strategy.stopped(lost.direction, fill, f"stop:{lost.deal_id}:{fill}")
+        # Queue the broker event before follow-up actions. Previously protection/trigger helpers
+        # queued their messages first, making Telegram appear to show trigger before the SL.
+        self.telegram.send(
+            f"🛑 Stop Loss исполнен — сценарий {self.state.scenario} продолжается\n"
+            f"Сторона закрыта: {lost.direction}\nDeal ID: {lost.deal_id}\n"
+            f"Плановый SL: {lost.stop}\nФактическое закрытие: {fill}\n"
+            f"SL slippage: {abs(lost.stop - fill) if lost.stop is not None else '-'}\n"
+            f"Recovery после SL: {self.state.recovery}\n"
+            f"Осталась сторона: {survivor.direction}\nНовый TP: {survivor.take_profit}\n"
+            f"Следующее действие: подтвердить защиту {survivor.direction}, затем поставить "
+            f"trigger {stopped.direction} на {stopped.original_trigger_level}.\n"
+            "Номер сценария пока НЕ меняется."
+        )
         if not self._apply_protection(survivor):
             # If TP completion did not finish the cycle, the survivor itself closed during its
             # protection PUT. Preserve strategy order by creating the already-required trigger
@@ -831,12 +844,6 @@ class Bot:
             return
         self._create_trigger(stopped)
         self.state.save(self.cfg.state_file)
-        self.telegram.send(
-            f"🛑 Stop Loss исполнен\nСторона: {lost.direction}\nФактическое закрытие: {fill}\n"
-            f"Плановый SL: {lost.stop}\nRecovery после slippage: {self.state.recovery}\n"
-            f"Осталась сторона: {survivor.direction}\nНовый TP: {survivor.take_profit}\n"
-            f"Trigger закрытой стороны: {stopped.original_trigger_level}"
-        )
 
     @staticmethod
     def _protection_matches(position: dict, leg: Leg) -> bool:
@@ -872,18 +879,22 @@ class Bot:
             if self.state.scenario == self.cfg.max_scenarios:
                 self._enter_manual_nine()
             else:
+                self.telegram.send(
+                    f"🔄 Trigger исполнен — переход в сценарий {self.state.scenario}\n"
+                    f"Переоткрыта сторона: {leg.direction}\nDeal ID: {candidate['dealId']}\n"
+                    f"Сохранённый trigger: {leg.original_trigger_level}\n"
+                    f"Фактический вход: {fill}\n"
+                    f"Trigger slippage: {abs(leg.original_trigger_level - fill)}\n"
+                    f"Recovery нового сценария: {self.state.recovery}\n"
+                    f"Новый SL {leg.direction}: {leg.stop}\nНовый TP {leg.direction}: "
+                    f"{leg.take_profit}\nСледующее действие: подтвердить защиту обеих сторон."
+                )
                 if not self._apply_protection(self.state.long):
                     self.state.save(self.cfg.state_file)
                     return
                 if not self._apply_protection(self.state.short):
                     self.state.save(self.cfg.state_file)
                     return
-                self.telegram.send(
-                    f"🔄 Trigger исполнен\nНовый сценарий: {self.state.scenario}\n"
-                    f"Сторона: {leg.direction}\nTrigger level: {leg.original_trigger_level}\n"
-                    f"Фактический вход: {fill}\nRecovery: {self.state.recovery}\n"
-                    f"SL: {leg.stop}\nTP: {leg.take_profit}"
-                )
 
     def _trigger_fill_candidate(self, positions: dict[str, dict], leg: Leg) -> dict | None:
         """Return the position opened by this leg's saved working order, if visible."""
