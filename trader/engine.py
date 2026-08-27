@@ -31,6 +31,9 @@ class Strategy:
         self.state.scenario_nine_prior_losses = Decimal("0")
         self.state.scenario_nine_close_gap = Decimal("0")
         self.state.scenario_nine_total_loss = Decimal("0")
+        self.state.scenario_nine_extra_loss = Decimal("0")
+        self.state.scenario_nine_triggers_verified = False
+        self.state.cycle_trigger_ids.clear()
         self.state.scenario_nine_long_fill = None
         self.state.scenario_nine_short_fill = None
         self.state.cycle_target_profit = (
@@ -130,19 +133,22 @@ class Strategy:
         self.state.active = False
         self.state.phase = "COMPLETED"
 
-    def complete_scenario_nine(self, long_fill: Decimal, short_fill: Decimal) -> None:
+    def complete_scenario_nine(
+        self, long_fill: Decimal, short_fill: Decimal, extra_loss: Decimal = Decimal("0")
+    ) -> None:
         """Finish scenario 9 using actual broker fills from both closing requests."""
         prior_losses = self.state.realized_losses
         close_gap = abs(long_fill - short_fill)
         self.state.scenario_nine_prior_losses = prior_losses
         self.state.scenario_nine_close_gap = close_gap
-        self.state.scenario_nine_total_loss = prior_losses + close_gap
+        self.state.scenario_nine_extra_loss = extra_loss
+        self.state.scenario_nine_total_loss = prior_losses + close_gap + extra_loss
         self.state.scenario_nine_long_fill = long_fill
         self.state.scenario_nine_short_fill = short_fill
         self.state.net_cycle_result = -self.state.scenario_nine_total_loss
         self.state.events.append(
             f"scenario 9 closed; long={long_fill}; short={short_fill}; "
-            f"prior_losses={prior_losses}; gap={close_gap}; "
+            f"prior_losses={prior_losses}; gap={close_gap}; extra_loss={extra_loss}; "
             f"total_loss={self.state.scenario_nine_total_loss}"
         )
         self.state.completed_cycles += 1

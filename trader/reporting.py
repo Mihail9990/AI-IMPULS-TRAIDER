@@ -22,7 +22,10 @@ def scenario_nine_result_text(state: CycleState, long_fill: Decimal, short_fill:
         f"Фактическое закрытие SHORT: {short_fill}\n"
         f"Разница закрытий: {state.scenario_nine_close_gap} пункта\n"
         f"Накопленные убытки сценариев 1–8: {state.scenario_nine_prior_losses} пункта\n"
+        f"Дополнительный убыток исполненных trigger: {state.scenario_nine_extra_loss} пункта\n"
         f"Итоговый убыток сценария 9: {state.scenario_nine_total_loss} пункта\n"
+        f"Trigger-ордера текущего цикла отменены и проверены: "
+        f"{'ДА' if state.scenario_nine_triggers_verified else 'НЕТ'}\n"
         "Обе позиции закрыты. Автоматика продолжит обычные циклы."
     )
 

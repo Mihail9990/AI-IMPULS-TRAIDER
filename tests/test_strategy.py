@@ -136,13 +136,14 @@ class StrategyTest(unittest.TestCase):
 
     def test_scenario_nine_result_uses_actual_close_gap_and_prior_losses(self):
         self.state.realized_losses = D("20")
-        self.strategy.complete_scenario_nine(D("4001.5"), D("4000.3"))
+        self.strategy.complete_scenario_nine(D("4001.5"), D("4000.3"), D("0.2"))
         self.assertEqual(self.state.scenario_nine_prior_losses, D("20"))
         self.assertEqual(self.state.scenario_nine_close_gap, D("1.2"))
-        self.assertEqual(self.state.scenario_nine_total_loss, D("21.2"))
+        self.assertEqual(self.state.scenario_nine_extra_loss, D("0.2"))
+        self.assertEqual(self.state.scenario_nine_total_loss, D("21.4"))
         self.assertEqual(self.state.scenario_nine_long_fill, D("4001.5"))
         self.assertEqual(self.state.scenario_nine_short_fill, D("4000.3"))
-        self.assertEqual(self.state.net_cycle_result, D("-21.2"))
+        self.assertEqual(self.state.net_cycle_result, D("-21.4"))
         self.assertFalse(self.state.manual)
         self.assertFalse(self.state.active)
 
@@ -312,9 +313,64 @@ class EntryRetryTest(unittest.TestCase):
         self.assertFalse(bot.state.active)
         self.assertFalse(bot.state.manual)
         self.assertEqual(bot.state.scenario_nine_total_loss, D("21.2"))
+        self.assertTrue(bot.state.scenario_nine_triggers_verified)
+        self.assertEqual(bot.state.scenario_nine_extra_loss, D("0"))
         self.assertEqual(bot.capital.close_position.call_count, 2)
         bot.capital.update_position.assert_any_call("long-9", None, None)
         bot.capital.update_position.assert_any_call("short-9", None, None)
+
+    def test_inactive_completed_cycle_never_recreates_trigger(self):
+        bot = self.make_bot()
+        bot.state.short.open = False
+        bot.state.short.trigger_id = ""
+        bot.state.short.stop = None
+        bot.state.active = False
+        bot.state.phase = "FILTER"
+
+        bot._ensure_expected_trigger()
+
+        bot.capital.working_stop.assert_not_called()
+
+    def test_scenario_nine_closes_trigger_that_executes_during_cancellation(self):
+        bot = self.make_bot()
+        bot.capital.activity.return_value = []
+        bot.capital.positions.return_value = [{
+            "position": {
+                "dealId": "extra-sell", "workingOrderId": "trigger-sell",
+                "direction": "SELL", "level": 4000,
+            },
+            "market": {"epic": "GOLD"},
+        }]
+        bot.capital.close_position.return_value = "close-extra"
+        bot.capital.wait_confirmation.return_value = {
+            "dealStatus": "ACCEPTED", "level": 4001,
+        }
+
+        with patch("trader.app.time.sleep"):
+            loss = bot._close_scenario_nine_trigger_races(
+                {"trigger-sell"}, {"long-9", "short-9"}
+            )
+
+        self.assertEqual(loss, D("1"))
+        bot.capital.close_position.assert_called_once_with("extra-sell")
+        self.assertIn("исполнился во время отмены", bot.telegram.send.call_args.args[0])
+
+    def test_scenario_nine_verifies_trigger_cancellation_with_three_empty_reads(self):
+        bot = self.make_bot()
+        order = {
+            "workingOrderData": {"dealId": "trigger-buy"},
+            "marketData": {"epic": "GOLD"},
+        }
+        bot.state.cycle_trigger_ids = ["trigger-buy"]
+        bot.capital.working_orders.side_effect = [[order], [], [], []]
+        bot.capital.delete_working_order.return_value = True
+
+        with patch("trader.app.time.sleep"):
+            uncertain = bot._cancel_and_verify_scenario_nine_triggers()
+
+        self.assertEqual(uncertain, set())
+        self.assertTrue(bot.state.scenario_nine_triggers_verified)
+        bot.capital.delete_working_order.assert_called_once_with("trigger-buy")
 
     def test_missed_diagnostic_cleanup_boundary_is_recovered(self):
         bot = self.make_bot()
@@ -900,6 +956,15 @@ class EntryRetryTest(unittest.TestCase):
 
 
 class CapitalClientTest(unittest.TestCase):
+    def test_working_order_cancellation_waits_for_accepted_confirmation(self):
+        client = CapitalClient.__new__(CapitalClient)
+        client.request = Mock(return_value={"dealReference": "cancel-ref"})
+        client.wait_confirmation = Mock(return_value={"dealStatus": "ACCEPTED"})
+
+        self.assertTrue(client.delete_working_order("trigger-1"))
+
+        client.wait_confirmation.assert_called_once_with("cancel-ref")
+
     def test_delete_missing_working_order_is_idempotent_but_other_errors_raise(self):
         client = CapitalClient.__new__(CapitalClient)
         client.request = Mock(side_effect=CapitalError(
@@ -1175,12 +1240,14 @@ class BrokerInfrastructureTest(unittest.TestCase):
     def test_manual_trigger_command_creates_working_stop(self):
         bot = EntryRetryTest().make_bot()
         bot.state.manual = True
+        bot.state.long.open = False
         bot.capital.working_stop.return_value = "manual-ref"
         bot.capital.wait_confirmation.return_value = {
             "dealStatus": "ACCEPTED", "dealId": "manual-order",
         }
         bot.command("/settrigger long 4020.50")
         self.assertEqual(bot.state.long.trigger_id, "manual-order")
+        self.assertIn("manual-order", bot.state.cycle_trigger_ids)
         bot.capital.working_stop.assert_called_once_with(
             "GOLD", "BUY", D("0.1"), D("4020.50")
         )

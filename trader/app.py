@@ -629,40 +629,16 @@ class Bot:
                         # DELETE and Capital returned error.not-found.dealId.  Resolve the order
                         # from durable activity by its ID; never call the cycle complete while an
                         # untracked trigger-created position may exist.
-                        activity = self.capital.activity()
-                        opened = find_trigger_open_event(
-                            activity, stopped.trigger_id, stopped.direction
-                        )
-                        if opened is not None:
-                            if opened.deal_id:
-                                stopped.deal_id = opened.deal_id
-                            if opened.level is not None:
-                                stopped.current_entry = opened.level
-                            stopped.open = True
-                            self.state.remember_deal(stopped, self.state.scenario + 1)
+                        race_loss = self._close_trigger_that_raced_with_tp(stopped)
+                        if race_loss is None:
                             self.state.save(self.cfg.state_file)
                             self._manual(
-                                "TP и trigger исполнились почти одновременно. "
-                                f"TP {survivor.direction}: {fill}; trigger {stopped.direction}: "
-                                f"dealId={opened.deal_id}, fill={opened.level}. "
-                                "Новая позиция сохранена и не потеряна; требуется ручная проверка."
+                                "TP и trigger исполнились почти одновременно, но Capital.com "
+                                f"не опубликовал однозначный итог workingOrderId={stopped.trigger_id}. "
+                                "Trigger сохранён; проверьте /positions и /dealhistory."
                             )
                             return
-                        executed = find_working_order_execution(activity, stopped.trigger_id)
-                        if executed is not None:
-                            # Capital may publish WORKING_ORDER/EXECUTED before the resulting
-                            # POSITION event (and therefore before its permanent position dealId).
-                            # Keep the order identity and stop completion until that second event
-                            # can be reconciled; never erase it as if cancellation succeeded.
-                            self.state.save(self.cfg.state_file)
-                            self._manual(
-                                "TP и trigger исполнились почти одновременно. "
-                                f"TP {survivor.direction}: {fill}; workingOrderId="
-                                f"{stopped.trigger_id} уже EXECUTED, но Capital.com ещё не "
-                                "опубликовал dealId новой позиции. Trigger сохранён; "
-                                "проверьте /positions и /dealhistory после синхронизации."
-                            )
-                            return
+                        self.state.realized_losses += race_loss
                         LOG.info(
                             "Working order %s already absent; activity has no accepted trigger "
                             "position, treating cancellation as idempotent",
@@ -695,6 +671,7 @@ class Bot:
                     return
             self._ensure_expected_trigger()
             return
+
         known = {leg.deal_id: leg for leg in (self.state.long, self.state.short) if leg and leg.open and leg.deal_id}
         missing = [leg for deal_id, leg in known.items() if deal_id not in positions]
         if not missing:
@@ -844,6 +821,71 @@ class Bot:
             return
         self._create_trigger(stopped)
         self.state.save(self.cfg.state_file)
+
+    def _close_trigger_that_raced_with_tp(self, leg: Leg) -> Decimal | None:
+        """Resolve TP/trigger race automatically and return the additional realized loss."""
+        trigger_id = leg.trigger_id
+        for attempt in range(120):
+            activity = self.capital.activity()
+            opened = find_trigger_open_event(activity, trigger_id, leg.direction)
+            positions = self._cycle_positions()
+            position = next(
+                (item for item in positions.values()
+                 if str(item.get("workingOrderId", "")) == trigger_id),
+                None,
+            )
+            if opened is None and position is not None:
+                deal_id = str(position.get("dealId", ""))
+                entry = D(str(position.get("level", leg.original_trigger_level)))
+            elif opened is not None and opened.deal_id and opened.level is not None:
+                deal_id, entry = opened.deal_id, opened.level
+            else:
+                executed = find_working_order_execution(activity, trigger_id)
+                if executed is None:
+                    # 404 can also mean an already-cancelled order. Three quiet reads are enough.
+                    if attempt >= 2:
+                        return D("0")
+                    time.sleep(0.5)
+                    continue
+                if attempt + 1 < 120:
+                    time.sleep(0.5)
+                    continue
+                return None
+
+            leg.deal_id = deal_id
+            leg.current_entry = entry
+            leg.open = True
+            self.state.remember_deal(leg, self.state.scenario + 1)
+            position = positions.get(deal_id, position)
+            if position is not None:
+                reference = self.capital.close_position(deal_id)
+                result = self.capital.wait_confirmation(reference)
+                if result.get("dealStatus") != "ACCEPTED" or result.get("level") is None:
+                    raise CapitalError(result.get("reason") or "Поздняя trigger-позиция не закрыта")
+                close = D(str(result["level"]))
+            else:
+                close_event = (
+                    find_close_event(activity, deal_id, "SL")
+                    or find_close_event(activity, deal_id, "TP")
+                )
+                if close_event is None or close_event.level is None:
+                    time.sleep(0.5)
+                    continue
+                close = close_event.level
+            loss = max(D("0"), entry - close) if leg.direction == "BUY" else max(
+                D("0"), close - entry
+            )
+            leg.open = False
+            self.state.remember_close(deal_id, "TP_TRIGGER_RACE", close)
+            self.state.save(self.cfg.state_file)
+            self.telegram.send(
+                "⚡ TP и trigger исполнились почти одновременно\n"
+                f"Поздняя сторона: {leg.direction}\nDeal ID: {deal_id}\n"
+                f"Trigger fill: {entry}\nФактическое закрытие: {close}\n"
+                f"Дополнительный убыток: {loss}\nЦикл завершается автоматически."
+            )
+            return loss
+        return None
 
     @staticmethod
     def _protection_matches(position: dict, leg: Leg) -> bool:
@@ -1039,6 +1081,11 @@ class Bot:
         return True
 
     def _ensure_expected_trigger(self) -> None:
+        # Scenario 9 can finish inside _detect_trigger_fill().  The caller then continues in the
+        # same Python frame with stale local Leg references.  Never create another trigger after
+        # the cycle has become inactive or left a one-sided phase.
+        if not self.state.active or self.state.phase not in {"LONG_ONLY", "SHORT_ONLY"}:
+            return
         for leg in (self.state.long, self.state.short):
             if leg and not leg.open and not leg.trigger_id:
                 self._create_trigger(leg)
@@ -1059,6 +1106,8 @@ class Bot:
             existing = self._find_order(leg)
             if existing:
                 leg.trigger_id = str(existing["dealId"])
+                if leg.trigger_id not in self.state.cycle_trigger_ids:
+                    self.state.cycle_trigger_ids.append(leg.trigger_id)
                 return
             try:
                 reference = self.capital.working_stop(
@@ -1069,6 +1118,8 @@ class Bot:
                 if result.get("dealStatus") == "ACCEPTED" and result.get("dealId"):
                     leg.trigger_reference = reference
                     leg.trigger_id = str(result["dealId"])
+                    if leg.trigger_id not in self.state.cycle_trigger_ids:
+                        self.state.cycle_trigger_ids.append(leg.trigger_id)
                     self.telegram.send(
                         f"📌 Trigger установлен\nСторона: {leg.direction}\n"
                         f"Уровень: {leg.original_trigger_level}\nOrder ID: {leg.trigger_id}\n"
@@ -1254,9 +1305,7 @@ class Bot:
         self.state.scenario_nine_prior_losses = prior_losses
         self.state.save(self.cfg.state_file)
 
-        for order in self.capital.working_orders():
-            if self._order_epic(order) == self.cfg.epic:
-                self.capital.delete_working_order(str(self._order_data(order)["dealId"]))
+        trigger_ids = self._cancel_and_verify_scenario_nine_triggers()
 
         # Remove both sets of protection first. A leg may execute its old SL during this narrow
         # window; that is a normal scenario-9 close and its authoritative activity fill is used.
@@ -1326,11 +1375,16 @@ class Bot:
                     self.state.scenario_nine_short_fill = fill
                 self.state.save(self.cfg.state_file)
 
+        # A trigger can execute in the narrow interval between the cancellation snapshot and the
+        # broker processing DELETE.  Discover any resulting position by workingOrderId, close it
+        # immediately, and add only its actual loss to the scenario-9 total.
+        base_ids = {leg.deal_id for leg in legs if leg.deal_id}
+        extra_loss = self._close_scenario_nine_trigger_races(trigger_ids, base_ids)
         long_fill, short_fill = fills["BUY"], fills["SELL"]
         # Keep the pre-close loss snapshot even if another helper touched state while resolving
         # broker history; scenario 9 adds only the absolute gap between its two actual fills.
         self.state.realized_losses = prior_losses
-        self.strategy.complete_scenario_nine(long_fill, short_fill)
+        self.strategy.complete_scenario_nine(long_fill, short_fill, extra_loss)
         for leg in legs:
             leg.open = False
             leg.stop = leg.take_profit = None
@@ -1340,6 +1394,165 @@ class Bot:
         self.state.phase = "FILTER" if self.state.armed else "PAUSED"
         self.state.save(self.cfg.state_file)
         self.telegram.send(scenario_nine_result_text(self.state, long_fill, short_fill))
+
+    def _cancel_and_verify_scenario_nine_triggers(self) -> set[str]:
+        """Cancel all Gold working orders and verify broker-side absence before flattening."""
+        current_ids: set[str] = {
+            leg.trigger_id for leg in (self.state.long, self.state.short)
+            if leg and leg.trigger_id
+        }
+        owned_ids = set(self.state.cycle_trigger_ids) | current_ids
+        uncertain_ids = set(current_ids)
+        consecutive_empty = 0
+        for attempt in range(8):
+            orders = [
+                self._order_data(item) for item in self.capital.working_orders()
+                if self._order_epic(item) == self.cfg.epic
+                and str(self._order_data(item).get("dealId", "")) in owned_ids
+            ]
+            if not orders:
+                consecutive_empty += 1
+                if consecutive_empty >= 3:
+                    self.state.scenario_nine_triggers_verified = True
+                    self.state.save(self.cfg.state_file)
+                    self.telegram.send(
+                        "✅ Сценарий 9: trigger-ордера отменены\n"
+                        "Capital.com три последовательных раза подтвердил: "
+                        "working orders текущего цикла = 0."
+                    )
+                    return uncertain_ids
+            else:
+                consecutive_empty = 0
+                for order in orders:
+                    order_id = str(order.get("dealId", ""))
+                    if not order_id:
+                        continue
+                    owned_ids.add(order_id)
+                    if self.capital.delete_working_order(order_id):
+                        uncertain_ids.discard(order_id)
+                    else:
+                        uncertain_ids.add(order_id)
+            if attempt + 1 < 8:
+                time.sleep(0.2)
+        remaining = [
+            self._order_data(item) for item in self.capital.working_orders()
+            if self._order_epic(item) == self.cfg.epic
+            and str(self._order_data(item).get("dealId", "")) in owned_ids
+        ]
+        if remaining:
+            raise CapitalError(
+                "Сценарий 9: Capital.com не подтвердил отмену trigger: "
+                + ", ".join(str(item.get("dealId", "")) for item in remaining)
+            )
+        self.state.scenario_nine_triggers_verified = True
+        return uncertain_ids
+
+    def _close_scenario_nine_trigger_races(
+        self, trigger_ids: set[str], base_deal_ids: set[str]
+    ) -> Decimal:
+        """Close positions created by scenario-9 triggers that raced with cancellation."""
+        if not trigger_ids:
+            return D("0")
+        total_loss = self.state.scenario_nine_extra_loss
+        closed_ids: set[str] = {
+            str(item.get("deal_id", "")) for item in self.state.deal_history
+            if item.get("close_source") == "SCENARIO_9_TRIGGER_RACE"
+        }
+        resolved_trigger_ids: set[str] = set()
+        for attempt in range(120):
+            activity = self.capital.activity()
+            executed_ids = {
+                trigger_id for trigger_id in trigger_ids
+                if find_working_order_execution(activity, trigger_id) is not None
+            }
+            positions = [
+                self._position_data(item) for item in self.capital.positions()
+                if self._position_epic(item) == self.cfg.epic
+            ]
+            raced = [
+                position for position in positions
+                if str(position.get("workingOrderId", "")) in trigger_ids
+                and str(position.get("dealId", "")) not in base_deal_ids
+                and str(position.get("dealId", "")) not in closed_ids
+            ]
+            # The trigger-created position may open and close entirely between snapshots.
+            # Reconstruct that round trip from durable activity instead of waiting forever.
+            for trigger_id in executed_ids:
+                opened = find_trigger_open_event(activity, trigger_id)
+                if (
+                    opened is None or not opened.deal_id or opened.level is None
+                    or opened.deal_id in base_deal_ids or opened.deal_id in closed_ids
+                ):
+                    continue
+                if any(str(item.get("dealId", "")) == opened.deal_id for item in raced):
+                    continue
+                close_event = (
+                    find_close_event(activity, opened.deal_id, "SL")
+                    or find_close_event(activity, opened.deal_id, "TP")
+                )
+                if close_event is None or close_event.level is None:
+                    continue
+                direction = opened.direction
+                loss = (
+                    max(D("0"), opened.level - close_event.level)
+                    if direction == "BUY"
+                    else max(D("0"), close_event.level - opened.level)
+                )
+                total_loss += loss
+                self.state.scenario_nine_extra_loss = total_loss
+                closed_ids.add(opened.deal_id)
+                resolved_trigger_ids.add(trigger_id)
+                self.state.remember_close(
+                    opened.deal_id, "SCENARIO_9_TRIGGER_RACE", close_event.level
+                )
+                self.telegram.send(
+                    "⚡ Сценарий 9: полный trigger round-trip восстановлен из history\n"
+                    f"workingOrderId: {trigger_id}\nDeal ID: {opened.deal_id}\n"
+                    f"Сторона: {direction}\nВход: {opened.level}\n"
+                    f"Закрытие: {close_event.level}\nДополнительный убыток: {loss}"
+                )
+                self.state.save(self.cfg.state_file)
+            for position in raced:
+                deal_id = str(position["dealId"])
+                direction = str(position.get("direction", ""))
+                entry = D(str(position.get("level", "0")))
+                reference = self.capital.close_position(deal_id)
+                result = self.capital.wait_confirmation(reference)
+                if result.get("dealStatus") != "ACCEPTED" or result.get("level") is None:
+                    raise CapitalError(
+                        result.get("reason") or f"Сценарий 9: trigger-позиция {deal_id} не закрыта"
+                    )
+                close = D(str(result["level"]))
+                loss = max(D("0"), entry - close) if direction == "BUY" else max(
+                    D("0"), close - entry
+                )
+                total_loss += loss
+                self.state.scenario_nine_extra_loss = total_loss
+                closed_ids.add(deal_id)
+                resolved_trigger_ids.add(str(position.get("workingOrderId", "")))
+                self.state.remember_close(deal_id, "SCENARIO_9_TRIGGER_RACE", close)
+                self.telegram.send(
+                    "⚡ Сценарий 9: trigger исполнился во время отмены и закрыт MARKET\n"
+                    f"workingOrderId: {position.get('workingOrderId')}\nDeal ID: {deal_id}\n"
+                    f"Сторона: {direction}\nВход: {entry}\nЗакрытие: {close}\n"
+                    f"Дополнительный убыток: {loss}"
+                )
+            if raced:
+                self.state.save(self.cfg.state_file)
+            # Three quiet reads cover ordinary eventual consistency without delaying every
+            # scenario 9 for a full minute.
+            if not raced and not (executed_ids - resolved_trigger_ids) and attempt >= 2:
+                break
+            time.sleep(0.2)
+
+        remaining_orders = [
+            item for item in self.capital.working_orders()
+            if self._order_epic(item) == self.cfg.epic
+            and str(self._order_data(item).get("dealId", "")) in trigger_ids
+        ]
+        if remaining_orders:
+            raise CapitalError("Сценарий 9: после закрытия остались working orders Gold")
+        return total_loss
 
     def _wait_any_closing_fill(
         self, leg: Leg, attempts: int = 20, delay: float = 0.5
@@ -1357,7 +1570,12 @@ class Bot:
         if not args or args[0] not in {"long", "short"}:
             raise RuntimeError("Укажите long или short")
         leg = self.state.long if args[0] == "long" else self.state.short
-        if not leg or not leg.open:
+        if not leg:
+            raise RuntimeError("Указанная сторона отсутствует в состоянии цикла")
+        if command in {"/canceltrigger", "/settrigger"}:
+            if leg.open:
+                raise RuntimeError("Trigger можно изменить только для закрытой стороны")
+        elif not leg.open:
             raise RuntimeError("Указанная позиция не открыта")
         if command == "/canceltrigger":
             if leg.trigger_id:
@@ -1377,6 +1595,8 @@ class Bot:
                 raise CapitalError(result.get("reason") or "Ручной trigger отклонён")
             leg.trigger_reference = reference
             leg.trigger_id = str(result["dealId"])
+            if leg.trigger_id not in self.state.cycle_trigger_ids:
+                self.state.cycle_trigger_ids.append(leg.trigger_id)
         else:
             if command not in {"/removesl", "/removetp"} and len(args) != 2:
                 raise RuntimeError("Укажите цену")

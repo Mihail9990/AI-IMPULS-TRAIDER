@@ -233,7 +233,15 @@ class CapitalClient:
         result rather than crashing or assuming cancellation succeeded.
         """
         try:
-            self.request("DELETE", f"/workingorders/{deal_id}")
+            payload = self.request("DELETE", f"/workingorders/{deal_id}")
+            reference = payload.get("dealReference")
+            if reference:
+                confirmation = self.wait_confirmation(str(reference))
+                if confirmation.get("dealStatus") != "ACCEPTED":
+                    raise CapitalError(
+                        confirmation.get("reason")
+                        or f"Working order cancellation rejected: {deal_id}"
+                    )
             return True
         except CapitalError as exc:
             if "error.not-found.dealId" in str(exc):

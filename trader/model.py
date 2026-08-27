@@ -45,6 +45,8 @@ class CycleState:
     scenario_nine_prior_losses: Decimal = D("0")
     scenario_nine_close_gap: Decimal = D("0")
     scenario_nine_total_loss: Decimal = D("0")
+    scenario_nine_extra_loss: Decimal = D("0")
+    scenario_nine_triggers_verified: bool = False
     scenario_nine_long_fill: Decimal | None = None
     scenario_nine_short_fill: Decimal | None = None
     cycle_target_profit: Decimal = D("0")
@@ -57,6 +59,7 @@ class CycleState:
     completed_cycles: int = 0
     diagnostic_cleanup_cycle: int = 0
     processed_events: list[str] = field(default_factory=list)
+    cycle_trigger_ids: list[str] = field(default_factory=list)
     # Durable broker ledger.  Leg.deal_id necessarily changes after every trigger fill, while
     # Capital.com's deal-specific history remains addressable by every previous dealId.  Keep the
     # IDs instead of losing them when a Leg is reopened or the cycle is reset.
@@ -109,6 +112,7 @@ class CycleState:
         payload["scenario_nine_prior_losses"] = str(self.scenario_nine_prior_losses)
         payload["scenario_nine_close_gap"] = str(self.scenario_nine_close_gap)
         payload["scenario_nine_total_loss"] = str(self.scenario_nine_total_loss)
+        payload["scenario_nine_extra_loss"] = str(self.scenario_nine_extra_loss)
         payload["scenario_nine_long_fill"] = (
             str(self.scenario_nine_long_fill) if self.scenario_nine_long_fill is not None else None
         )
@@ -147,7 +151,8 @@ class CycleState:
         for name in (
             "entry_spread", "realized_losses", "gross_take_profit", "net_cycle_result",
             "scenario_nine_prior_losses", "scenario_nine_close_gap",
-            "scenario_nine_total_loss", "cycle_target_profit", "profit_override",
+            "scenario_nine_total_loss", "scenario_nine_extra_loss",
+            "cycle_target_profit", "profit_override",
             "scenario_nine_long_fill", "scenario_nine_short_fill",
         ):
             if name in {
@@ -165,11 +170,13 @@ class CycleState:
         self.recovery = self.entry_spread = D("0")
         self.realized_losses = self.gross_take_profit = self.net_cycle_result = D("0")
         self.scenario_nine_prior_losses = self.scenario_nine_close_gap = D("0")
-        self.scenario_nine_total_loss = self.cycle_target_profit = D("0")
+        self.scenario_nine_total_loss = self.scenario_nine_extra_loss = D("0")
+        self.scenario_nine_triggers_verified = False
         self.scenario_nine_long_fill = self.scenario_nine_short_fill = None
         self.long = self.short = None
         self.phase = "IDLE"
         self.processed_events.clear()
+        self.cycle_trigger_ids.clear()
 
 
 def stop_for(direction: str, entry: Decimal, distance: Decimal) -> Decimal:
