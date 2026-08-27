@@ -20,7 +20,7 @@ from trader.events import (
     normalize_events,
 )
 from trader.execution import ExecutionPolicy, is_crossed_level_rejection, trigger_level_passed
-from trader.model import CycleState, stop_slippage, trigger_slippage
+from trader.model import CycleState, Leg, stop_slippage, trigger_slippage
 from trader.reconcile import RemoteSnapshot
 from trader.reporting import cycle_result_text, pnl_text
 from trader.telegram import Telegram
@@ -1070,6 +1070,38 @@ class CapitalClientTest(unittest.TestCase):
 
 
 class BrokerInfrastructureTest(unittest.TestCase):
+    def test_close_wait_retries_deal_and_global_activity(self):
+        bot = Bot.__new__(Bot)
+        bot.state = CycleState()
+        leg = Leg("SELL", D("4010"), D("4010"), deal_id="sell-1", open=True)
+        bot.capital = Mock()
+        bot.capital.activity.side_effect = [
+            [], [], [], [],
+            [{
+                "dateUTC": "2026-08-27T12:00:01",
+                "dealId": "sell-1", "source": "TP", "type": "POSITION",
+                "status": "ACCEPTED", "details": {"level": 4008.7},
+            }],
+        ]
+
+        with patch("trader.app.time.sleep"):
+            fill = bot._wait_closing_fill(leg, "TP", attempts=4, delay=0)
+
+        self.assertEqual(fill, D("4008.7"))
+        self.assertEqual(bot.capital.activity.call_args_list[-1].args, ())
+        self.assertEqual(bot.state.deal_history[-1]["close_source"], "TP")
+
+    def test_position_protection_readback_404_is_deferred(self):
+        bot = Bot.__new__(Bot)
+        bot.capital = Mock()
+        bot.capital.position.side_effect = CapitalError(
+            'Capital API 404: {"errorCode":"error.not-found.dealId"}'
+        )
+
+        actual = bot._wait_position_protection("gone", D("9"), D("11"))
+
+        self.assertEqual(actual, (None, None))
+
     def test_transport_error_on_protection_is_resolved_by_readback(self):
         bot = Bot.__new__(Bot)
         bot.cfg = Settings()

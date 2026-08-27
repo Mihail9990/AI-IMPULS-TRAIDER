@@ -1844,7 +1844,16 @@ class Bot:
         """Read the position back until Capital.com exposes the requested exact stop level."""
         actual = None
         for attempt in range(attempts):
-            payload = self.capital.position(deal_id)
+            try:
+                payload = self.capital.position(deal_id)
+            except CapitalError as exc:
+                # A protected position can close between the successful PUT/confirmation and
+                # this read-back.  A 404 is therefore an exit signal to be reconciled from
+                # activity, not a loop error.
+                if "error.not-found.dealid" in str(exc).lower():
+                    LOG.info("Position %s closed before SL read-back", deal_id)
+                    return None
+                raise
             position = payload.get("position", payload)
             value = position.get("stopLevel")
             actual = D(str(value)) if value is not None else None
@@ -1865,7 +1874,13 @@ class Bot:
         """Read a position until the exact SL and TP are visible at the broker."""
         actual_stop = actual_tp = None
         for attempt in range(attempts):
-            payload = self.capital.position(deal_id)
+            try:
+                payload = self.capital.position(deal_id)
+            except CapitalError as exc:
+                if "error.not-found.dealid" in str(exc).lower():
+                    LOG.info("Position %s closed before protection read-back", deal_id)
+                    return None, None
+                raise
             position = payload.get("position", payload)
             stop_value = position.get("stopLevel")
             tp_value = position.get("profitLevel")
@@ -1919,13 +1934,53 @@ class Bot:
         return None
 
     def _wait_closing_fill(
-        self, leg: Leg, expected_source: str = "SL", attempts: int = 4, delay: float = 0.5
+        self, leg: Leg, expected_source: str = "SL", attempts: int = 16, delay: float = 0.5
     ) -> Decimal | None:
-        """Allow Capital.com's activity feed to catch up with a disappeared position."""
+        """Wait for an authoritative close event across both Capital activity views.
+
+        Capital.com can remove a deal from ``/positions`` before its deal-filtered activity is
+        indexed.  The unfiltered activity feed has also been observed to publish first.  Retry
+        both sources and tolerate transient GET failures; never infer SL/TP from absence alone.
+        """
         for attempt in range(attempts):
-            fill = self._closing_fill(leg, expected_source)
+            fill = None
+            try:
+                fill = self._closing_fill(leg, expected_source)
+            except CapitalError:
+                LOG.warning(
+                    "Deal activity unavailable while resolving close: dealId=%s source=%s "
+                    "attempt=%s/%s",
+                    leg.deal_id, expected_source, attempt + 1, attempts,
+                    exc_info=True,
+                )
             if fill is not None:
                 return fill
+            # Every fourth pass also consult the durable unfiltered feed. This catches the
+            # broker's indexing race without doubling API traffic on every 0.5-second poll.
+            if attempt % 4 == 3:
+                try:
+                    event = find_close_event(
+                        self.capital.activity(), leg.deal_id, expected_source
+                    )
+                    if event and event.level is not None:
+                        self.state.remember_deal(leg)
+                        self.state.remember_close(
+                            leg.deal_id, expected_source, event.level
+                        )
+                        LOG.info(
+                            "Close resolved from global activity: dealId=%s source=%s "
+                            "fill=%s attempt=%s/%s",
+                            leg.deal_id, expected_source, event.level,
+                            attempt + 1, attempts,
+                        )
+                        return event.level
+                except CapitalError:
+                    LOG.warning(
+                        "Global activity unavailable while resolving close: dealId=%s "
+                        "source=%s attempt=%s/%s",
+                        leg.deal_id, expected_source, attempt + 1, attempts,
+                        exc_info=True,
+                    )
             if attempt + 1 < attempts:
                 time.sleep(delay)
         return None
