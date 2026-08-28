@@ -1227,6 +1227,43 @@ class BrokerInfrastructureTest(unittest.TestCase):
         bot._complete_cycle.assert_called_once_with("BUY", D("4624.95"))
         bot.capital.activity.assert_called_once_with()
 
+    def test_survivor_tp_trigger_race_is_resolved_by_api_without_manual_mode(self):
+        bot = Bot.__new__(Bot)
+        bot.state = CycleState()
+        bot.cfg = Settings()
+        bot.strategy = Strategy(bot.cfg, bot.state)
+        bot.strategy.begin(D("4550.20"), D("4549.52"))
+        stopped = bot.strategy.stopped("BUY", D("4548.64"), "initial-buy-stop")
+        stopped.trigger_id = "trigger-buy"
+        survivor = bot.state.short
+        bot.capital = Mock()
+        bot.capital.activity.return_value = [
+            {"dateUTC": "2026-08-28T15:39:18", "dealId": "reopened-buy",
+             "source": "USER", "type": "POSITION", "status": "ACCEPTED",
+             "details": {"workingOrderId": "trigger-buy", "direction": "BUY",
+                         "level": 4550.26}},
+            {"dateUTC": "2026-08-28T15:39:19", "dealId": "reopened-buy",
+             "source": "SL", "type": "POSITION", "status": "ACCEPTED",
+             "details": {"level": 4548.64}},
+            {"dateUTC": "2026-08-28T15:39:38", "dealId": survivor.deal_id,
+             "source": "TP", "type": "POSITION", "status": "ACCEPTED",
+             "details": {"level": 4547.56}},
+        ]
+        bot._close_trigger_that_raced_with_tp = Mock(return_value=D("1.62"))
+        bot._complete_cycle = Mock()
+        bot.telegram = Mock()
+
+        with tempfile.NamedTemporaryFile() as state_file:
+            bot.cfg = Settings(state_file=state_file.name)
+            handled = bot._recover_trigger_round_trip_from_activity(survivor, stopped)
+
+        self.assertTrue(handled)
+        self.assertFalse(bot.state.manual)
+        self.assertEqual(bot.state.realized_losses, D("3.18"))
+        bot._close_trigger_that_raced_with_tp.assert_called_once_with(stopped)
+        bot._complete_cycle.assert_called_once_with("SELL", D("4547.56"))
+        self.assertIn("проверены через Capital.com API", bot.telegram.send.call_args.args[0])
+
     def test_two_fast_stops_create_trigger_for_the_first_stopped_survivor(self):
         bot = Bot.__new__(Bot)
         bot.cfg = Settings()

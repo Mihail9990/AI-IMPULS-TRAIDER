@@ -1036,10 +1036,37 @@ class Bot:
         survivor_tp = find_close_event(activity, survivor.deal_id, "TP")
         reopened_sl = find_close_event(activity, opened.deal_id, "SL")
         reopened_tp = find_close_event(activity, opened.deal_id, "TP")
-        if survivor_tp is not None:
-            self._manual(
-                "TP surviving-позиции и исполнение trigger произошли между опросами; "
-                "требуется проверка неожиданно открытой стороны"
+        if survivor_tp is not None and survivor_tp.level is not None:
+            # The API already gives us everything required to resolve this race. Ask positions
+            # and durable activity for the trigger-created deal; close it at market if it is
+            # still open, or use its recorded SL/TP fill if it completed between polls.
+            race_loss = self._close_trigger_that_raced_with_tp(stopped)
+            if race_loss is None:
+                LOG.info(
+                    "Survivor TP is confirmed but trigger result is still indexing: "
+                    "workingOrderId=%s; continuing reconciliation",
+                    stopped.trigger_id,
+                )
+                self.state.save(self.cfg.state_file)
+                return True
+            self.state.realized_losses += race_loss
+            stopped.trigger_id = stopped.trigger_reference = ""
+            self._complete_cycle(survivor.direction, survivor_tp.level)
+            self.state.armed = not self.state.paused
+            self.state.phase = "FILTER" if self.state.armed else "PAUSED"
+            self.state.save(self.cfg.state_file)
+            suffix = (
+                "Перехожу к фильтру следующего цикла."
+                if self.state.armed else "Следующий цикл ожидает /start."
+            )
+            self.telegram.send(
+                "✅ TP surviving-позиции и trigger-fill проверены через Capital.com API\n"
+                f"TP {survivor.direction}: {survivor_tp.level}\n"
+                f"Trigger {stopped.direction}: {opened.level}\n"
+                f"Дополнительный убыток trigger-позиции: {race_loss}\n{suffix}\n"
+                + cycle_result_text(
+                    self.state, survivor.direction, survivor_tp.level, self.cfg.size
+                )
             )
             return True
         if survivor_sl is None or survivor_sl.level is None:
