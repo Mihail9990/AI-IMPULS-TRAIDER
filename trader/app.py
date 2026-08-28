@@ -699,7 +699,21 @@ class Bot:
                 self._missing_exit_since = None
                 pass
             else:
-                tp_closes = [(leg, self._closing_fill(leg, "TP")) for leg in missing]
+                # Capital's deal-filtered activity endpoint can remain empty even though the
+                # mobile application already shows the close.  Fetch the global durable feed
+                # once and use it as a second index for both deal IDs.
+                try:
+                    global_activity = self.capital.activity()
+                except CapitalError:
+                    LOG.warning("Global activity unavailable while both legs are absent",
+                                exc_info=True)
+                    global_activity = []
+                if not isinstance(global_activity, list):
+                    global_activity = []
+                tp_closes = [
+                    (leg, self._closing_fill_any_index(leg, "TP", global_activity))
+                    for leg in missing
+                ]
                 confirmed = [(leg, fill) for leg, fill in tp_closes if fill is not None]
                 if len(confirmed) == 1:
                     self._missing_exit_since = None
@@ -707,7 +721,9 @@ class Bot:
                     for loser in missing:
                         if loser is winner:
                             continue
-                        stop_fill = self._closing_fill(loser, "SL")
+                        stop_fill = self._closing_fill_any_index(
+                            loser, "SL", global_activity
+                        )
                         if stop_fill is not None and loser.open:
                             self.strategy.stopped(
                                 loser.direction, stop_fill,
@@ -726,20 +742,27 @@ class Bot:
                 # both positions were already absent, BUY had source=SL, while SELL activity
                 # was still empty.  This is a synchronisation delay, not an ambiguous loss.
                 stop_confirmed = any(
-                    self._closing_fill(leg, "SL") is not None for leg in missing
+                    self._closing_fill_any_index(leg, "SL", global_activity) is not None
+                    for leg in missing
                 )
                 now = time.monotonic()
                 if stop_confirmed and self._missing_exit_since is None:
                     self._missing_exit_since = now
                 pending_for = now - self._missing_exit_since if self._missing_exit_since else 0
-                if stop_confirmed and pending_for < 60:
+                if stop_confirmed:
                     LOG.info(
                         "Both positions absent; SL confirmed and TP activity pending "
-                        "(elapsed=%.1fs/60s)", pending_for,
+                        "(elapsed=%.1fs; continuing durable reconciliation)", pending_for,
                     )
                     return
                 self._missing_exit_since = None
-                self._manual("Сверка: позиции отсутствуют после повторных проверок, TP не подтверждён")
+                # No protected close has been indexed yet. Staying in reconciliation is safer
+                # than a false manual takeover: no broker positions are open and no new order is
+                # submitted while the authoritative history catches up.
+                LOG.info(
+                    "Both positions absent and broker exit sources are not indexed yet; "
+                    "continuing durable reconciliation"
+                )
                 return
         if len(missing) != 1:
             return
@@ -1930,6 +1953,31 @@ class Bot:
         if event and event.level is not None:
             self.state.remember_deal(leg)
             self.state.remember_close(leg.deal_id, expected_source, event.level)
+            return event.level
+        return None
+
+    def _closing_fill_any_index(
+        self, leg: Leg, expected_source: str, global_activity: list[dict]
+    ) -> Decimal | None:
+        """Resolve a close from deal-specific history, then from the global activity index."""
+        try:
+            fill = self._closing_fill(leg, expected_source)
+        except CapitalError:
+            LOG.warning(
+                "Deal activity unavailable; falling back to global activity: dealId=%s source=%s",
+                leg.deal_id, expected_source, exc_info=True,
+            )
+            fill = None
+        if fill is not None:
+            return fill
+        event = find_close_event(global_activity, leg.deal_id, expected_source)
+        if event and event.level is not None:
+            self.state.remember_deal(leg)
+            self.state.remember_close(leg.deal_id, expected_source, event.level)
+            LOG.info(
+                "Close resolved from global activity: dealId=%s source=%s fill=%s",
+                leg.deal_id, expected_source, event.level,
+            )
             return event.level
         return None
 

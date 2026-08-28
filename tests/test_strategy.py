@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock, patch
 from zipfile import ZipFile
@@ -699,6 +700,54 @@ class EntryRetryTest(unittest.TestCase):
         with patch("trader.app.time.sleep"):
             bot._tick_cycle()
         bot._manual.assert_not_called()
+        self.assertEqual(bot.state.phase, "BOTH_OPEN")
+
+    def test_both_closes_are_recovered_from_global_activity_index(self):
+        bot = self.make_bot()
+        bot.state.long.deal_id = "long-1"
+        bot.state.short.deal_id = "short-1"
+        bot.capital.positions.return_value = []
+        global_events = [
+            {"dealId": "long-1", "source": "SL", "type": "POSITION",
+             "status": "ACCEPTED", "details": {"level": 4611.23}},
+            {"dealId": "short-1", "source": "TP", "type": "POSITION",
+             "status": "ACCEPTED", "details": {"level": 4610.49}},
+        ]
+        bot.capital.activity.side_effect = lambda deal_id="", **_: (
+            global_events if not deal_id else []
+        )
+
+        with patch("trader.app.time.sleep"):
+            bot._tick_cycle()
+
+        self.assertFalse(bot.state.active)
+        self.assertFalse(bot.state.manual)
+        closes = {
+            item["deal_id"]: item.get("close_source") for item in bot.state.deal_history
+        }
+        self.assertEqual(closes["long-1"], "SL")
+        self.assertEqual(closes["short-1"], "TP")
+
+    def test_confirmed_stop_waits_beyond_old_sixty_second_cutoff(self):
+        bot = self.make_bot()
+        bot.state.long.deal_id = "long-1"
+        bot.state.short.deal_id = "short-1"
+        bot.capital.positions.return_value = []
+        global_events = [
+            {"dealId": "long-1", "source": "SL", "type": "POSITION",
+             "status": "ACCEPTED", "details": {"level": 4611.23}},
+        ]
+        bot.capital.activity.side_effect = lambda deal_id="", **_: (
+            global_events if not deal_id else []
+        )
+        bot._missing_exit_since = time.monotonic() - 120
+        bot._manual = Mock()
+
+        with patch("trader.app.time.sleep"):
+            bot._tick_cycle()
+
+        bot._manual.assert_not_called()
+        self.assertTrue(bot.state.active)
         self.assertEqual(bot.state.phase, "BOTH_OPEN")
 
     def test_early_initial_stop_is_replayed_instead_of_manual_404(self):
