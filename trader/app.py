@@ -20,6 +20,7 @@ from .execution import ExecutionPolicy, is_crossed_level_rejection, trigger_leve
 from .model import CycleState, Leg, stop_for
 from .reconcile import RemoteSnapshot
 from .reporting import cycle_result_text, pnl_text, scenario_nine_result_text, status_text
+from .streaming import PriceWatch, QuoteStream
 from .telegram import Telegram
 
 
@@ -33,12 +34,20 @@ class Bot:
         self.state = CycleState.load(cfg.state_file)
         self.strategy = Strategy(cfg, self.state)
         self.capital = CapitalClient(cfg)
+        self.quotes = QuoteStream(
+            cfg.epic,
+            self.capital.streaming_tokens,
+            enabled=cfg.websocket_enabled,
+            stale_seconds=cfg.websocket_stale_seconds,
+        )
         self.telegram = Telegram(cfg.telegram_token, cfg.telegram_chat_id)
         self.telegram.offset = self.state.telegram_offset
         self.reconciled = False
         self._flat_checks = 0
         self._missing_exit_since: float | None = None
         self._initial_entry_close: tuple[Leg, str, Decimal] | None = None
+        self._stream_signal = False
+        self._last_cycle_rest_check = 0.0
         self.execution_policy = ExecutionPolicy()
         # Recover a cleanup that was missed because Pydroid stopped immediately after the tenth
         # completion, and migrate older state files whose marker remained at zero.
@@ -84,6 +93,8 @@ class Bot:
                 # already be waiting when Pydroid launches the process.
                 if not self.reconciled:
                     self.reconcile_startup()
+                if self.reconciled:
+                    self.quotes.start()
                 commands = self.telegram.commands()
                 # Persist consumed update IDs before a broker-mutating command can run. If
                 # Android kills Pydroid immediately after that command, Telegram will not replay
@@ -94,6 +105,7 @@ class Bot:
                 self.telegram.flush_pending()
                 if not self.state.manual:
                     self.tick()
+                self.quotes.watch(self._price_watches())
                 self.telegram.flush_pending()
                 self.state.save(self.cfg.state_file)
             except Exception as exc:
@@ -102,7 +114,27 @@ class Bot:
             # During an active cycle poll at least twice per second even when an older preserved
             # config still contains POLL_SECONDS=1.
             delay = min(self.cfg.poll_seconds, 0.5) if self.state.active else self.cfg.poll_seconds
-            time.sleep(delay)
+            # A streaming quote that reaches SL, TP or trigger wakes this wait immediately. The
+            # following loop still performs REST /positions and History checks before changing
+            # state. A timeout preserves the existing polling fallback while streaming is stale,
+            # disconnected or unavailable.
+            self._stream_signal = self.quotes.wait(delay)
+
+    def _price_watches(self) -> list[PriceWatch]:
+        if not self.state.active or self.state.manual:
+            return []
+        watches: list[PriceWatch] = []
+        for leg in (self.state.long, self.state.short):
+            if not leg:
+                continue
+            if leg.open:
+                if leg.stop is not None:
+                    watches.append(PriceWatch("SL", leg.direction, leg.stop))
+                if leg.take_profit is not None:
+                    watches.append(PriceWatch("TP", leg.direction, leg.take_profit))
+            elif leg.trigger_id:
+                watches.append(PriceWatch("TRIGGER", leg.direction, leg.original_trigger_level))
+        return watches
 
     def _process_commands(self, commands: list[str]) -> None:
         for command in commands:
@@ -256,7 +288,21 @@ class Bot:
         if self.state.armed and not self.state.active and not self.state.paused:
             self._tick_filter()
         elif self.state.active:
-            self._tick_cycle()
+            if self._should_check_cycle_rest():
+                self._tick_cycle()
+
+    def _should_check_cycle_rest(self) -> bool:
+        """Use stream crossings for immediacy, with periodic REST as an independent fallback."""
+        quotes = getattr(self, "quotes", None)
+        signalled = bool(getattr(self, "_stream_signal", False))
+        self._stream_signal = False
+        now = time.monotonic()
+        last_check = getattr(self, "_last_cycle_rest_check", 0.0)
+        fallback = getattr(self.cfg, "websocket_rest_fallback_seconds", 2.0)
+        if quotes is None or quotes.latest() is None or signalled or now - last_check >= fallback:
+            self._last_cycle_rest_check = now
+            return True
+        return False
 
     def _tick_filter(self) -> None:
         closed, current = self.capital.candle_ranges(self.cfg.epic, self.cfg.candle_minutes)

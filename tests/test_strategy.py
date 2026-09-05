@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import Mock, patch
 from zipfile import ZipFile
 import requests
+import websocket
 
 from pydroid_installer import copy_project, create_config, safe_extract
 from trader.app import Bot
@@ -24,6 +25,7 @@ from trader.execution import ExecutionPolicy, is_crossed_level_rejection, trigge
 from trader.model import CycleState, Leg, stop_slippage, trigger_slippage
 from trader.reconcile import RemoteSnapshot
 from trader.reporting import cycle_result_text, pnl_text
+from trader.streaming import PriceWatch, QuoteStream
 from trader.telegram import Telegram
 
 
@@ -1455,6 +1457,153 @@ class BrokerInfrastructureTest(unittest.TestCase):
         self.assertFalse(bot.state.manual)
         self.assertFalse(bot.state.active)
         self.assertEqual(bot.state.phase, "PAUSED")
+
+
+class StreamingQuoteTest(unittest.TestCase):
+    def test_directional_levels_wake_only_when_reached(self):
+        stream = QuoteStream("GOLD", lambda: ("cst", "token"))
+        stream.watch([
+            PriceWatch("SL", "BUY", D("99")),
+            PriceWatch("TP", "BUY", D("105")),
+            PriceWatch("TRIGGER", "SELL", D("98")),
+        ])
+
+        stream._message(json.dumps({
+            "destination": "quote",
+            "payload": {"epic": "GOLD", "bid": 100, "ofr": 100.2, "timestamp": 1},
+        }))
+        self.assertFalse(stream.wait(0))
+
+        stream._message(json.dumps({
+            "destination": "quote",
+            "payload": {"epic": "GOLD", "bid": 97.9, "ofr": 98.1, "timestamp": 2},
+        }))
+        self.assertTrue(stream.wait(0))
+        self.assertEqual(stream.latest().bid, D("97.9"))
+
+    def test_quotes_never_wake_for_other_epics_or_malformed_messages(self):
+        stream = QuoteStream("GOLD", lambda: ("cst", "token"))
+        stream.watch([PriceWatch("TP", "SELL", D("100"))])
+        stream._message("not-json")
+        stream._message(json.dumps({
+            "destination": "quote",
+            "payload": {"epic": "SILVER", "bid": 90, "ofr": 90.2, "timestamp": 1},
+        }))
+        self.assertFalse(stream.wait(0))
+        self.assertIsNone(stream.latest())
+
+    def test_out_of_order_quote_cannot_generate_a_false_crossing_after_reconnect(self):
+        stream = QuoteStream("GOLD", lambda: ("cst", "token"))
+        stream.watch([PriceWatch("SL", "BUY", D("99"))])
+        stream._message(json.dumps({
+            "destination": "quote", "status": "OK",
+            "payload": {"epic": "GOLD", "bid": 100, "ofr": 100.2, "timestamp": 20},
+        }))
+        stream._message(json.dumps({
+            "destination": "quote", "status": "OK",
+            "payload": {"epic": "GOLD", "bid": 98, "ofr": 98.2, "timestamp": 10},
+        }))
+
+        self.assertFalse(stream.wait(0))
+        self.assertEqual(stream.latest().bid, D("100"))
+
+    def test_rejected_stream_message_forces_reconnect(self):
+        stream = QuoteStream("GOLD", lambda: ("cst", "token"))
+        with self.assertRaises(ConnectionError):
+            stream._message(json.dumps({
+                "destination": "marketData.subscribe", "status": "ERROR", "payload": {},
+            }))
+
+    def test_disconnect_reconnects_and_resubscribes_with_current_tokens(self):
+        connections = []
+        tokens = iter([("cst-1", "security-1"), ("cst-2", "security-2")])
+
+        class Connection:
+            def __init__(self, disconnect):
+                self.disconnect = disconnect
+                self.sent = []
+
+            def send(self, message):
+                self.sent.append(json.loads(message))
+
+            def settimeout(self, timeout):
+                self.timeout = timeout
+
+            def recv(self):
+                if self.disconnect:
+                    self.disconnect = False
+                    raise ConnectionError("network lost")
+                raise websocket.WebSocketTimeoutException()
+
+            def close(self):
+                pass
+
+        def factory(url, timeout):
+            connection = Connection(disconnect=not connections)
+            connections.append(connection)
+            return connection
+
+        stream = QuoteStream(
+            "GOLD", lambda: next(tokens), connection_factory=factory, reconnect_initial=0.01
+        )
+        stream.start()
+        deadline = time.monotonic() + 1
+        while len(connections) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        stream.stop()
+
+        self.assertGreaterEqual(len(connections), 2)
+        self.assertEqual(connections[0].sent[0]["destination"], "marketData.subscribe")
+        self.assertEqual(connections[0].sent[0]["cst"], "cst-1")
+        self.assertEqual(connections[1].sent[0]["cst"], "cst-2")
+        self.assertNotIn("cst-1", str(connections[1].sent[0]))
+
+    def test_bot_watches_protected_positions_and_pending_triggers(self):
+        bot = Bot.__new__(Bot)
+        bot.state = CycleState(active=True)
+        bot.state.long = Leg("BUY", D("100"), D("101"), stop=D("99"), take_profit=D("105"))
+        bot.state.short = Leg(
+            "SELL", D("100"), D("100"), open=False, trigger_id="order-1"
+        )
+
+        watches = bot._price_watches()
+
+        self.assertEqual(set(watches), {
+            PriceWatch("SL", "BUY", D("99")),
+            PriceWatch("TP", "BUY", D("105")),
+            PriceWatch("TRIGGER", "SELL", D("100")),
+        })
+
+    def test_stream_signal_triggers_rest_confirmation_while_quiet_quotes_do_not(self):
+        bot = Bot.__new__(Bot)
+        bot.cfg = Settings(websocket_rest_fallback_seconds=10)
+        bot.state = CycleState(active=True)
+        bot.quotes = Mock()
+        bot.quotes.latest.return_value = object()
+        bot._tick_cycle = Mock()
+        bot._last_cycle_rest_check = time.monotonic()
+        bot._stream_signal = False
+
+        bot.tick()
+        bot._tick_cycle.assert_not_called()
+
+        bot._stream_signal = True
+        bot.tick()
+        bot._tick_cycle.assert_called_once()
+
+    def test_stale_stream_preserves_rest_polling_fallback(self):
+        bot = Bot.__new__(Bot)
+        bot.cfg = Settings(websocket_rest_fallback_seconds=10)
+        bot.state = CycleState(active=True)
+        bot.quotes = Mock()
+        bot.quotes.latest.return_value = None
+        bot._tick_cycle = Mock()
+        bot._last_cycle_rest_check = time.monotonic()
+        bot._stream_signal = False
+
+        bot.tick()
+
+        bot._tick_cycle.assert_called_once()
 
 
 class PydroidConfigTest(unittest.TestCase):

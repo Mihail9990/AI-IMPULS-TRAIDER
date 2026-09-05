@@ -44,6 +44,9 @@ class Settings:
     candle_minutes: int = 1
     max_scenarios: int = 9
     poll_seconds: float = 0.5
+    websocket_enabled: bool = True
+    websocket_stale_seconds: float = 5.0
+    websocket_rest_fallback_seconds: float = 2.0
     telegram_token: str = ""
     telegram_chat_id: str = ""
     dry_run: bool = True
@@ -66,6 +69,13 @@ class Settings:
             candle_minutes=int(_value(values, "ENTRY_CANDLE_MINUTES", 1)),
             max_scenarios=int(_value(values, "MAX_SCENARIOS", 9)),
             poll_seconds=float(_value(values, "POLL_SECONDS", 0.5)),
+            websocket_enabled=_bool(_value(values, "CAPITAL_WEBSOCKET_ENABLED", True)),
+            websocket_stale_seconds=float(
+                _value(values, "CAPITAL_WEBSOCKET_STALE_SECONDS", 5.0)
+            ),
+            websocket_rest_fallback_seconds=float(
+                _value(values, "CAPITAL_WEBSOCKET_REST_FALLBACK_SECONDS", 2.0)
+            ),
             telegram_token=str(_value(values, "TELEGRAM_BOT_TOKEN", "")),
             telegram_chat_id=str(_value(values, "TELEGRAM_CHAT_ID", "")),
             dry_run=_bool(_value(values, "BOT_DRY_RUN", True)),
@@ -90,5 +100,9 @@ class Settings:
             raise ValueError("This strategy requires exactly 9 scenarios")
         if self.poll_seconds < 0.25:
             raise ValueError("POLL_SECONDS cannot be lower than 0.25")
+        if self.websocket_stale_seconds <= 0:
+            raise ValueError("CAPITAL_WEBSOCKET_STALE_SECONDS must be positive")
+        if self.websocket_rest_fallback_seconds <= 0:
+            raise ValueError("CAPITAL_WEBSOCKET_REST_FALLBACK_SECONDS must be positive")
         if not self.dry_run and not all((self.api_key, self.identifier, self.password)):
             raise ValueError("Capital.com credentials are required when BOT_DRY_RUN=false")

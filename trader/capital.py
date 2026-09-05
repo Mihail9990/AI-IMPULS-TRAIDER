@@ -43,6 +43,13 @@ class CapitalClient:
         self.http.headers.update({"CST": response.headers["CST"], "X-SECURITY-TOKEN": response.headers["X-SECURITY-TOKEN"]})
         self.last_login = time.time()
 
+    def streaming_tokens(self) -> tuple[str, str]:
+        """Return the current REST session tokens used to authenticate WebSocket subscriptions."""
+        return (
+            str(self.http.headers.get("CST", "")),
+            str(self.http.headers.get("X-SECURITY-TOKEN", "")),
+        )
+
     def request(self, method: str, path: str, **kwargs) -> dict:
         if time.time() - self.last_login > 540:
             self.login()
