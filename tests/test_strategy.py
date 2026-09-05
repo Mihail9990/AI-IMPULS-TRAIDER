@@ -975,6 +975,30 @@ class EntryRetryTest(unittest.TestCase):
         self.assertEqual(bot.state.recovery, D("2.02"))
         bot.capital.open_position.assert_called_once()
 
+    def test_capital_stop_price_rejection_reopens_passed_trigger_with_market(self):
+        bot = self.make_bot()
+        stopped = bot.strategy.stopped("SELL", D("4011.10"))
+        bot.capital.working_orders.return_value = []
+        bot.capital.working_stop.side_effect = CapitalError(
+            'Capital API 400: {"errorCode":"error.validation.stop.price"}'
+        )
+        bot.capital.quote.return_value = (D("4009.70"), D("4009.90"))
+        bot.capital.open_position.return_value = "market-ref"
+        bot.capital.update_position.return_value = "update-ref"
+        bot.capital.wait_confirmation.side_effect = [
+            {"dealStatus": "ACCEPTED", "dealId": "short-2", "level": 4009.68},
+            {"dealStatus": "ACCEPTED"},
+            {"dealStatus": "ACCEPTED"},
+        ]
+
+        bot._create_trigger(stopped)
+
+        self.assertFalse(bot.state.manual)
+        self.assertEqual(bot.state.scenario, 2)
+        self.assertEqual(bot.state.short.current_entry, D("4009.68"))
+        bot.capital.working_stop.assert_called_once()
+        bot.capital.open_position.assert_called_once()
+
     def test_startup_replays_unambiguous_stop_and_creates_trigger(self):
         bot = self.make_bot()
         bot.reconciled = False
@@ -1316,6 +1340,7 @@ class BrokerInfrastructureTest(unittest.TestCase):
         self.assertTrue(trigger_level_passed("SELL", D("10"), D("9.9"), D("10.1")))
         self.assertFalse(trigger_level_passed("BUY", D("10.2"), D("9.9"), D("10.1")))
         self.assertTrue(is_crossed_level_rejection("error.invalid.level: already crossed"))
+        self.assertTrue(is_crossed_level_rejection("error.validation.stop.price"))
         self.assertFalse(is_crossed_level_rejection("insufficient funds"))
 
     def test_remote_snapshot_accepts_position_linked_to_trigger(self):

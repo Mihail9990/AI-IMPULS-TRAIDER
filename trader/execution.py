@@ -23,4 +23,5 @@ def is_crossed_level_rejection(reason: str) -> bool:
         "wrong side of market",
         "market level",
         "invalid.level",
+        "error.validation.stop.price",
     ))
