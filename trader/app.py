@@ -75,10 +75,7 @@ class Bot:
             )
 
     def run(self) -> None:
-        if self.telegram.offset == 0:
-            self.telegram.discard_pending()
-            self.state.telegram_offset = self.telegram.offset
-            self.state.save(self.cfg.state_file)
+        self.telegram.start()
         self.telegram.install_commands()
         self.telegram.send(
             f"🤖 Бот запущен\nРежим: {'DEMO' if self.cfg.demo else 'REAL'}\n"
@@ -102,11 +99,9 @@ class Bot:
                 self.state.telegram_offset = self.telegram.offset
                 self.state.save(self.cfg.state_file)
                 self._process_commands(commands)
-                self.telegram.flush_pending()
                 if not self.state.manual:
                     self.tick()
                 self.quotes.watch(self._price_watches())
-                self.telegram.flush_pending()
                 self.state.save(self.cfg.state_file)
             except Exception as exc:
                 LOG.exception("Loop error")
@@ -299,8 +294,14 @@ class Bot:
         now = time.monotonic()
         last_check = getattr(self, "_last_cycle_rest_check", 0.0)
         fallback = getattr(self.cfg, "websocket_rest_fallback_seconds", 2.0)
-        if quotes is None or quotes.latest() is None or signalled or now - last_check >= fallback:
+        stream_available = bool(quotes is not None and quotes.connected and quotes.latest() is not None)
+        if not stream_available or signalled or now - last_check >= fallback:
             self._last_cycle_rest_check = now
+            if quotes is not None:
+                reason = quotes.consume_signal() if signalled else (
+                    "stream_unavailable" if not stream_available else "periodic_fallback"
+                )
+                quotes.log_rest_check(reason)
             return True
         return False
 
@@ -1777,7 +1778,8 @@ class Bot:
             raise RuntimeError(f"Диагностический файл ещё не создан: {path}")
         if self.telegram.send_document(str(path)):
             self.telegram.send(
-                f"✅ Диагностический файл отправлен: {path.name}, размер {path.stat().st_size} байт"
+                f"✅ Диагностический файл поставлен в очередь отправки: "
+                f"{path.name}, размер {path.stat().st_size} байт"
             )
         else:
             LOG.warning("Diagnostic file was not delivered to Telegram: %s", path)

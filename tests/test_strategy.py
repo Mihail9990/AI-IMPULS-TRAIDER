@@ -1516,7 +1516,14 @@ class StreamingQuoteTest(unittest.TestCase):
 
     def test_disconnect_reconnects_and_resubscribes_with_current_tokens(self):
         connections = []
-        tokens = iter([("cst-1", "security-1"), ("cst-2", "security-2")])
+        tokens = [("cst-1", "security-1", 1), ("cst-2", "security-2", 2)]
+        token_calls = 0
+
+        def current_tokens():
+            nonlocal token_calls
+            value = tokens[min(token_calls, 1)]
+            token_calls += 1
+            return value
 
         class Connection:
             def __init__(self, disconnect):
@@ -1533,7 +1540,12 @@ class StreamingQuoteTest(unittest.TestCase):
                 if self.disconnect:
                     self.disconnect = False
                     raise ConnectionError("network lost")
-                raise websocket.WebSocketTimeoutException()
+                subscription = self.sent[0]
+                return json.dumps({
+                    "status": "OK", "destination": "marketData.subscribe",
+                    "correlationId": subscription["correlationId"],
+                    "payload": {"subscriptions": {"GOLD": "PROCESSED"}},
+                })
 
             def close(self):
                 pass
@@ -1544,7 +1556,8 @@ class StreamingQuoteTest(unittest.TestCase):
             return connection
 
         stream = QuoteStream(
-            "GOLD", lambda: next(tokens), connection_factory=factory, reconnect_initial=0.01
+            "GOLD", current_tokens,
+            connection_factory=factory, reconnect_initial=0.01
         )
         stream.start()
         deadline = time.monotonic() + 1
@@ -1557,6 +1570,23 @@ class StreamingQuoteTest(unittest.TestCase):
         self.assertEqual(connections[0].sent[0]["cst"], "cst-1")
         self.assertEqual(connections[1].sent[0]["cst"], "cst-2")
         self.assertNotIn("cst-1", str(connections[1].sent[0]))
+
+    def test_subscription_requires_processed_acknowledgement(self):
+        stream = QuoteStream("GOLD", lambda: ("cst", "token", 1))
+        connection = Mock()
+        connection.recv.return_value = json.dumps({
+            "status": "OK", "destination": "marketData.subscribe", "correlationId": "sub-1",
+            "payload": {"subscriptions": {"GOLD": "REJECTED"}},
+        })
+        with self.assertRaisesRegex(ConnectionError, "not processed"):
+            stream._await_subscription(connection, "sub-1")
+
+    def test_missing_quote_timestamp_is_ignored(self):
+        stream = QuoteStream("GOLD", lambda: ("cst", "token"))
+        stream._message(json.dumps({
+            "destination": "quote", "payload": {"epic": "GOLD", "bid": 100, "ofr": 101},
+        }))
+        self.assertIsNone(stream.latest())
 
     def test_bot_watches_protected_positions_and_pending_triggers(self):
         bot = Bot.__new__(Bot)
@@ -1669,80 +1699,64 @@ class PydroidConfigTest(unittest.TestCase):
             self.assertEqual((target / "bot_state.json").read_text(), '{"scenario":4}')
             self.assertEqual((target / "trader/app.py").read_text(), "NEW = True\n")
 
-    def test_telegram_discards_commands_pending_before_process_start(self):
+    def test_telegram_queue_calls_never_perform_network_io(self):
         telegram = Telegram("token", "123")
-        response = Mock()
-        response.json.return_value = {"result": [{"update_id": 77}]}
-        with patch("trader.telegram.requests.get", return_value=response) as get:
-            telegram.discard_pending()
-        self.assertEqual(telegram.offset, 78)
-        self.assertEqual(get.call_args.kwargs["params"]["offset"], -1)
-
-    def test_telegram_installs_command_menu_and_keyboard(self):
-        telegram = Telegram("token", "123")
-        response = Mock()
-        with patch("trader.telegram.requests.post", return_value=response) as post:
-            telegram.install_commands()
+        with patch("trader.telegram.requests.get") as get, patch("trader.telegram.requests.post") as post:
             telegram.send("ready", show_menu=True)
-            telegram.flush_pending()
-        self.assertTrue(any(call.args[0].endswith("/setMyCommands") for call in post.call_args_list))
-        send_payload = post.call_args_list[-1].kwargs["json"]
-        self.assertIn("reply_markup", send_payload)
-        self.assertEqual(send_payload["reply_markup"]["keyboard"][0][0]["text"], "/status")
-        self.assertFalse(send_payload["reply_markup"]["is_persistent"])
-
-    def test_telegram_keyboard_can_be_removed_and_restored(self):
-        telegram = Telegram("token", "123")
-        response = Mock()
-        with patch("trader.telegram.requests.post", return_value=response) as post:
-            telegram.send("hide", hide_menu=True)
-            telegram.send("show", show_menu=True)
-            telegram.flush_pending()
-        hide_payload = post.call_args_list[-2].kwargs["json"]
-        show_payload = post.call_args_list[-1].kwargs["json"]
-        self.assertEqual(hide_payload["reply_markup"], {"remove_keyboard": True})
-        self.assertIn("keyboard", show_payload["reply_markup"])
-
-    def test_telegram_timeout_does_not_interrupt_trading_loop(self):
-        telegram = Telegram("token", "123")
-        with patch("trader.telegram.requests.get",
-                   side_effect=requests.ReadTimeout("temporary network timeout")):
+            telegram.send_document(__file__)
+            telegram.install_commands()
             self.assertEqual(telegram.commands(), [])
-        telegram.send_unavailable_until = 0
-        with patch("trader.telegram.requests.post",
-                   side_effect=requests.ReadTimeout("temporary network timeout")):
-            self.assertTrue(telegram.send("important report"))
-            self.assertEqual(telegram.flush_pending(), 0)
-        self.assertEqual(telegram.pending_reports, 1)
+        get.assert_not_called()
+        post.assert_not_called()
+        self.assertEqual(telegram.pending_reports, 3)
 
-    def test_poll_timeout_does_not_suppress_reports(self):
+    def test_telegram_sender_timeout_cannot_block_trading_thread(self):
         telegram = Telegram("token", "123")
-        with patch("trader.telegram.requests.get",
-                   side_effect=requests.ReadTimeout("poll timeout")):
-            self.assertEqual(telegram.commands(), [])
+        entered = __import__("threading").Event()
+        release = __import__("threading").Event()
         response = Mock()
-        with patch("trader.telegram.requests.post", return_value=response) as post:
-            self.assertTrue(telegram.send("cycle report"))
-            self.assertEqual(telegram.flush_pending(), 1)
-        post.assert_called_once()
+
+        def slow_post(*args, **kwargs):
+            entered.set()
+            release.wait(1)
+            return response
+
+        with patch("trader.telegram.requests.get", side_effect=requests.ReadTimeout("offline")), \
+                patch("trader.telegram.requests.post", side_effect=slow_post):
+            telegram.start()
+            started = time.monotonic()
+            self.assertTrue(telegram.send("important"))
+            self.assertLess(time.monotonic() - started, 0.05)
+            self.assertTrue(entered.wait(0.5))
+            self.assertEqual(telegram.commands(), [])
+            release.set()
+            deadline = time.monotonic() + 1
+            while telegram.pending_reports and time.monotonic() < deadline:
+                time.sleep(0.01)
+            telegram.stop()
         self.assertEqual(telegram.pending_reports, 0)
 
-    def test_failed_report_is_retried_in_order(self):
+    def test_telegram_poll_worker_discards_old_then_queues_new_command(self):
         telegram = Telegram("token", "123")
-        telegram.send("first report")
-        with patch("trader.telegram.requests.post",
-                   side_effect=requests.ReadTimeout("temporary network timeout")):
-            self.assertEqual(telegram.flush_pending(), 0)
-        telegram.send("second report")
-        self.assertEqual(telegram.pending_reports, 2)
-        telegram.send_unavailable_until = 0
-        response = Mock()
-        with patch("trader.telegram.requests.post", return_value=response) as post:
-            self.assertEqual(telegram.flush_pending(), 2)
-        self.assertEqual(
-            [call.kwargs["json"]["text"] for call in post.call_args_list],
-            ["first report", "second report"],
-        )
+        old = Mock()
+        old.json.return_value = {"result": [{"update_id": 77, "message": {
+            "chat": {"id": 123}, "text": "/old"}}]}
+        new = Mock()
+        new.json.return_value = {"result": [{"update_id": 78, "message": {
+            "chat": {"id": 123}, "text": "/status"}}]}
+        empty = Mock()
+        empty.json.return_value = {"result": []}
+        with patch("trader.telegram.requests.get", side_effect=[old, new, empty, empty, empty]), \
+                patch("trader.telegram.requests.post", return_value=Mock()):
+            telegram.start()
+            deadline = time.monotonic() + 1
+            commands = []
+            while not commands and time.monotonic() < deadline:
+                commands = telegram.commands()
+                time.sleep(0.01)
+            telegram.stop()
+        self.assertEqual(commands, ["/status"])
+        self.assertEqual(telegram.offset, 79)
 
 
 if __name__ == "__main__":

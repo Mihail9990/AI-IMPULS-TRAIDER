@@ -32,6 +32,7 @@ class CapitalClient:
         self.http = requests.Session()
         self.http.headers.update({"X-CAP-API-KEY": settings.api_key, "Content-Type": "application/json"})
         self.last_login = 0.0
+        self.session_generation = 0
         self._request_ids = itertools.count(1)
 
     def login(self) -> None:
@@ -42,12 +43,15 @@ class CapitalClient:
         self._check(response)
         self.http.headers.update({"CST": response.headers["CST"], "X-SECURITY-TOKEN": response.headers["X-SECURITY-TOKEN"]})
         self.last_login = time.time()
+        self.session_generation += 1
+        LOG.info("CAPITAL SESSION ready generation=%s", self.session_generation)
 
-    def streaming_tokens(self) -> tuple[str, str]:
+    def streaming_tokens(self) -> tuple[str, str, int]:
         """Return the current REST session tokens used to authenticate WebSocket subscriptions."""
         return (
             str(self.http.headers.get("CST", "")),
             str(self.http.headers.get("X-SECURITY-TOKEN", "")),
+            self.session_generation,
         )
 
     def request(self, method: str, path: str, **kwargs) -> dict:
