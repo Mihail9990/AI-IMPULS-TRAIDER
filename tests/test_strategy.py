@@ -1872,7 +1872,7 @@ class PydroidConfigTest(unittest.TestCase):
             leftovers = list(Path(directory).glob("telegram-*.gz"))
         self.assertEqual(attempts, 2)
         self.assertTrue(all(size < original_size for _, size in uploads))
-        self.assertEqual(timeouts, [(30, 180), (30, 180)])
+        self.assertEqual(timeouts, [180, 180])
         self.assertEqual(leftovers, [])
 
     def test_telegram_failure_policy_honours_retry_after_and_stops_bad_requests(self):
@@ -1888,6 +1888,13 @@ class PydroidConfigTest(unittest.TestCase):
         self.assertEqual(telegram._failure_policy(bad, 1, document=True)[0], True)
         self.assertEqual(
             telegram._failure_policy(requests.Timeout(), 5, document=True)[0], True
+        )
+
+        header_response = Mock(status_code=429, headers={"Retry-After": "23"})
+        header_response.json.return_value = {"parameters": {}}
+        header_limited = requests.HTTPError("rate limited", response=header_response)
+        self.assertEqual(
+            telegram._failure_policy(header_limited, 1, document=True), (False, 23)
         )
 
     def test_telegram_error_diagnostics_redact_bot_token(self):

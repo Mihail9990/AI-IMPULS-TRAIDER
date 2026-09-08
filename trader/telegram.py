@@ -179,7 +179,9 @@ class Telegram:
                 # to hold the requested long poll (proxy/server peculiarities on Android).
                 delay = 0.1
             except Exception as exc:
-                LOG.warning("TELEGRAM poll unavailable; retry in 5s: %s", exc)
+                LOG.warning(
+                    "TELEGRAM poll unavailable; retry in 5s: %s", self._safe_error(exc)
+                )
                 delay = 5.0
 
     def _send_loop(self) -> None:
@@ -308,7 +310,7 @@ class Telegram:
             response = exc.response
             try:
                 recommended = float(response.json().get("parameters", {}).get("retry_after", 0))
-            except (TypeError, ValueError, requests.RequestException):
+            except (AttributeError, TypeError, ValueError, requests.RequestException):
                 recommended = 0
             if not recommended:
                 try:
@@ -347,6 +349,11 @@ class Telegram:
         with Path(item.upload_path).open("rb") as document:
             response = requests.post(
                 self.base + "/sendDocument", data={"chat_id": self.chat_id},
-                files={"document": document}, timeout=(30, 180),
+                # During multipart upload urllib3 still uses the socket's connect timeout for
+                # writes. A tuple such as (5, 180) therefore aborts a slow Android upload after
+                # roughly five seconds before Telegram can send a response. One generous socket
+                # timeout covers connect, request-body writes and response reads. This worker is
+                # independent from both trading and ordinary Telegram messages.
+                files={"document": document}, timeout=180,
             )
         response.raise_for_status()
