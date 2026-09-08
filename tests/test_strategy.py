@@ -8,7 +8,6 @@ import unittest
 from unittest.mock import Mock, patch
 from zipfile import ZipFile
 import requests
-import websocket
 
 from pydroid_installer import copy_project, create_config, safe_extract
 from trader.app import Bot
@@ -1031,6 +1030,28 @@ class EntryRetryTest(unittest.TestCase):
 
 
 class CapitalClientTest(unittest.TestCase):
+    def test_parallel_session_refresh_is_performed_once(self):
+        client = CapitalClient(Settings(api_key="key", identifier="id", password="password"))
+        response = Mock(ok=True, status_code=200, content=b"{}")
+        response.json.return_value = {}
+        response.headers = {"CST": "cst", "X-SECURITY-TOKEN": "security"}
+        client.http.post = Mock(return_value=response)
+        barrier = __import__("threading").Barrier(3)
+
+        def refresh():
+            barrier.wait()
+            client.login()
+
+        threads = [__import__("threading").Thread(target=refresh) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(1)
+
+        self.assertEqual(client.http.post.call_count, 1)
+        self.assertEqual(client.session_generation, 1)
+
     def test_working_order_cancellation_waits_for_accepted_confirmation(self):
         client = CapitalClient.__new__(CapitalClient)
         client.request = Mock(return_value={"dealReference": "cancel-ref"})
@@ -1394,17 +1415,29 @@ class BrokerInfrastructureTest(unittest.TestCase):
         self.assertEqual(bot.state.long.trigger_id, "manual-order")
         self.assertIn("manual-order", bot.state.cycle_trigger_ids)
         bot.capital.working_stop.assert_called_once_with(
-            "GOLD", "BUY", D("0.1"), D("4020.50")
+            "GOLD", "BUY", D("0.1"), D("4020.50"), D("4019.50"), D("4012.60")
         )
+
+    def test_manual_trigger_is_rejected_after_completed_cycle(self):
+        bot = EntryRetryTest().make_bot()
+        bot.state.active = False
+        bot.state.long.open = False
+        with self.assertRaisesRegex(RuntimeError, "активного цикла"):
+            bot.command("/settrigger long 4020.50")
+        bot.capital.working_stop.assert_not_called()
 
     def test_recover_rebinds_permanent_ids_and_reapplies_protection(self):
         bot = EntryRetryTest().make_bot()
         bot.state.manual = True
         bot.state.paused = True
+        bot.state.long.deal_reference = "accepted-buy-reference"
+        bot.state.short.deal_reference = "accepted-sell-reference"
         bot.capital.positions.return_value = [
-            {"position": {"dealId": "permanent-buy", "direction": "BUY", "level": 4010.30},
+            {"position": {"dealId": "permanent-buy", "dealReference": "accepted-buy-reference",
+                          "direction": "BUY", "level": 4010.30},
              "market": {"epic": "GOLD"}},
-            {"position": {"dealId": "permanent-sell", "direction": "SELL", "level": 4010.00},
+            {"position": {"dealId": "permanent-sell", "dealReference": "accepted-sell-reference",
+                          "direction": "SELL", "level": 4010.00},
              "market": {"epic": "GOLD"}},
         ]
         bot.capital.update_position.side_effect = ["update-buy", "update-sell"]
@@ -1419,6 +1452,19 @@ class BrokerInfrastructureTest(unittest.TestCase):
         self.assertEqual(bot.state.long.deal_id, "permanent-buy")
         self.assertEqual(bot.state.short.deal_id, "permanent-sell")
         self.assertEqual(bot.capital.update_position.call_count, 2)
+
+    def test_recover_refuses_unrelated_positions_with_matching_directions(self):
+        bot = EntryRetryTest().make_bot()
+        bot.state.manual = True
+        bot.capital.positions.return_value = [
+            {"position": {"dealId": "foreign-buy", "direction": "BUY", "level": 4010},
+             "market": {"epic": "GOLD"}},
+            {"position": {"dealId": "foreign-sell", "direction": "SELL", "level": 4009},
+             "market": {"epic": "GOLD"}},
+        ]
+        with self.assertRaisesRegex(RuntimeError, "не связана"):
+            bot.command("/recover")
+        bot.capital.update_position.assert_not_called()
 
     def test_automode_clears_stale_manual_cycle_when_broker_is_empty(self):
         bot = EntryRetryTest().make_bot()
@@ -1757,6 +1803,101 @@ class PydroidConfigTest(unittest.TestCase):
             telegram.stop()
         self.assertEqual(commands, ["/status"])
         self.assertEqual(telegram.offset, 79)
+
+    def test_slow_failed_document_does_not_block_normal_message(self):
+        telegram = Telegram("secret-token", "123")
+        upload_started = __import__("threading").Event()
+        release_upload = __import__("threading").Event()
+        message_delivered = __import__("threading").Event()
+        response = Mock()
+
+        def post(url, **kwargs):
+            if url.endswith("/sendDocument"):
+                upload_started.set()
+                release_upload.wait(1)
+                raise requests.Timeout(f"write timeout {url}")
+            if url.endswith("/sendMessage"):
+                message_delivered.set()
+            return response
+
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "bot_diagnostics.log"
+            log.write_text("quote event\n" * 10000, encoding="utf-8")
+            with patch("trader.telegram.requests.get", side_effect=requests.ReadTimeout("offline")), \
+                    patch("trader.telegram.requests.post", side_effect=post), \
+                    patch.object(telegram, "_failure_policy", return_value=(True, 0)):
+                telegram.start()
+                telegram.send_document(str(log), compress=True)
+                self.assertTrue(upload_started.wait(1))
+                telegram.send("ordinary report")
+                self.assertTrue(message_delivered.wait(0.5))
+                release_upload.set()
+                deadline = time.monotonic() + 1
+                while telegram.pending_reports and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                telegram.stop()
+        self.assertEqual(telegram.pending_reports, 0)
+
+    def test_compressed_document_recovers_after_transient_write_timeout(self):
+        telegram = Telegram("token", "123")
+        attempts = 0
+        uploads = []
+        timeouts = []
+        response = Mock()
+
+        def post(url, **kwargs):
+            nonlocal attempts
+            if url.endswith("/sendDocument"):
+                attempts += 1
+                document = kwargs["files"]["document"]
+                uploads.append((Path(document.name).suffix, Path(document.name).stat().st_size))
+                timeouts.append(kwargs["timeout"])
+                if attempts == 1:
+                    raise requests.Timeout("temporary upload failure")
+            return response
+
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "bot_diagnostics.log"
+            log.write_text("same diagnostic line\n" * 50000, encoding="utf-8")
+            original_size = log.stat().st_size
+            with patch("trader.telegram.requests.get", side_effect=requests.ReadTimeout("offline")), \
+                    patch("trader.telegram.requests.post", side_effect=post), \
+                    patch.object(telegram, "_failure_policy", return_value=(False, 0.01)):
+                telegram.start()
+                telegram.send_document(str(log), compress=True)
+                deadline = time.monotonic() + 2
+                while (attempts < 2 or telegram.pending_reports) and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                telegram.stop()
+            leftovers = list(Path(directory).glob("telegram-*.gz"))
+        self.assertEqual(attempts, 2)
+        self.assertTrue(all(size < original_size for _, size in uploads))
+        self.assertEqual(timeouts, [(30, 180), (30, 180)])
+        self.assertEqual(leftovers, [])
+
+    def test_telegram_failure_policy_honours_retry_after_and_stops_bad_requests(self):
+        telegram = Telegram("token", "123")
+        limited_response = Mock(status_code=429, headers={})
+        limited_response.json.return_value = {"parameters": {"retry_after": 17}}
+        limited = requests.HTTPError("rate limited", response=limited_response)
+        self.assertEqual(telegram._failure_policy(limited, 1, document=True), (False, 17))
+        self.assertEqual(telegram._failure_policy(limited, 5, document=True), (True, 17))
+
+        bad_response = Mock(status_code=400, headers={})
+        bad = requests.HTTPError("bad document", response=bad_response)
+        self.assertEqual(telegram._failure_policy(bad, 1, document=True)[0], True)
+        self.assertEqual(
+            telegram._failure_policy(requests.Timeout(), 5, document=True)[0], True
+        )
+
+    def test_telegram_error_diagnostics_redact_bot_token(self):
+        telegram = Telegram("very-secret-token", "123")
+        error = requests.RequestException(
+            "https://api.telegram.org/botvery-secret-token/sendDocument failed"
+        )
+        safe = telegram._safe_error(error)
+        self.assertNotIn("very-secret-token", safe)
+        self.assertIn("<redacted>", safe)
 
 
 if __name__ == "__main__":

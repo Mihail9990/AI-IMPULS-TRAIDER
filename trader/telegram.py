@@ -3,7 +3,10 @@ from __future__ import annotations
 import logging
 from collections import deque
 from dataclasses import dataclass
+import gzip
 from pathlib import Path
+import shutil
+import tempfile
 import threading
 import time
 import requests
@@ -12,11 +15,15 @@ import requests
 LOG = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
+@dataclass
 class _Delivery:
     kind: str
     value: str = ""
     menu_action: str = "none"
+    compress: bool = False
+    attempts: int = 0
+    upload_path: str = ""
+    delete_upload: bool = False
 
 
 class Telegram:
@@ -54,12 +61,15 @@ class Telegram:
         self.offset = 0
         self.base = f"https://api.telegram.org/bot{token}" if token else ""
         self._lock = threading.Lock()
-        self._wake_sender = threading.Event()
+        self._wake_messages = threading.Event()
+        self._wake_documents = threading.Event()
         self._stop = threading.Event()
-        self._outbox: deque[_Delivery] = deque()
+        self._messages: deque[_Delivery] = deque()
+        self._documents: deque[_Delivery] = deque()
         self._commands: deque[str] = deque()
         self._poll_thread: threading.Thread | None = None
         self._send_thread: threading.Thread | None = None
+        self._document_thread: threading.Thread | None = None
         self._started = False
         self._startup_discard = self.offset == 0
 
@@ -79,14 +89,19 @@ class Telegram:
         self._send_thread = threading.Thread(
             target=self._send_loop, name="telegram-send", daemon=True
         )
+        self._document_thread = threading.Thread(
+            target=self._document_loop, name="telegram-document", daemon=True
+        )
         self._poll_thread.start()
         self._send_thread.start()
+        self._document_thread.start()
         LOG.info("TELEGRAM workers started offset=%s", self.offset)
 
     def stop(self, timeout: float = 2.0) -> None:
         self._stop.set()
-        self._wake_sender.set()
-        for thread in (self._poll_thread, self._send_thread):
+        self._wake_messages.set()
+        self._wake_documents.set()
+        for thread in (self._poll_thread, self._send_thread, self._document_thread):
             if thread:
                 thread.join(timeout)
 
@@ -98,12 +113,12 @@ class Telegram:
         self._enqueue(_Delivery("message", text, action))
         return True
 
-    def send_document(self, path: str) -> bool:
+    def send_document(self, path: str, *, compress: bool = False) -> bool:
         file = Path(path)
         LOG.info("TELEGRAM QUEUE DOCUMENT path=%s size=%s", file, file.stat().st_size)
         if not self.enabled:
             return False
-        self._enqueue(_Delivery("document", str(file)))
+        self._enqueue(_Delivery("document", str(file), compress=compress))
         return True
 
     def install_commands(self) -> None:
@@ -120,15 +135,16 @@ class Telegram:
     @property
     def pending_reports(self) -> int:
         with self._lock:
-            return len(self._outbox)
+            return len(self._messages) + len(self._documents)
 
     def _enqueue(self, delivery: _Delivery) -> None:
         with self._lock:
-            self._outbox.append(delivery)
-            pending = len(self._outbox)
+            queue = self._documents if delivery.kind == "document" else self._messages
+            queue.append(delivery)
+            pending = len(self._messages) + len(self._documents)
         if pending in {100, 500, 1000}:
             LOG.warning("TELEGRAM outbox backlog pending=%s", pending)
-        self._wake_sender.set()
+        (self._wake_documents if delivery.kind == "document" else self._wake_messages).set()
 
     def _poll_loop(self) -> None:
         delay = 0.0
@@ -167,42 +183,151 @@ class Telegram:
                 delay = 5.0
 
     def _send_loop(self) -> None:
-        retry = 0.0
         while not self._stop.is_set():
-            self._wake_sender.wait(1.0)
-            self._wake_sender.clear()
-            if retry and self._stop.wait(retry):
-                break
-            retry = 0.0
-            while not self._stop.is_set():
-                with self._lock:
-                    item = self._outbox[0] if self._outbox else None
-                if item is None:
-                    break
-                try:
-                    self._deliver(item)
-                except FileNotFoundError as exc:
-                    LOG.error("TELEGRAM document no longer exists; dropping delivery: %s", exc)
-                    with self._lock:
-                        if self._outbox and self._outbox[0] is item:
-                            self._outbox.popleft()
-                    continue
-                except Exception as exc:
-                    with self._lock:
-                        pending = len(self._outbox)
-                    LOG.warning(
-                        "TELEGRAM delivery unavailable; retained pending=%s retry in 5s: %s",
-                        pending, exc,
-                    )
-                    retry = 5.0
-                    break
-                with self._lock:
-                    if self._outbox and self._outbox[0] is item:
-                        self._outbox.popleft()
-                    pending = len(self._outbox)
-                LOG.info("TELEGRAM delivered kind=%s pending=%s", item.kind, pending)
+            self._wake_messages.wait(1.0)
+            self._wake_messages.clear()
+            item = self._peek(self._messages)
+            if item is None:
+                continue
+            started = time.monotonic()
+            item.attempts += 1
+            LOG.info("TELEGRAM delivery started kind=%s attempt=%s", item.kind, item.attempts)
+            try:
+                self._deliver_message(item)
+            except Exception as exc:
+                permanent, delay = self._failure_policy(exc, item.attempts, document=False)
+                LOG.warning(
+                    "TELEGRAM delivery failed kind=%s attempt=%s elapsed=%.3fs permanent=%s "
+                    "next_retry=%ss error=%s",
+                    item.kind, item.attempts, time.monotonic() - started, permanent,
+                    0 if permanent else delay, self._safe_error(exc),
+                )
+                if permanent:
+                    self._remove(self._messages, item)
+                elif not self._stop.wait(delay):
+                    self._wake_messages.set()
+                continue
+            self._remove(self._messages, item)
+            LOG.info(
+                "TELEGRAM delivery succeeded kind=%s attempt=%s elapsed=%.3fs pending=%s",
+                item.kind, item.attempts, time.monotonic() - started, self.pending_reports,
+            )
 
-    def _deliver(self, item: _Delivery) -> None:
+    def _document_loop(self) -> None:
+        while not self._stop.is_set():
+            self._wake_documents.wait(1.0)
+            self._wake_documents.clear()
+            item = self._peek(self._documents)
+            if item is None:
+                continue
+            try:
+                self._prepare_document(item)
+            except Exception as exc:
+                LOG.error("TELEGRAM document preparation failed permanent=true error=%s", self._safe_error(exc))
+                self._finish_document(item)
+                self.send("⚠️ Не удалось подготовить диагностический файл к отправке.")
+                continue
+            item.attempts += 1
+            upload = Path(item.upload_path)
+            started = time.monotonic()
+            LOG.info(
+                "TELEGRAM document upload started name=%s size=%s attempt=%s",
+                upload.name, upload.stat().st_size, item.attempts,
+            )
+            try:
+                self._deliver_document(item)
+            except Exception as exc:
+                permanent, delay = self._failure_policy(exc, item.attempts, document=True)
+                LOG.warning(
+                    "TELEGRAM document upload failed name=%s size=%s attempt=%s elapsed=%.3fs "
+                    "permanent=%s next_retry=%ss error=%s",
+                    upload.name, upload.stat().st_size, item.attempts,
+                    time.monotonic() - started, permanent, 0 if permanent else delay,
+                    self._safe_error(exc),
+                )
+                if permanent:
+                    self._finish_document(item)
+                    self.send(
+                        f"⚠️ Файл {Path(item.value).name} не отправлен после "
+                        f"{item.attempts} попыток. Получите его вручную из папки проекта."
+                    )
+                elif not self._stop.wait(delay):
+                    self._wake_documents.set()
+                continue
+            self._finish_document(item)
+            LOG.info(
+                "TELEGRAM document upload succeeded name=%s attempt=%s elapsed=%.3fs pending=%s",
+                upload.name, item.attempts, time.monotonic() - started, self.pending_reports,
+            )
+            self.send(f"✅ Диагностический файл отправлен: {Path(item.value).name}")
+
+    def _peek(self, queue: deque[_Delivery]) -> _Delivery | None:
+        with self._lock:
+            return queue[0] if queue else None
+
+    def _remove(self, queue: deque[_Delivery], item: _Delivery) -> None:
+        with self._lock:
+            if queue and queue[0] is item:
+                queue.popleft()
+
+    def _finish_document(self, item: _Delivery) -> None:
+        self._remove(self._documents, item)
+        if item.delete_upload and item.upload_path:
+            Path(item.upload_path).unlink(missing_ok=True)
+
+    def _prepare_document(self, item: _Delivery) -> None:
+        if item.upload_path:
+            return
+        source = Path(item.value)
+        if not source.is_file():
+            raise FileNotFoundError(source)
+        if not item.compress:
+            item.upload_path = str(source)
+            return
+        descriptor, name = tempfile.mkstemp(
+            prefix="telegram-", suffix=f"-{source.name}.gz", dir=source.parent
+        )
+        try:
+            with open(descriptor, "wb", closefd=True) as raw, gzip.GzipFile(
+                    filename=source.name, mode="wb", fileobj=raw, compresslevel=6) as compressed, \
+                    source.open("rb") as original:
+                shutil.copyfileobj(original, compressed, length=256 * 1024)
+        except Exception:
+            Path(name).unlink(missing_ok=True)
+            raise
+        item.upload_path = name
+        item.delete_upload = True
+        LOG.info(
+            "TELEGRAM document compressed source=%s source_size=%s upload=%s upload_size=%s",
+            source.name, source.stat().st_size, Path(name).name, Path(name).stat().st_size,
+        )
+
+    def _failure_policy(self, exc: Exception, attempt: int, *, document: bool) -> tuple[bool, float]:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status == 429:
+            response = exc.response
+            try:
+                recommended = float(response.json().get("parameters", {}).get("retry_after", 0))
+            except (TypeError, ValueError, requests.RequestException):
+                recommended = 0
+            if not recommended:
+                try:
+                    recommended = float(response.headers.get("Retry-After", 0))
+                except (TypeError, ValueError):
+                    recommended = 0
+            return bool(document and attempt >= 5), max(1.0, recommended)
+        permanent_status = status is not None and status not in {408, 425, 429} and status < 500
+        max_attempts = 5 if document else 0
+        permanent = permanent_status or bool(max_attempts and attempt >= max_attempts)
+        return permanent, min(300.0, 5.0 * (2 ** min(attempt - 1, 6)))
+
+    def _safe_error(self, exc: Exception) -> str:
+        text = f"{type(exc).__name__}: {exc}"
+        if self.token:
+            text = text.replace(self.token, "<redacted>")
+        return text[:500]
+
+    def _deliver_message(self, item: _Delivery) -> None:
         if item.kind == "message":
             payload = {"chat_id": self.chat_id, "text": item.value}
             if item.menu_action == "show":
@@ -210,16 +335,18 @@ class Telegram:
             elif item.menu_action == "hide":
                 payload["reply_markup"] = {"remove_keyboard": True}
             response = requests.post(self.base + "/sendMessage", json=payload, timeout=(5, 15))
-        elif item.kind == "document":
-            with Path(item.value).open("rb") as document:
-                response = requests.post(
-                    self.base + "/sendDocument", data={"chat_id": self.chat_id},
-                    files={"document": document}, timeout=(5, 120),
-                )
         else:
             response = requests.post(
                 self.base + "/setMyCommands",
                 json={"commands": [{"command": command, "description": description}
                                     for command, description in self.COMMANDS]}, timeout=(5, 15),
+            )
+        response.raise_for_status()
+
+    def _deliver_document(self, item: _Delivery) -> None:
+        with Path(item.upload_path).open("rb") as document:
+            response = requests.post(
+                self.base + "/sendDocument", data={"chat_id": self.chat_id},
+                files={"document": document}, timeout=(30, 180),
             )
         response.raise_for_status()

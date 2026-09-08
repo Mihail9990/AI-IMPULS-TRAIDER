@@ -5,6 +5,7 @@ from datetime import datetime
 import itertools
 import json
 import logging
+import threading
 import time
 import requests
 
@@ -14,7 +15,7 @@ from .config import Settings
 LOG = logging.getLogger(__name__)
 SENSITIVE_KEYS = {
     "password", "identifier", "apiKey", "x-cap-api-key", "cst",
-    "x-security-token", "token", "telegram_bot_token", "accountId", "clientId",
+    "x-security-token", "token", "telegram_bot_token", "accountId", "currentAccountId", "clientId",
 }
 
 
@@ -33,18 +34,24 @@ class CapitalClient:
         self.http.headers.update({"X-CAP-API-KEY": settings.api_key, "Content-Type": "application/json"})
         self.last_login = 0.0
         self.session_generation = 0
+        self._login_lock = threading.Lock()
         self._request_ids = itertools.count(1)
 
-    def login(self) -> None:
-        LOG.info("CAPITAL LOGIN request url=%s/session credentials=<redacted>", self.base)
-        started = time.monotonic()
-        response = self.http.post(self.base + "/session", json={"identifier": self.settings.identifier, "password": self.settings.password, "encryptedPassword": False}, timeout=20)
-        self._log_response("LOGIN", response, started)
-        self._check(response)
-        self.http.headers.update({"CST": response.headers["CST"], "X-SECURITY-TOKEN": response.headers["X-SECURITY-TOKEN"]})
-        self.last_login = time.time()
-        self.session_generation += 1
-        LOG.info("CAPITAL SESSION ready generation=%s", self.session_generation)
+    def login(self, *, force: bool = False) -> None:
+        with self._login_lock:
+            # Scenario 9 sends two DELETEs in parallel. Recheck under the lock so both workers
+            # share one refresh instead of violating Capital's POST /session rate limit.
+            if not force and time.time() - self.last_login <= 540:
+                return
+            LOG.info("CAPITAL LOGIN request url=%s/session credentials=<redacted>", self.base)
+            started = time.monotonic()
+            response = self.http.post(self.base + "/session", json={"identifier": self.settings.identifier, "password": self.settings.password, "encryptedPassword": False}, timeout=20)
+            self._log_response("LOGIN", response, started)
+            self._check(response)
+            self.http.headers.update({"CST": response.headers["CST"], "X-SECURITY-TOKEN": response.headers["X-SECURITY-TOKEN"]})
+            self.last_login = time.time()
+            self.session_generation += 1
+            LOG.info("CAPITAL SESSION ready generation=%s", self.session_generation)
 
     def streaming_tokens(self) -> tuple[str, str, int]:
         """Return the current REST session tokens used to authenticate WebSocket subscriptions."""

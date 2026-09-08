@@ -1428,6 +1428,10 @@ class Bot:
         open_legs = [leg for leg in legs if leg.deal_id in positions]
         open_legs = [leg for leg in open_legs if leg.direction not in fills]
 
+        # Establish one fresh session before concurrent DELETEs. CapitalClient.login is also
+        # serialized as a second line of defence against any future parallel request path.
+        self.capital.login()
+
         # DELETE requests are issued from two workers so neither side intentionally waits for the
         # other's HTTP round trip. Confirmations provide the actual execution prices.
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -1670,6 +1674,8 @@ class Bot:
         if not leg:
             raise RuntimeError("Указанная сторона отсутствует в состоянии цикла")
         if command in {"/canceltrigger", "/settrigger"}:
+            if not self.state.active:
+                raise RuntimeError("Trigger можно изменить только во время активного цикла")
             if leg.open:
                 raise RuntimeError("Trigger можно изменить только для закрытой стороны")
         elif not leg.open:
@@ -1684,8 +1690,18 @@ class Bot:
             level = D(args[1])
             if leg.trigger_id:
                 self.capital.delete_working_order(leg.trigger_id)
+            projected_stop = stop_for(leg.direction, level, self.cfg.stop_distance)
+            opposite = self.state.short if leg.direction == "BUY" else self.state.long
+            if not opposite or opposite.stop is None:
+                raise RuntimeError("Нельзя рассчитать защиту trigger без противоположного SL")
+            projected_recovery = self.state.recovery + self.cfg.stop_distance
+            projected_target = (
+                opposite.stop + projected_recovery
+                if leg.direction == "BUY" else opposite.stop - projected_recovery
+            )
             reference = self.capital.working_stop(
-                self.cfg.epic, leg.direction, self.cfg.size, level
+                self.cfg.epic, leg.direction, self.cfg.size, level,
+                projected_stop, projected_target,
             )
             result = self.capital.wait_confirmation(reference)
             if result.get("dealStatus") != "ACCEPTED" or not result.get("dealId"):
@@ -1720,6 +1736,19 @@ class Bot:
                 f"Ожидалась одна BUY и одна SELL позиция; найдено BUY={len(buys)}, SELL={len(sells)}"
             )
         for leg, position in ((self.state.long, buys[0]), (self.state.short, sells[0])):
+            remote_ids = {
+                str(position.get("dealId", "")), str(position.get("dealReference", "")),
+                str(position.get("workingOrderId", "")),
+            }
+            owned_ids = {
+                leg.deal_id, leg.deal_reference, leg.trigger_id, leg.trigger_reference,
+                *self.state.cycle_trigger_ids,
+            }
+            if not (remote_ids & {item for item in owned_ids if item}):
+                raise RuntimeError(
+                    f"Позиция {leg.direction} не связана с сохранённым циклом; "
+                    "автоматическое изменение защиты запрещено"
+                )
             leg.deal_id = str(position["dealId"])
             if position.get("dealReference"):
                 leg.deal_reference = str(position["dealReference"])
@@ -1776,9 +1805,9 @@ class Bot:
         path = Path(self.cfg.diagnostic_log_file)
         if not path.exists():
             raise RuntimeError(f"Диагностический файл ещё не создан: {path}")
-        if self.telegram.send_document(str(path)):
+        if self.telegram.send_document(str(path), compress=True):
             self.telegram.send(
-                f"✅ Диагностический файл поставлен в очередь отправки: "
+                f"⏳ Сжатие и отправка диагностического файла поставлены в очередь: "
                 f"{path.name}, размер {path.stat().st_size} байт"
             )
         else:
