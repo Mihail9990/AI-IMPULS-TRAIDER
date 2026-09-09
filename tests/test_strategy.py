@@ -605,6 +605,22 @@ class EntryRetryTest(unittest.TestCase):
         bot.capital.wait_confirmation.assert_not_called()
         self.assertTrue(bot.state.manual)
 
+    def test_initial_confirmation_timeout_persists_reference_and_blocks_filter_reset(self):
+        bot = self.make_bot()
+        bot.capital.open_position.return_value = "initial-ref"
+        bot.capital.wait_confirmation.side_effect = CapitalError("confirmation unavailable")
+        bot.capital.positions.return_value = []
+
+        with patch("trader.app.time.sleep"):
+            error = bot._open_initial_leg(bot.state.long)
+
+        self.assertIn("повторное открытие заблокировано", error)
+        bot.capital.open_position.assert_called_once()
+        self.assertTrue(bot.state.manual)
+        self.assertTrue(bot.state.paused)
+        self.assertFalse(bot.state.armed)
+        self.assertEqual(bot.state.long.pending_market_reference, "initial-ref")
+
     def test_accepted_position_closed_before_positions_sync_is_classified_from_activity(self):
         bot = self.make_bot()
         bot.capital.open_position.return_value = "accepted-ref"

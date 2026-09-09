@@ -560,6 +560,23 @@ class Bot:
                 confirmation = self._wait_market_submission(reference, rounds=3)
             except Exception as exc:
                 # A missing confirmation is an unknown result, not permission to submit again.
+                # A newly visible position can nevertheless prove that this exact sequential slot
+                # was filled; otherwise persist/manualize the reference so the filter cannot reset.
+                position = self._resolve_unknown_market_position(
+                    leg.direction, preexisting_ids, attempts=20
+                )
+                if position is not None and position.get("level") is not None:
+                    leg.deal_reference = reference
+                    leg.deal_id = str(position["dealId"])
+                    leg.current_entry = leg.original_trigger_level = D(str(position["level"]))
+                    leg.stop = stop_for(leg.direction, leg.current_entry, self.cfg.stop_distance)
+                    return None
+                leg.pending_market_reference = reference
+                leg.pending_market_reason = "initial confirmation unavailable"
+                self._manual(
+                    f"Неизвестен confirmation начального MARKET {leg.direction} reference={reference}; "
+                    "повтор запрещён"
+                )
                 return (
                     "результат MARKET-заявки не установлен; повторное открытие заблокировано: "
                     f"{exc}"
