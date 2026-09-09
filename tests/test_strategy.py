@@ -13,6 +13,7 @@ from pydroid_installer import copy_project, create_config, safe_extract
 from trader.app import Bot
 from trader.capital import CapitalClient, CapitalError
 from trader.config import Settings
+from trader.diagnostics import CycleFileHandler
 from trader.engine import Strategy
 from trader.events import (
     find_close_event,
@@ -279,23 +280,6 @@ class EntryRetryTest(unittest.TestCase):
         self.assertIn("Trigger исполнен — переход в сценарий 2", first_report)
         self.assertEqual(bot._apply_protection.call_count, 2)
 
-    def test_diagnostics_are_cleared_once_after_each_tenth_completed_cycle(self):
-        bot = self.make_bot()
-        bot.state.completed_cycles = 9
-        bot.state.diagnostic_cleanup_cycle = 0
-        with tempfile.NamedTemporaryFile() as state_file:
-            bot.cfg = Settings(
-                dry_run=False, api_key="key", identifier="id", password="password",
-                state_file=state_file.name, diagnostic_log_file="diagnostic.log",
-            )
-            bot.strategy = Strategy(bot.cfg, bot.state)
-            with patch("trader.app.clear_diagnostics") as clear:
-                bot._complete_cycle("BUY", D("4011.60"))
-                bot._complete_cycle("BUY", D("4011.60"))
-        clear.assert_called_once_with("diagnostic.log")
-        self.assertEqual(bot.state.completed_cycles, 11)
-        self.assertEqual(bot.state.diagnostic_cleanup_cycle, 10)
-
     def test_scenario_nine_removes_protection_and_closes_both_sides(self):
         bot = self.make_bot()
         bot.state.scenario = 8
@@ -389,21 +373,6 @@ class EntryRetryTest(unittest.TestCase):
         self.assertEqual(uncertain, set())
         self.assertTrue(bot.state.scenario_nine_triggers_verified)
         bot.capital.delete_working_order.assert_called_once_with("trigger-buy")
-
-    def test_missed_diagnostic_cleanup_boundary_is_recovered(self):
-        bot = self.make_bot()
-        bot.state.completed_cycles = 12
-        bot.state.diagnostic_cleanup_cycle = 0
-        with tempfile.NamedTemporaryFile() as state_file:
-            bot.cfg = Settings(
-                dry_run=False, api_key="key", identifier="id", password="password",
-                state_file=state_file.name, diagnostic_log_file="diagnostic.log",
-            )
-            with patch("trader.app.clear_diagnostics") as clear:
-                bot._clear_diagnostics_if_due()
-                bot._clear_diagnostics_if_due()
-        clear.assert_called_once_with("diagnostic.log")
-        self.assertEqual(bot.state.diagnostic_cleanup_cycle, 12)
 
     def test_exact_stop_is_confirmed_before_take_profit(self):
         bot = self.make_bot()
@@ -1657,6 +1626,58 @@ class EntryRetryTest(unittest.TestCase):
         self.assertEqual(bot.state.short.trigger_id, "trigger-1")
 
 
+class DiagnosticHistoryTest(unittest.TestCase):
+    def _write(self, handler, text):
+        handler.emit(__import__("logging").LogRecord(
+            "test", __import__("logging").INFO, __file__, 1, text, (), None
+        ))
+
+    def test_window_keeps_twenty_completed_cycles_plus_current(self):
+        with tempfile.TemporaryDirectory() as directory:
+            handler = CycleFileHandler(str(Path(directory) / "bot_diagnostics.log"))
+            for cycle in range(1, 23):
+                handler.begin_cycle(cycle)
+                self._write(handler, f"cycle {cycle}")
+                handler.end_cycle(cycle + 1)
+            handler.begin_cycle(23)
+            names = [item["name"] for item in handler._index["segments"]]
+            handler.close()
+        self.assertFalse(any("cycle-000000002.log" in name for name in names))
+        self.assertTrue(any("cycle-000000003.log" in name for name in names))
+        self.assertTrue(any("cycle-000000023.log" in name for name in names))
+
+    def test_long_cycle_is_not_truncated_and_snapshot_can_split_in_two(self):
+        with tempfile.TemporaryDirectory() as directory:
+            handler = CycleFileHandler(str(Path(directory) / "bot_diagnostics.log"))
+            handler.begin_cycle(7)
+            payload = "x" * 700
+            self._write(handler, payload)
+            parts = handler.snapshot(max_part_bytes=400)
+            content = b"".join(Path(path).read_bytes() for path in parts)
+            handler.close()
+            for path in parts:
+                Path(path).unlink(missing_ok=True)
+        self.assertEqual(len(parts), 2)
+        self.assertIn(payload.encode(), content)
+
+    def test_restart_inside_cycle_retains_prior_segment_and_cycle_number(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "bot_diagnostics.log")
+            first = CycleFileHandler(path)
+            first.begin_cycle(11)
+            self._write(first, "before restart")
+            first.close()
+            second = CycleFileHandler(path)
+            second.begin_cycle(11)
+            self._write(second, "after restart")
+            parts = second.snapshot(max_part_bytes=10000)
+            content = Path(parts[0]).read_text(encoding="utf-8")
+            second.close()
+            Path(parts[0]).unlink(missing_ok=True)
+        self.assertLess(content.index("before restart"), content.index("after restart"))
+        self.assertGreaterEqual(content.count("ТОРГОВЫЙ ЦИКЛ 11"), 2)
+
+
 class CapitalClientTest(unittest.TestCase):
     def test_parallel_session_refresh_is_performed_once(self):
         client = CapitalClient(Settings(api_key="key", identifier="id", password="password"))
@@ -2364,6 +2385,10 @@ class PydroidConfigTest(unittest.TestCase):
             target.mkdir()
             (target / "bot_config.json").write_text('{"secret":"keep"}', encoding="utf-8")
             (target / "bot_state.json").write_text('{"scenario":4}', encoding="utf-8")
+            (target / "bot_diagnostics.log").write_text("legacy log", encoding="utf-8")
+            history = target / "bot_diagnostics.log.history"
+            history.mkdir()
+            (history / "index.json").write_text('{"next_segment":7}', encoding="utf-8")
 
             copy_project(source, target)
             created = create_config(target)
@@ -2371,6 +2396,8 @@ class PydroidConfigTest(unittest.TestCase):
             self.assertFalse(created)
             self.assertEqual((target / "bot_config.json").read_text(), '{"secret":"keep"}')
             self.assertEqual((target / "bot_state.json").read_text(), '{"scenario":4}')
+            self.assertEqual((target / "bot_diagnostics.log").read_text(), "legacy log")
+            self.assertEqual((history / "index.json").read_text(), '{"next_segment":7}')
             self.assertEqual((target / "trader/app.py").read_text(), "NEW = True\n")
 
     def test_telegram_queue_calls_never_perform_network_io(self):
@@ -2502,6 +2529,68 @@ class PydroidConfigTest(unittest.TestCase):
         self.assertTrue(all(size < original_size for _, size in uploads))
         self.assertEqual(timeouts, [180, 180])
         self.assertEqual(leftovers, [])
+
+    def test_two_part_snapshot_retries_only_failed_part(self):
+        telegram = Telegram("token", "123")
+        response = Mock()
+        attempts = {}
+        messages = []
+
+        def post(url, **kwargs):
+            if url.endswith("/sendDocument"):
+                name = Path(kwargs["files"]["document"].name).name
+                attempts[name] = attempts.get(name, 0) + 1
+                if "part-2" in name and attempts[name] == 1:
+                    raise requests.Timeout("second part delayed")
+            elif url.endswith("/sendMessage"):
+                messages.append(kwargs["json"]["text"])
+            return response
+
+        with tempfile.TemporaryDirectory() as directory:
+            paths = []
+            for number in (1, 2):
+                path = Path(directory) / f"history-part-{number}-of-2.log"
+                path.write_text(f"part {number}\n", encoding="utf-8")
+                paths.append(str(path))
+            with patch("trader.telegram.requests.get", side_effect=requests.ReadTimeout("offline")), \
+                    patch("trader.telegram.requests.post", side_effect=post), \
+                    patch.object(telegram, "_failure_policy", return_value=(False, 0.01)):
+                telegram.start()
+                telegram.send_log_snapshot(lambda: paths)
+                deadline = time.monotonic() + 2
+                while (telegram.pending_reports or sum(attempts.values()) < 3) \
+                        and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                telegram.stop()
+
+        self.assertEqual(attempts["history-part-1-of-2.log"], 1)
+        self.assertEqual(attempts["history-part-2-of-2.log"], 2)
+        self.assertTrue(any("полностью доставлен" in message for message in messages))
+
+    def test_one_part_snapshot_is_uploaded_as_plain_log(self):
+        telegram = Telegram("token", "123")
+        response = Mock()
+        uploaded = []
+
+        def post(url, **kwargs):
+            if url.endswith("/sendDocument"):
+                document = Path(kwargs["files"]["document"].name)
+                uploaded.append((document.suffix, document.read_bytes()))
+            return response
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history-part-1-of-1.log"
+            path.write_text("plain diagnostics\n", encoding="utf-8")
+            with patch("trader.telegram.requests.get", side_effect=requests.ReadTimeout("offline")), \
+                    patch("trader.telegram.requests.post", side_effect=post):
+                telegram.start()
+                telegram.send_log_snapshot(lambda: [str(path)])
+                deadline = time.monotonic() + 1
+                while telegram.pending_reports and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                telegram.stop()
+
+        self.assertEqual(uploaded, [(".log", b"plain diagnostics\n")])
 
     def test_telegram_failure_policy_honours_retry_after_and_stops_bad_requests(self):
         telegram = Telegram("token", "123")

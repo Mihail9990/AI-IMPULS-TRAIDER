@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 import time
 from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .capital import CapitalClient, CapitalError
 from .config import Settings
-from .diagnostics import clear_diagnostics, configure_diagnostics
+from .diagnostics import (
+    begin_diagnostic_cycle,
+    configure_diagnostics,
+    end_diagnostic_cycle,
+    snapshot_diagnostics,
+)
 from .engine import Strategy
 from .events import (
     find_close_event,
@@ -50,30 +54,24 @@ class Bot:
         self._stream_signal = False
         self._last_cycle_rest_check = 0.0
         self.execution_policy = ExecutionPolicy()
-        # Recover a cleanup that was missed because Pydroid stopped immediately after the tenth
-        # completion, and migrate older state files whose marker remained at zero.
-        self._clear_diagnostics_if_due()
+        if self.state.active:
+            cycle = self.state.diagnostic_cycle_number or self.state.completed_cycles + 1
+            self.state.diagnostic_cycle_number = cycle
+            begin_diagnostic_cycle(self.cfg.diagnostic_log_file, cycle)
+        else:
+            end_diagnostic_cycle(
+                self.cfg.diagnostic_log_file, self.state.completed_cycles + 1
+            )
 
     def _complete_cycle(self, direction: str, fill: Decimal | None) -> None:
-        """Complete one cycle and keep diagnostics only for the latest ten-cycle window."""
+        """Complete one cycle and move subsequent startup/gap records outside its boundary."""
         self.strategy.complete(direction, fill)
-        self._clear_diagnostics_if_due()
-
-    def _clear_diagnostics_if_due(self) -> None:
-        """Truncate all diagnostic logs after every ten cycles since the last cleanup."""
-        count = self.state.completed_cycles
-        last_cleanup = self.state.diagnostic_cleanup_cycle
-        # Use a distance instead of ``count % 10``. This also repairs a missed boundary after a
-        # crash/update: completed=11, cleanup=0 is cleaned immediately rather than waiting for 20.
-        if count - last_cleanup >= 10:
-            self.state.diagnostic_cleanup_cycle = count
-            # Persist the marker before truncating so a crash cannot repeatedly clear the log.
-            self.state.save(self.cfg.state_file)
-            clear_diagnostics(self.cfg.diagnostic_log_file)
-            LOG.info(
-                "Diagnostic history cleared after completed cycle %s; new 10-cycle window started",
-                count,
-            )
+        self.state.save(self.cfg.state_file)
+        LOG.info(
+            "TRADING CYCLE %s COMPLETED direction=%s fill=%s result=%s",
+            self.state.diagnostic_cycle_number, direction, fill, self.state.net_cycle_result,
+        )
+        end_diagnostic_cycle(self.cfg.diagnostic_log_file, self.state.completed_cycles + 1)
 
     def run(self) -> None:
         self.telegram.start()
@@ -333,6 +331,11 @@ class Bot:
             LOG.info("Broker flat check %s/3 before new cycle", self._flat_checks)
             return
         self._flat_checks = 0
+        cycle_number = self.state.completed_cycles + 1
+        self.state.diagnostic_cycle_number = cycle_number
+        self.state.save(self.cfg.state_file)
+        begin_diagnostic_cycle(self.cfg.diagnostic_log_file, cycle_number)
+        LOG.info("TRADING CYCLE %s START filter=%s", cycle_number, filter_reason)
         bid, ask = self.capital.quote(self.cfg.epic)
         self.strategy.begin(ask, bid)
         assert self.state.long and self.state.short
@@ -1932,10 +1935,14 @@ class Bot:
             leg.open = False
             leg.stop = leg.take_profit = None
             leg.trigger_id = leg.trigger_reference = ""
-        self._clear_diagnostics_if_due()
         self.state.armed = not self.state.paused
         self.state.phase = "FILTER" if self.state.armed else "PAUSED"
         self.state.save(self.cfg.state_file)
+        LOG.info(
+            "TRADING CYCLE %s COMPLETED scenario=9 result=%s",
+            self.state.diagnostic_cycle_number, self.state.net_cycle_result,
+        )
+        end_diagnostic_cycle(self.cfg.diagnostic_log_file, self.state.completed_cycles + 1)
         self.telegram.send(scenario_nine_result_text(self.state, long_fill, short_fill))
 
     def _cancel_and_verify_scenario_nine_triggers(self) -> set[str]:
@@ -2242,18 +2249,15 @@ class Bot:
         )
 
     def _send_diagnostic_log(self) -> None:
-        for handler in logging.getLogger().handlers:
-            handler.flush()
-        path = Path(self.cfg.diagnostic_log_file)
-        if not path.exists():
-            raise RuntimeError(f"Диагностический файл ещё не создан: {path}")
-        if self.telegram.send_document(str(path), compress=True):
+        if self.telegram.send_log_snapshot(
+            lambda: snapshot_diagnostics(self.cfg.diagnostic_log_file)
+        ):
             self.telegram.send(
-                f"⏳ Сжатие и отправка диагностического файла поставлены в очередь: "
-                f"{path.name}, размер {path.stat().st_size} байт"
+                "⏳ Согласованный снимок диагностики поставлен в отдельную очередь документов. "
+                "Будет отправлен один .log или две последовательно пронумерованные части без GZIP."
             )
         else:
-            LOG.warning("Diagnostic file was not delivered to Telegram: %s", path)
+            LOG.warning("Diagnostic snapshot was not queued for Telegram")
 
     def _capture_failure_context(self, reason: str, error: Exception) -> None:
         LOG.exception("FAILURE CONTEXT reason=%s state=%s error=%s", reason, self.status(), error)

@@ -7,6 +7,7 @@ library until it installs requirements for the downloaded project.
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -17,8 +18,17 @@ from zipfile import ZipFile
 
 
 ARCHIVE_URL = "https://github.com/Mihail9990/AI-IMPULS-TRAIDER/archive/refs/heads/work.zip"
+VERSION_URL = "https://api.github.com/repos/Mihail9990/AI-IMPULS-TRAIDER/commits/work"
 PROJECT_NAME = "AI-IMPULS-TRAIDER"
-PRESERVE = {"bot_config.json", "bot_state.json", "demo_captures"}
+PRESERVE = {
+    "bot_config.json", "bot_state.json", "demo_captures", "bot_diagnostics.log.history",
+}
+
+
+def is_runtime_data(name: str) -> bool:
+    return name in PRESERVE or name == "bot_diagnostics.log" or (
+        name.startswith("bot_diagnostics.log.") and name.removeprefix("bot_diagnostics.log.").isdigit()
+    )
 
 
 def default_install_dir() -> Path:
@@ -51,7 +61,7 @@ def copy_project(source: Path, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     for item in source.iterdir():
         target = destination / item.name
-        if item.name in PRESERVE and target.exists():
+        if is_runtime_data(item.name) and target.exists():
             continue
         if item.is_dir():
             if target.exists():
@@ -75,21 +85,38 @@ def install_requirements(project: Path) -> None:
     ])
 
 
+def installed_version() -> str:
+    try:
+        request = Request(VERSION_URL, headers={"User-Agent": "AI-IMPULS-TRAIDER-Pydroid-Installer"})
+        with urlopen(request, timeout=30) as response:
+            return str(json.load(response).get("sha", "unknown"))
+    except Exception as error:
+        print(f"Could not query work commit (installation continues): {error}")
+        return "work (commit lookup unavailable)"
+
+
 def install(archive_url: str = ARCHIVE_URL, install_dir: Path | None = None) -> Path:
     target = (install_dir or default_install_dir()).resolve()
     print(f"Installing into: {target}")
+    version = installed_version()
+    download_url = archive_url
+    if archive_url == ARCHIVE_URL and len(version) == 40:
+        # Pin the archive to the SHA we report, avoiding a branch update between two requests.
+        download_url = f"https://github.com/Mihail9990/AI-IMPULS-TRAIDER/archive/{version}.zip"
     with tempfile.TemporaryDirectory() as temporary:
         temporary_path = Path(temporary)
         archive = temporary_path / "project.zip"
         print("Downloading the work branch...")
-        download(archive_url, archive)
+        download(download_url, archive)
         source = safe_extract(archive, temporary_path / "unpacked")
         copy_project(source, target)
     created = create_config(target)
+    (target / "installed_version.txt").write_text(version + "\n", encoding="utf-8")
     print("Installing Python requirements...")
     install_requirements(target)
     print("\nInstallation completed successfully.")
     print(f"Project: {target}")
+    print(f"Installed work version: {version}")
     print("Created bot_config.json." if created else "Preserved existing bot_config.json and bot_state.json.")
     print("Next: open bot_config.json, enter DEMO credentials, then run main.py in Pydroid 3.")
     return target

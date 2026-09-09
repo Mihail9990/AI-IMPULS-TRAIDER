@@ -9,6 +9,7 @@ import shutil
 import tempfile
 import threading
 import time
+from typing import Callable
 import requests
 
 
@@ -24,6 +25,10 @@ class _Delivery:
     attempts: int = 0
     upload_path: str = ""
     delete_upload: bool = False
+    builder: Callable[[], list[str]] | None = None
+    group_id: str = ""
+    part: int = 0
+    total_parts: int = 0
 
 
 class Telegram:
@@ -72,6 +77,7 @@ class Telegram:
         self._document_thread: threading.Thread | None = None
         self._started = False
         self._startup_discard = self.offset == 0
+        self._document_groups: dict[str, dict[str, object]] = {}
 
     @property
     def enabled(self) -> bool:
@@ -121,6 +127,13 @@ class Telegram:
         self._enqueue(_Delivery("document", str(file), compress=compress))
         return True
 
+    def send_log_snapshot(self, builder: Callable[[], list[str]]) -> bool:
+        """Build and upload an immutable log snapshot exclusively on the document worker."""
+        if not self.enabled:
+            return False
+        self._enqueue(_Delivery("snapshot", builder=builder))
+        return True
+
     def install_commands(self) -> None:
         if self.enabled:
             self._enqueue(_Delivery("menu"))
@@ -139,12 +152,13 @@ class Telegram:
 
     def _enqueue(self, delivery: _Delivery) -> None:
         with self._lock:
-            queue = self._documents if delivery.kind == "document" else self._messages
+            queue = self._documents if delivery.kind in {"document", "snapshot"} else self._messages
             queue.append(delivery)
             pending = len(self._messages) + len(self._documents)
         if pending in {100, 500, 1000}:
             LOG.warning("TELEGRAM outbox backlog pending=%s", pending)
-        (self._wake_documents if delivery.kind == "document" else self._wake_messages).set()
+        (self._wake_documents if delivery.kind in {"document", "snapshot"}
+         else self._wake_messages).set()
 
     def _poll_loop(self) -> None:
         delay = 0.0
@@ -222,6 +236,34 @@ class Telegram:
             item = self._peek(self._documents)
             if item is None:
                 continue
+            if item.kind == "snapshot":
+                try:
+                    paths = item.builder() if item.builder else []
+                    if not paths or len(paths) > 2:
+                        raise RuntimeError("снимок должен содержать один или два файла")
+                    group_id = f"{time.time_ns()}-{id(item)}"
+                    parts = [
+                        _Delivery(
+                            "document", path, upload_path=path, delete_upload=True,
+                            group_id=group_id, part=index, total_parts=len(paths),
+                        )
+                        for index, path in enumerate(paths, 1)
+                    ]
+                    with self._lock:
+                        if self._documents and self._documents[0] is item:
+                            self._documents.popleft()
+                            self._documents.extendleft(reversed(parts))
+                            self._document_groups[group_id] = {
+                                "total": len(parts), "delivered": [], "failed": [],
+                            }
+                    self._wake_documents.set()
+                except Exception as exc:
+                    LOG.error(
+                        "TELEGRAM snapshot preparation failed error=%s", self._safe_error(exc)
+                    )
+                    self._remove(self._documents, item)
+                    self.send(f"⚠️ Не удалось подготовить /sendlog: {exc}")
+                continue
             try:
                 self._prepare_document(item)
             except Exception as exc:
@@ -249,10 +291,7 @@ class Telegram:
                 )
                 if permanent:
                     self._finish_document(item)
-                    self.send(
-                        f"⚠️ Файл {Path(item.value).name} не отправлен после "
-                        f"{item.attempts} попыток. Получите его вручную из папки проекта."
-                    )
+                    self._report_document_part(item, delivered=False)
                 elif not self._stop.wait(delay):
                     self._wake_documents.set()
                 continue
@@ -261,7 +300,39 @@ class Telegram:
                 "TELEGRAM document upload succeeded name=%s attempt=%s elapsed=%.3fs pending=%s",
                 upload.name, item.attempts, time.monotonic() - started, self.pending_reports,
             )
-            self.send(f"✅ Диагностический файл отправлен: {Path(item.value).name}")
+            self._report_document_part(item, delivered=True)
+
+    def _report_document_part(self, item: _Delivery, *, delivered: bool) -> None:
+        if not item.group_id:
+            self.send(
+                ("✅ Диагностический файл отправлен: " if delivered else
+                 f"⚠️ Файл не отправлен после {item.attempts} попыток: ")
+                + Path(item.value).name
+            )
+            return
+        with self._lock:
+            group = self._document_groups.get(item.group_id)
+            if group is None:
+                return
+            key = "delivered" if delivered else "failed"
+            group[key].append(item.part)
+            done = len(group["delivered"]) + len(group["failed"]) == group["total"]
+            if done:
+                self._document_groups.pop(item.group_id, None)
+        if not done:
+            return
+        delivered_parts = sorted(group["delivered"])
+        failed_parts = sorted(group["failed"])
+        if failed_parts:
+            self.send(
+                f"⚠️ /sendlog доставлен частично. Доставлены части: {delivered_parts or '-'}; "
+                f"не доставлены: {failed_parts}. Исходная история сохранена."
+            )
+        else:
+            self.send(
+                f"✅ /sendlog полностью доставлен: {group['total']} "
+                f"{'файл' if group['total'] == 1 else 'последовательных файла .log'}."
+            )
 
     def _peek(self, queue: deque[_Delivery]) -> _Delivery | None:
         with self._lock:

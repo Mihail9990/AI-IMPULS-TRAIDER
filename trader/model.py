@@ -67,6 +67,7 @@ class CycleState:
     telegram_offset: int = 0
     completed_cycles: int = 0
     diagnostic_cleanup_cycle: int = 0
+    diagnostic_cycle_number: int = 0
     processed_events: list[str] = field(default_factory=list)
     cycle_trigger_ids: list[str] = field(default_factory=list)
     # Durable broker ledger.  Leg.deal_id necessarily changes after every trigger fill, while
