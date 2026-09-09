@@ -98,6 +98,19 @@ def find_working_order_execution(
     return matches[-1] if matches else None
 
 
+def find_working_order_cancellation(
+    items: Iterable[dict], working_order_id: str
+) -> BrokerEvent | None:
+    """Find positive broker evidence that a working order was cancelled, not executed."""
+    matches = [
+        event for event in normalize_events(items)
+        if event.deal_id == working_order_id
+        and event.event_type == "WORKING_ORDER"
+        and event.status == "CANCELLED"
+    ]
+    return matches[-1] if matches else None
+
+
 def _dicts(value: Any):
     if isinstance(value, dict):
         yield value

@@ -13,6 +13,7 @@ from .engine import Strategy
 from .events import (
     find_close_event,
     find_trigger_open_event,
+    find_working_order_cancellation,
     find_working_order_execution,
     normalize_events,
 )
@@ -362,6 +363,11 @@ class Bot:
                 return
             error = self._open_initial_leg(leg)
             if error:
+                if self.state.manual:
+                    # An unknown POST outcome must survive across restarts/ticks. In particular,
+                    # do not reset and re-arm the filter merely because no dealReference arrived.
+                    self.state.save(self.cfg.state_file)
+                    return
                 early_close = getattr(self, "_initial_entry_close", None)
                 if opened and early_close and early_close[0] is leg:
                     _, source, fill = early_close
@@ -524,8 +530,28 @@ class Bot:
                 )
             except Exception as exc:
                 # Capital generates dealReference in the response. If that response is lost there
-                # is no safe idempotency key with which to distinguish a delayed position from a
-                # rejected request. Stop here rather than opening the same side again.
+                # is no idempotency key, but a newly visible position can still prove execution.
+                position = self._resolve_unknown_market_position(
+                    leg.direction, preexisting_ids, attempts=20
+                )
+                if position is not None:
+                    leg.deal_id = str(position["dealId"])
+                    fill = position.get("level")
+                    if fill is None:
+                        return "MARKET-позиция найдена без фактической цены входа"
+                    leg.current_entry = leg.original_trigger_level = D(str(fill))
+                    leg.stop = stop_for(leg.direction, leg.current_entry, self.cfg.stop_distance)
+                    self.telegram.send(
+                        f"⚠️ Ответ начального MARKET POST потерян, но позиция подтверждена "
+                        f"через /positions\nСторона: {leg.direction}\nDeal ID: {leg.deal_id}\n"
+                        f"Фактический вход: {leg.current_entry}"
+                    )
+                    return None
+                # A single empty snapshot is not treated as rejection. After the bounded lookup,
+                # preserve a manual stop rather than reset/re-arm the entry filter.
+                self._manual(
+                    f"Неизвестен результат начального MARKET {leg.direction}; повтор запрещён: {exc}"
+                )
                 return (
                     "результат MARKET-заявки не установлен; повторное открытие заблокировано: "
                     f"{exc}"
@@ -654,6 +680,9 @@ class Bot:
         return False
 
     def _tick_cycle(self) -> None:
+        if self.state.pending_tp_direction and self.state.pending_tp_fill is not None:
+            self._finish_reached_take_profit()
+            return
         positions = self._cycle_positions()
         if self.state.phase in {"LONG_ONLY", "SHORT_ONLY"}:
             survivor = self.state.long if self.state.phase == "LONG_ONLY" else self.state.short
@@ -712,10 +741,10 @@ class Bot:
                         race_loss = self._close_trigger_that_raced_with_tp(stopped)
                         if race_loss is None:
                             self.state.save(self.cfg.state_file)
-                            self._manual(
-                                "TP и trigger исполнились почти одновременно, но Capital.com "
-                                f"не опубликовал однозначный итог workingOrderId={stopped.trigger_id}. "
-                                "Trigger сохранён; проверьте /positions и /dealhistory."
+                            self.telegram.send(
+                                "⏳ TP подтверждён, но результат отмены trigger ещё неизвестен\n"
+                                f"workingOrderId: {stopped.trigger_id}\n"
+                                "Цикл и следующий вход заблокированы; сверка продолжится автоматически."
                             )
                             return
                         self.state.realized_losses += race_loss
@@ -928,8 +957,10 @@ class Bot:
     def _close_trigger_that_raced_with_tp(self, leg: Leg) -> Decimal | None:
         """Resolve TP/trigger race automatically and return the additional realized loss."""
         trigger_id = leg.trigger_id
-        for attempt in range(120):
+        for attempt in range(16):
             activity = self.capital.activity()
+            if find_working_order_cancellation(activity, trigger_id) is not None:
+                return D("0")
             opened = find_trigger_open_event(activity, trigger_id, leg.direction)
             positions = self._cycle_positions()
             position = next(
@@ -945,12 +976,10 @@ class Bot:
             else:
                 executed = find_working_order_execution(activity, trigger_id)
                 if executed is None:
-                    # 404 can also mean an already-cancelled order. Three quiet reads are enough.
-                    if attempt >= 2:
-                        return D("0")
-                    time.sleep(0.5)
+                    if attempt + 1 < 16:
+                        time.sleep(0.5)
                     continue
-                if attempt + 1 < 120:
+                if attempt + 1 < 16:
                     time.sleep(0.5)
                     continue
                 return None
@@ -1232,6 +1261,11 @@ class Bot:
             if leg.direction == "BUY"
             else opposite.stop - projected_recovery
         )
+        if leg.pending_market_reference:
+            self._open_passed_trigger_at_market(
+                leg, projected_target, leg.pending_market_reason or "ожидание confirmation"
+            )
+            return
         for _ in range(self.execution_policy.attempts):
             existing = self._find_order(leg)
             if existing:
@@ -1284,37 +1318,58 @@ class Bot:
         accepted: dict | None = None
         reference = ""
         preexisting_ids = set(self._cycle_positions())
+        resolved_position: dict | None = None
         for _ in range(self.execution_policy.attempts):
-            try:
-                projected_stop = stop_for(
-                    leg.direction, leg.original_trigger_level, self.cfg.stop_distance
-                )
-                reference = self.capital.open_position(
-                    self.cfg.epic, leg.direction, self.cfg.size, projected_stop, projected_target,
-                )
-            except Exception as exc:
-                raise CapitalError(
-                    "MARKET fallback имеет неизвестный результат; повторная заявка заблокирована: "
-                    f"{exc}"
-                ) from exc
+            if leg.pending_market_reference:
+                reference = leg.pending_market_reference
+            else:
+                try:
+                    projected_stop = stop_for(
+                        leg.direction, leg.original_trigger_level, self.cfg.stop_distance
+                    )
+                    reference = self.capital.open_position(
+                        self.cfg.epic, leg.direction, self.cfg.size,
+                        projected_stop, projected_target,
+                    )
+                    leg.pending_market_reference = reference
+                    leg.pending_market_reason = rejection_reason
+                    self.state.save(self.cfg.state_file)
+                except Exception as exc:
+                    resolved_position = self._resolve_unknown_market_position(
+                        leg.direction, preexisting_ids, attempts=20
+                    )
+                    if resolved_position is None:
+                        self._manual(
+                            "MARKET fallback отправлен, но результат неизвестен; повтор запрещён: "
+                            f"{exc}"
+                        )
+                        return
+                    accepted = {
+                        "dealStatus": "ACCEPTED",
+                        "dealId": str(resolved_position["dealId"]),
+                        "affectedDeals": [{
+                            "dealId": str(resolved_position["dealId"]), "status": "OPENED",
+                        }],
+                        "level": resolved_position.get("level"),
+                    }
+                    break
             try:
                 result = self._wait_market_submission(reference, rounds=3)
             except Exception as exc:
-                # Never repeat an open request whose result is still unknown.
-                raise CapitalError(
-                    "MARKET fallback имеет неизвестный результат; повторная заявка заблокирована: "
-                    f"{exc}"
-                ) from exc
-            try:
-                if result.get("dealStatus") != "ACCEPTED" or not result.get("dealId"):
-                    last_error = result.get("reason") or last_error
-                    continue
-                if result.get("level") is None:
-                    raise CapitalError("MARKET fallback принят без фактической цены")
-                accepted = result
-                break
-            except Exception as exc:
-                last_error = str(exc)
+                self.telegram.send(
+                    "⏳ MARKET fallback ожидает окончательный confirmation\n"
+                    f"Сторона: {leg.direction}\nReference: {reference}\n"
+                    "Повторный MARKET POST заблокирован; следующий tick продолжит только сверку.\n"
+                    f"Последняя ошибка: {exc}"
+                )
+                return
+            if result.get("dealStatus") != "ACCEPTED":
+                last_error = result.get("reason") or last_error
+                leg.pending_market_reference = leg.pending_market_reason = ""
+                self.state.save(self.cfg.state_file)
+                continue
+            accepted = result
+            break
         if accepted is None:
             raise CapitalError(last_error)
         confirmation_id = str(accepted.get("dealId", ""))
@@ -1328,9 +1383,22 @@ class Bot:
             f"affectedDeals position ID: {expected_id or '-'}\n"
             "Ожидаю появление и проверку фактической позиции."
         )
-        position = self._resolve_market_position(
-            accepted, reference, leg.direction, preexisting_ids
-        )
+        if resolved_position is None:
+            try:
+                position = self._resolve_market_position(
+                    accepted, reference, leg.direction, preexisting_ids
+                )
+            except CapitalError as exc:
+                # ACCEPTED without a level is still an accepted order. Keep its reference durable
+                # and continue resolving it on later ticks instead of submitting another MARKET.
+                self.telegram.send(
+                    "⏳ MARKET принят, фактическая позиция/цена ещё синхронизируется\n"
+                    f"Сторона: {leg.direction}\nReference: {reference}\n"
+                    f"Confirmation dealId: {confirmation_id or '-'}\nОшибка сверки: {exc}"
+                )
+                return
+        else:
+            position = resolved_position
         actual_id = str(position["dealId"])
         fill_value = position.get("level", accepted.get("level"))
         if fill_value is None:
@@ -1339,6 +1407,7 @@ class Bot:
         self.strategy.reopened(
             leg.direction, fill, actual_id, f"reopen:{actual_id}"
         )
+        leg.pending_market_reference = leg.pending_market_reason = ""
         leg.deal_reference = reference
         slippage = abs(leg.original_trigger_level - fill)
         self.telegram.send(
@@ -1380,6 +1449,26 @@ class Bot:
         # protected; event keys in Strategy keep this immediate reconciliation idempotent.
         if opposite and opposite.open and opposite.deal_id and opposite.deal_id not in positions:
             self._tick_cycle()
+
+    def _resolve_unknown_market_position(
+        self, direction: str, preexisting_ids: set[str], *, attempts: int = 20,
+    ) -> dict | None:
+        """Look for one newly appeared position after a POST response was lost."""
+        for attempt in range(attempts):
+            positions = self._cycle_positions()
+            candidates = [
+                position for deal_id, position in positions.items()
+                if deal_id not in preexisting_ids and position.get("direction") == direction
+            ]
+            if len(candidates) == 1:
+                return candidates[0]
+            if len(candidates) > 1:
+                raise CapitalError(
+                    f"После неизвестного MARKET POST найдено несколько новых {direction} позиций"
+                )
+            if attempt + 1 < attempts:
+                time.sleep(0.5)
+        return None
 
     def _resolve_market_position(
         self, confirmation: dict, reference: str, direction: str,
@@ -1449,6 +1538,9 @@ class Bot:
 
     def _recover_active_cycle(self, positions: dict[str, dict], orders: list[dict]) -> None:
         """Replay unambiguous stop/TP/trigger events that happened while the bot was offline."""
+        if self.state.pending_tp_direction and self.state.pending_tp_fill is not None:
+            self._finish_reached_take_profit()
+            return
         gold_orders = {
             str(data.get("dealId")): data
             for item in orders
@@ -2039,8 +2131,37 @@ class Bot:
         if result.get("level") is None:
             raise CapitalError("Закрытие достигнутого TP принято без фактической цены")
         fill = D(str(result["level"]))
-        self._cancel_pending_trigger_for_completion(leg)
-        self._complete_cycle(leg.direction, fill)
+        # Persist the confirmed close before resolving the trigger race. If Android stops here, the
+        # next tick/restart must not send a second DELETE or lose the actual fill.
+        self.state.pending_tp_direction = leg.direction
+        self.state.pending_tp_fill = fill
+        self.state.save(self.cfg.state_file)
+        self._finish_reached_take_profit()
+
+    def _finish_reached_take_profit(self) -> None:
+        """Resume/finalize a MARKET TP close only after its recovery trigger is resolved."""
+        direction = self.state.pending_tp_direction
+        fill = self.state.pending_tp_fill
+        if not direction or fill is None:
+            return
+        leg = self.state.long if direction == "BUY" else self.state.short
+        if leg is None:
+            raise CapitalError(f"Не найдена сторона ожидающего TP-завершения: {direction}")
+        try:
+            self._cancel_pending_trigger_for_completion(leg)
+        except CapitalError as exc:
+            LOG.info(
+                "Reached TP close is confirmed but trigger outcome remains pending: %s", exc
+            )
+            self.telegram.send(
+                "⏳ MARKET-закрытие по достигнутому TP подтверждено, но trigger ещё сверяется\n"
+                f"Сторона: {direction}\nФактическое закрытие: {fill}\n"
+                "Цикл остаётся активным; новый вход заблокирован."
+            )
+            return
+        self._complete_cycle(direction, fill)
+        self.state.pending_tp_direction = ""
+        self.state.pending_tp_fill = None
         self.state.armed = not self.state.paused
         self.state.phase = "FILTER" if self.state.armed else "PAUSED"
         self.state.save(self.cfg.state_file)
@@ -2050,7 +2171,7 @@ class Bot:
         )
         self.telegram.send(
             "✅ Целевая цена достигнута до установки TP\n"
-            f"Сторона: {leg.direction}\nРасчётный TP: {leg.take_profit}\n"
+            f"Сторона: {direction}\nРасчётный TP: {leg.take_profit}\n"
             f"Фактическое MARKET-закрытие: {fill}\n{suffix}\n"
             f"{cycle_result_text(self.state, leg.direction, fill, self.cfg.size)}"
         )

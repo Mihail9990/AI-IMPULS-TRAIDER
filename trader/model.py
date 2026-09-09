@@ -19,6 +19,10 @@ class Leg:
     open: bool = True
     trigger_id: str = ""
     trigger_reference: str = ""
+    # A MARKET fallback with a known dealReference but delayed confirmation is durable state, not
+    # permission to submit another order. Subsequent ticks resolve this same reference first.
+    pending_market_reference: str = ""
+    pending_market_reason: str = ""
     stop: Decimal | None = None
     take_profit: Decimal | None = None
 
@@ -52,6 +56,8 @@ class CycleState:
     cycle_target_profit: Decimal = D("0")
     profit_override: Decimal | None = None
     profit_override_remaining: int = 0
+    pending_tp_direction: str = ""
+    pending_tp_fill: Decimal | None = None
     long: Leg | None = None
     short: Leg | None = None
     phase: str = "IDLE"
@@ -123,6 +129,9 @@ class CycleState:
         payload["profit_override"] = (
             str(self.profit_override) if self.profit_override is not None else None
         )
+        payload["pending_tp_fill"] = (
+            str(self.pending_tp_fill) if self.pending_tp_fill is not None else None
+        )
         payload["long"] = self.long.json() if self.long else None
         payload["short"] = self.short.json() if self.short else None
         destination = Path(path)
@@ -152,11 +161,12 @@ class CycleState:
             "entry_spread", "realized_losses", "gross_take_profit", "net_cycle_result",
             "scenario_nine_prior_losses", "scenario_nine_close_gap",
             "scenario_nine_total_loss", "scenario_nine_extra_loss",
-            "cycle_target_profit", "profit_override",
+            "cycle_target_profit", "profit_override", "pending_tp_fill",
             "scenario_nine_long_fill", "scenario_nine_short_fill",
         ):
             if name in {
-                "profit_override", "scenario_nine_long_fill", "scenario_nine_short_fill",
+                "profit_override", "pending_tp_fill", "scenario_nine_long_fill",
+                "scenario_nine_short_fill",
             } and raw.get(name) is None:
                 continue
             raw[name] = D(str(raw.get(name, "0")))
@@ -173,6 +183,8 @@ class CycleState:
         self.scenario_nine_total_loss = self.scenario_nine_extra_loss = D("0")
         self.scenario_nine_triggers_verified = False
         self.scenario_nine_long_fill = self.scenario_nine_short_fill = None
+        self.pending_tp_direction = ""
+        self.pending_tp_fill = None
         self.long = self.short = None
         self.phase = "IDLE"
         self.processed_events.clear()
