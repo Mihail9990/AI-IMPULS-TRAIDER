@@ -363,7 +363,7 @@ class Bot:
                 return
             error = self._open_initial_leg(leg)
             if error:
-                if self.state.manual:
+                if self.state.manual or leg.pending_market_kind:
                     # An unknown POST outcome must survive across restarts/ticks. In particular,
                     # do not reset and re-arm the filter merely because no dealReference arrived.
                     self.state.save(self.cfg.state_file)
@@ -520,6 +520,11 @@ class Bot:
         last_error = "заявка отклонена"
         for _attempt in range(self.execution_policy.attempts):
             preexisting_ids = set(self._cycle_positions())
+            self._set_pending_market(
+                leg, "INITIAL", preexisting_ids,
+                reason=f"initial {leg.direction} POST outcome pending",
+                unknown_post=True,
+            )
             try:
                 # The previous cycle can remain briefly visible in /positions. Remember every
                 # pre-existing id so wait_position cannot bind the new leg to a stale position
@@ -531,9 +536,21 @@ class Bot:
             except Exception as exc:
                 # Capital generates dealReference in the response. If that response is lost there
                 # is no idempotency key, but a newly visible position can still prove execution.
-                position = self._resolve_unknown_market_position(
-                    leg.direction, preexisting_ids, attempts=20
-                )
+                try:
+                    position = self._resolve_unknown_market_position(
+                        leg.direction, preexisting_ids, attempts=20
+                    )
+                except Exception as reconcile_exc:
+                    leg.pending_market_reason = str(reconcile_exc)
+                    self.state.save(self.cfg.state_file)
+                    LOG.warning(
+                        "Initial MARKET POST and position reconciliation are unavailable: %s",
+                        reconcile_exc,
+                    )
+                    return (
+                        "результат MARKET-заявки не установлен; повторное открытие заблокировано: "
+                        f"{reconcile_exc}"
+                    )
                 if position is not None:
                     leg.deal_id = str(position["dealId"])
                     fill = position.get("level")
@@ -541,48 +558,57 @@ class Bot:
                         return "MARKET-позиция найдена без фактической цены входа"
                     leg.current_entry = leg.original_trigger_level = D(str(fill))
                     leg.stop = stop_for(leg.direction, leg.current_entry, self.cfg.stop_distance)
+                    self._clear_pending_market(leg)
                     self.telegram.send(
                         f"⚠️ Ответ начального MARKET POST потерян, но позиция подтверждена "
                         f"через /positions\nСторона: {leg.direction}\nDeal ID: {leg.deal_id}\n"
                         f"Фактический вход: {leg.current_entry}"
                     )
                     return None
-                # A single empty snapshot is not treated as rejection. After the bounded lookup,
-                # preserve a manual stop rather than reset/re-arm the entry filter.
-                self._manual(
-                    f"Неизвестен результат начального MARKET {leg.direction}; повтор запрещён: {exc}"
-                )
+                # Preserve the unknown submission for later network reconciliation. The active
+                # cycle blocks the entry filter, and _tick_cycle resumes this state before exits.
+                leg.pending_market_reason = str(exc)
+                self.state.save(self.cfg.state_file)
                 return (
                     "результат MARKET-заявки не установлен; повторное открытие заблокировано: "
                     f"{exc}"
                 )
             try:
+                leg.pending_market_reference = reference
+                leg.pending_market_unknown_post = False
+                self.state.save(self.cfg.state_file)
                 confirmation = self._wait_market_submission(reference, rounds=3)
             except Exception as exc:
                 # A missing confirmation is an unknown result, not permission to submit again.
                 # A newly visible position can nevertheless prove that this exact sequential slot
                 # was filled; otherwise persist/manualize the reference so the filter cannot reset.
-                position = self._resolve_unknown_market_position(
-                    leg.direction, preexisting_ids, attempts=20
-                )
+                try:
+                    position = self._resolve_unknown_market_position(
+                        leg.direction, preexisting_ids, attempts=20
+                    )
+                except Exception as reconcile_exc:
+                    leg.pending_market_reason = str(reconcile_exc)
+                    self.state.save(self.cfg.state_file)
+                    return (
+                        "результат MARKET-заявки не установлен; повторное открытие заблокировано: "
+                        f"{reconcile_exc}"
+                    )
                 if position is not None and position.get("level") is not None:
                     leg.deal_reference = reference
                     leg.deal_id = str(position["dealId"])
                     leg.current_entry = leg.original_trigger_level = D(str(position["level"]))
                     leg.stop = stop_for(leg.direction, leg.current_entry, self.cfg.stop_distance)
+                    self._clear_pending_market(leg)
                     return None
-                leg.pending_market_reference = reference
                 leg.pending_market_reason = "initial confirmation unavailable"
-                self._manual(
-                    f"Неизвестен confirmation начального MARKET {leg.direction} reference={reference}; "
-                    "повтор запрещён"
-                )
+                self.state.save(self.cfg.state_file)
                 return (
                     "результат MARKET-заявки не установлен; повторное открытие заблокировано: "
                     f"{exc}"
                 )
             if confirmation.get("dealStatus") != "ACCEPTED":
                 last_error = confirmation.get("reason") or last_error
+                self._clear_pending_market(leg)
                 continue
             # From this point a broker position may exist. Never submit another MARKET order just
             # because /positions has not synchronized yet.
@@ -602,6 +628,7 @@ class Bot:
                 if fill is None:
                     raise CapitalError("Позиция появилась без фактической цены входа")
                 leg.current_entry = D(str(fill))
+                self._clear_pending_market(leg)
                 self.telegram.send(
                     f"✅ {leg.direction} открыта\nDeal ID: {leg.deal_id}\n"
                     f"Фактический вход: {leg.current_entry}\nПопытка: {_attempt + 1}/4"
@@ -612,6 +639,7 @@ class Bot:
                 close = self._wait_accepted_initial_close(leg)
                 if close is not None:
                     source, fill = close
+                    self._clear_pending_market(leg)
                     leg.open = False
                     self._initial_entry_close = (leg, source, fill)
                     LOG.warning(
@@ -622,6 +650,26 @@ class Bot:
                     return f"позиция закрылась по {source} до синхронизации /positions"
                 return f"заявка принята, но постоянная позиция не синхронизирована: {last_error}"
         return last_error
+
+    def _set_pending_market(
+        self, leg: Leg, kind: str, preexisting_ids: set[str], *, reason: str,
+        unknown_post: bool,
+    ) -> None:
+        leg.pending_market_kind = kind
+        leg.pending_market_reason = reason
+        leg.pending_market_unknown_post = unknown_post
+        leg.pending_market_preexisting_ids = sorted(preexisting_ids)
+        if unknown_post:
+            leg.pending_market_reference = ""
+        self.state.save(self.cfg.state_file)
+
+    def _clear_pending_market(self, leg: Leg) -> None:
+        leg.pending_market_reference = ""
+        leg.pending_market_reason = ""
+        leg.pending_market_kind = ""
+        leg.pending_market_unknown_post = False
+        leg.pending_market_preexisting_ids.clear()
+        self.state.save(self.cfg.state_file)
 
     def _wait_market_submission(self, reference: str, rounds: int = 2) -> dict:
         """Wait longer for one MARKET submission without ever repeating its POST."""
@@ -699,6 +747,8 @@ class Bot:
     def _tick_cycle(self) -> None:
         if self.state.pending_tp_direction and self.state.pending_tp_fill is not None:
             self._finish_reached_take_profit()
+            return
+        if self._resume_pending_market():
             return
         positions = self._cycle_positions()
         if self.state.phase in {"LONG_ONLY", "SHORT_ONLY"}:
@@ -970,6 +1020,68 @@ class Bot:
             return
         self._create_trigger(stopped)
         self.state.save(self.cfg.state_file)
+
+    def _resume_pending_market(self) -> bool:
+        """Resolve every submitted MARKET before ordinary SL/TP logic can complete a cycle."""
+        leg = next(
+            (item for item in (self.state.long, self.state.short)
+             if item and item.pending_market_kind),
+            None,
+        )
+        if leg is None:
+            return False
+        preexisting_ids = set(leg.pending_market_preexisting_ids)
+        if leg.pending_market_kind == "FALLBACK":
+            opposite = self.state.short if leg.direction == "BUY" else self.state.long
+            if not opposite or opposite.stop is None:
+                self._manual("Нельзя продолжить pending MARKET без противоположной стороны")
+                return True
+            projected_recovery = self.state.recovery + self.cfg.stop_distance
+            projected_target = (
+                opposite.stop + projected_recovery
+                if leg.direction == "BUY" else opposite.stop - projected_recovery
+            )
+            self._open_passed_trigger_at_market(
+                leg, projected_target, leg.pending_market_reason or "pending MARKET reconciliation"
+            )
+            return True
+
+        # Initial POST without a conclusive result must never fall through to BOTH_OPEN handling:
+        # the opposite side may not have been submitted at all.
+        try:
+            position = self._resolve_unknown_market_position(
+                leg.direction, preexisting_ids, attempts=20
+            ) if leg.pending_market_unknown_post else None
+            if position is None and leg.pending_market_reference:
+                confirmation = self._wait_market_submission(
+                    leg.pending_market_reference, rounds=3
+                )
+                if confirmation.get("dealStatus") == "REJECTED":
+                    self._clear_pending_market(leg)
+                    self._manual(
+                        f"Отложенный начальный MARKET {leg.direction} подтверждён как REJECTED"
+                    )
+                    return True
+                position = self._resolve_market_position(
+                    confirmation, leg.pending_market_reference, leg.direction, preexisting_ids
+                )
+        except Exception as exc:
+            leg.pending_market_reason = str(exc)
+            self.state.save(self.cfg.state_file)
+            LOG.warning("Pending initial MARKET reconciliation delayed: %s", exc)
+            return True
+        if position is None:
+            return True
+        leg.deal_id = str(position["dealId"])
+        if position.get("level") is not None:
+            leg.current_entry = leg.original_trigger_level = D(str(position["level"]))
+            leg.stop = stop_for(leg.direction, leg.current_entry, self.cfg.stop_distance)
+        self._clear_pending_market(leg)
+        self._manual(
+            f"Начальная MARKET-позиция {leg.direction} найдена после неопределённого ответа; "
+            f"dealId={leg.deal_id}. Противоположный вход автоматически не отправлен."
+        )
+        return True
 
     def _close_trigger_that_raced_with_tp(self, leg: Leg) -> Decimal | None:
         """Resolve TP/trigger race automatically and return the additional realized loss."""
@@ -1278,7 +1390,7 @@ class Bot:
             if leg.direction == "BUY"
             else opposite.stop - projected_recovery
         )
-        if leg.pending_market_reference:
+        if leg.pending_market_kind == "FALLBACK":
             self._open_passed_trigger_at_market(
                 leg, projected_target, leg.pending_market_reason or "ожидание confirmation"
             )
@@ -1334,12 +1446,40 @@ class Bot:
         last_error = "MARKET fallback отклонён"
         accepted: dict | None = None
         reference = ""
-        preexisting_ids = set(self._cycle_positions())
+        preexisting_ids = (
+            set(leg.pending_market_preexisting_ids)
+            if leg.pending_market_kind else set(self._cycle_positions())
+        )
         resolved_position: dict | None = None
         for _ in range(self.execution_policy.attempts):
+            if leg.pending_market_unknown_post and not leg.pending_market_reference:
+                try:
+                    resolved_position = self._resolve_unknown_market_position(
+                        leg.direction, preexisting_ids, attempts=20
+                    )
+                except Exception as exc:
+                    leg.pending_market_reason = str(exc)
+                    self.state.save(self.cfg.state_file)
+                    LOG.warning("Unknown MARKET fallback reconciliation delayed: %s", exc)
+                    return
+                if resolved_position is None:
+                    return
+                accepted = {
+                    "dealStatus": "ACCEPTED",
+                    "dealId": str(resolved_position["dealId"]),
+                    "affectedDeals": [{
+                        "dealId": str(resolved_position["dealId"]), "status": "OPENED",
+                    }],
+                    "level": resolved_position.get("level"),
+                }
+                break
             if leg.pending_market_reference:
                 reference = leg.pending_market_reference
             else:
+                self._set_pending_market(
+                    leg, "FALLBACK", preexisting_ids, reason=rejection_reason,
+                    unknown_post=True,
+                )
                 try:
                     projected_stop = stop_for(
                         leg.direction, leg.original_trigger_level, self.cfg.stop_distance
@@ -1349,17 +1489,24 @@ class Bot:
                         projected_stop, projected_target,
                     )
                     leg.pending_market_reference = reference
-                    leg.pending_market_reason = rejection_reason
+                    leg.pending_market_unknown_post = False
                     self.state.save(self.cfg.state_file)
                 except Exception as exc:
-                    resolved_position = self._resolve_unknown_market_position(
-                        leg.direction, preexisting_ids, attempts=20
-                    )
-                    if resolved_position is None:
-                        self._manual(
-                            "MARKET fallback отправлен, но результат неизвестен; повтор запрещён: "
-                            f"{exc}"
+                    try:
+                        resolved_position = self._resolve_unknown_market_position(
+                            leg.direction, preexisting_ids, attempts=20
                         )
+                    except Exception as reconcile_exc:
+                        leg.pending_market_reason = str(reconcile_exc)
+                        self.state.save(self.cfg.state_file)
+                        LOG.warning(
+                            "MARKET POST and follow-up position reconciliation are unavailable: %s",
+                            reconcile_exc,
+                        )
+                        return
+                    if resolved_position is None:
+                        leg.pending_market_reason = str(exc)
+                        self.state.save(self.cfg.state_file)
                         return
                     accepted = {
                         "dealStatus": "ACCEPTED",
@@ -1382,8 +1529,7 @@ class Bot:
                 return
             if result.get("dealStatus") != "ACCEPTED":
                 last_error = result.get("reason") or last_error
-                leg.pending_market_reference = leg.pending_market_reason = ""
-                self.state.save(self.cfg.state_file)
+                self._clear_pending_market(leg)
                 continue
             accepted = result
             break
@@ -1424,7 +1570,7 @@ class Bot:
         self.strategy.reopened(
             leg.direction, fill, actual_id, f"reopen:{actual_id}"
         )
-        leg.pending_market_reference = leg.pending_market_reason = ""
+        self._clear_pending_market(leg)
         leg.deal_reference = reference
         slippage = abs(leg.original_trigger_level - fill)
         self.telegram.send(
@@ -1435,6 +1581,8 @@ class Bot:
             f"Recovery: {self.state.recovery}\nРасчётный SL: {leg.stop}\n"
             f"Расчётный TP: {leg.take_profit}"
         )
+        if self._resolve_opposite_tp_after_market(leg):
+            return
         try:
             if self.state.scenario == self.cfg.max_scenarios:
                 self._enter_manual_nine()
@@ -1466,6 +1614,52 @@ class Bot:
         # protected; event keys in Strategy keep this immediate reconciliation idempotent.
         if opposite and opposite.open and opposite.deal_id and opposite.deal_id not in positions:
             self._tick_cycle()
+
+    def _resolve_opposite_tp_after_market(self, reopened: Leg) -> bool:
+        """Close a resolved MARKET leg if the former survivor already completed by TP."""
+        opposite = self.state.short if reopened.direction == "BUY" else self.state.long
+        if not opposite or not opposite.deal_id:
+            return False
+        positions = self._cycle_positions()
+        if opposite.deal_id in positions:
+            return False
+        tp_fill = self._closing_fill(opposite, "TP")
+        if tp_fill is None:
+            return False
+        current = positions.get(reopened.deal_id)
+        if current is None:
+            # It may already have closed between snapshots; use the same durable race resolver on
+            # the next tick rather than declaring the cycle flat from absence.
+            LOG.info(
+                "Opposite TP confirmed while resolved MARKET leg is not visible yet: %s",
+                reopened.deal_id,
+            )
+            return False
+        reference = self.capital.close_position(reopened.deal_id)
+        result = self.capital.wait_confirmation(reference)
+        if result.get("dealStatus") != "ACCEPTED" or result.get("level") is None:
+            raise CapitalError(
+                result.get("reason") or "MARKET-позиция после TP противоположной стороны не закрыта"
+            )
+        close = D(str(result["level"]))
+        loss = max(D("0"), reopened.current_entry - close) if reopened.direction == "BUY" else max(
+            D("0"), close - reopened.current_entry
+        )
+        self.state.realized_losses += loss
+        reopened.open = False
+        self.state.remember_close(reopened.deal_id, "TP_MARKET_RACE", close)
+        self._complete_cycle(opposite.direction, tp_fill)
+        self.state.armed = not self.state.paused
+        self.state.phase = "FILTER" if self.state.armed else "PAUSED"
+        self.state.save(self.cfg.state_file)
+        self.telegram.send(
+            "⚡ TP противоположной стороны исполнен во время pending MARKET\n"
+            f"TP {opposite.direction}: {tp_fill}\n"
+            f"Связанная MARKET-позиция {reopened.direction} закрыта: {close}\n"
+            f"Дополнительный убыток: {loss}\n"
+            + cycle_result_text(self.state, opposite.direction, tp_fill, self.cfg.size)
+        )
+        return True
 
     def _resolve_unknown_market_position(
         self, direction: str, preexisting_ids: set[str], *, attempts: int = 20,
@@ -1531,6 +1725,15 @@ class Bot:
             # Never discard or manualize an active local cycle from a single such snapshot.
             positions = self._retry_missing_positions()
         orders = self.capital.working_orders()
+        if self.state.active and any(
+            leg and leg.pending_market_kind for leg in (self.state.long, self.state.short)
+        ):
+            # Pending submissions have their own correlation rules and must be resumed before the
+            # ordinary unknown-position startup checks can misclassify their new position.
+            self.reconciled = True
+            self.state.save(self.cfg.state_file)
+            self.telegram.send("⏳ Восстановлена незавершённая MARKET-сверка; новые заявки запрещены.")
+            return
         if not self.state.active:
             unknown = list(positions.values()) or [self._order_data(item) for item in orders if self._order_epic(item) == self.cfg.epic]
             if unknown:
