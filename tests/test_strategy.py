@@ -448,6 +448,45 @@ class EntryRetryTest(unittest.TestCase):
         self.assertEqual(bot.state.net_cycle_result, D("0.77"))
         self.assertIn("Целевая цена достигнута", bot.telegram.send.call_args.args[0])
 
+    def test_market_take_profit_cancels_pending_trigger_before_completion(self):
+        bot = self.make_bot()
+        winner = bot.state.short
+        bot.strategy.stopped("BUY", D("4009.25"), "stop-long")
+        winner.deal_id = "short-1"
+        bot.state.long.trigger_id = "buy-trigger"
+        bot.capital.quote.return_value = (D("4008.00"), D("4008.20"))
+        bot.capital.close_position.return_value = "close-ref"
+        bot.capital.wait_confirmation.return_value = {
+            "dealStatus": "ACCEPTED", "level": 4008.18,
+        }
+        bot.capital.delete_working_order.return_value = True
+
+        self.assertFalse(bot._apply_protection(winner))
+
+        bot.capital.delete_working_order.assert_called_once_with("buy-trigger")
+        self.assertEqual(bot.state.long.trigger_id, "")
+        self.assertFalse(bot.state.active)
+
+    def test_market_take_profit_accounts_for_trigger_race_before_completion(self):
+        bot = self.make_bot()
+        winner = bot.state.short
+        bot.strategy.stopped("BUY", D("4009.25"), "stop-long")
+        winner.deal_id = "short-1"
+        bot.state.long.trigger_id = "buy-trigger"
+        bot.capital.quote.return_value = (D("4008.00"), D("4008.20"))
+        bot.capital.close_position.return_value = "close-ref"
+        bot.capital.wait_confirmation.return_value = {
+            "dealStatus": "ACCEPTED", "level": 4008.18,
+        }
+        bot.capital.delete_working_order.return_value = False
+        bot._close_trigger_that_raced_with_tp = Mock(return_value=D("0.20"))
+
+        self.assertFalse(bot._apply_protection(winner))
+
+        self.assertEqual(bot.state.realized_losses, D("1.25"))
+        self.assertEqual(bot.state.net_cycle_result, D("0.57"))
+        bot._close_trigger_that_raced_with_tp.assert_called_once_with(bot.state.long)
+
     def test_take_profit_maxvalue_race_falls_back_to_market_close(self):
         bot = self.make_bot()
         leg = bot.state.short
@@ -509,6 +548,17 @@ class EntryRetryTest(unittest.TestCase):
         self.assertIn("заявка принята", error)
         self.assertEqual(bot.state.long.deal_reference, "accepted-ref")
         bot.capital.open_position.assert_called_once()
+
+    def test_initial_transport_timeout_reconciles_reference_without_second_market_order(self):
+        bot = self.make_bot()
+        bot.capital.open_position.side_effect = CapitalError("transport timeout")
+        bot.capital.wait_confirmation.side_effect = CapitalError("confirmation unavailable")
+
+        error = bot._open_initial_leg(bot.state.long)
+
+        self.assertIn("повторное открытие заблокировано", error)
+        bot.capital.open_position.assert_called_once()
+        bot.capital.wait_confirmation.assert_not_called()
 
     def test_accepted_position_closed_before_positions_sync_is_classified_from_activity(self):
         bot = self.make_bot()
@@ -959,6 +1009,9 @@ class EntryRetryTest(unittest.TestCase):
         bot.capital.working_stop.return_value = "stop-ref"
         bot.capital.quote.return_value = (D("4009.70"), D("4009.90"))
         bot.capital.open_position.return_value = "market-ref"
+        bot.capital.wait_position.return_value = {
+            "dealId": "short-2", "direction": "SELL", "level": 4009.68,
+        }
         bot.capital.update_position.return_value = "update-ref"
         bot.capital.wait_confirmation.side_effect = [
             {"dealStatus": "REJECTED", "reason": "level already crossed"},
@@ -985,6 +1038,9 @@ class EntryRetryTest(unittest.TestCase):
         )
         bot.capital.quote.return_value = (D("4009.70"), D("4009.90"))
         bot.capital.open_position.return_value = "market-ref"
+        bot.capital.wait_position.return_value = {
+            "dealId": "short-2", "direction": "SELL", "level": 4009.68,
+        }
         bot.capital.update_position.return_value = "update-ref"
         bot.capital.wait_confirmation.side_effect = [
             {"dealStatus": "ACCEPTED", "dealId": "short-2", "level": 4009.68},
@@ -999,6 +1055,140 @@ class EntryRetryTest(unittest.TestCase):
         self.assertEqual(bot.state.short.current_entry, D("4009.68"))
         bot.capital.working_stop.assert_called_once()
         bot.capital.open_position.assert_called_once()
+
+    def test_demo_market_fallback_uses_opened_affected_deal_and_actual_position(self):
+        bot = self.make_bot()
+        bot.state.long.deal_id = "00000000-6135-ee9f"
+        stopped = bot.strategy.stopped("SELL", D("4412.55"), "previous-sell-stop")
+        stopped.original_trigger_level = D("4411.11")
+        stopped.open = False
+        confirmation = {
+            "dealStatus": "ACCEPTED",
+            "dealReference": "o_3a2964aa",
+            "dealId": "00000000-6135-eff5",
+            "affectedDeals": [{"dealId": "00000000-6135-eff8", "status": "OPENED"}],
+            "level": 4410.15,
+            "direction": "SELL",
+        }
+        bot.capital.open_position.return_value = "o_3a2964aa"
+        bot.capital.wait_confirmation.side_effect = [
+            confirmation,
+            {"dealStatus": "ACCEPTED"},
+            {"dealStatus": "ACCEPTED"},
+        ]
+        bot.capital.wait_position.return_value = {
+            "dealId": "00000000-6135-eff8",
+            "dealReference": "p_00000000-6135-eff8",
+            "workingOrderId": "00000000-6135-eff5",
+            "direction": "SELL",
+            "level": 4410.15,
+        }
+        bot._apply_protection = Mock(side_effect=[False, True])
+        bot._cycle_positions = Mock(side_effect=[
+            {"00000000-6135-ee9f": {"dealId": "00000000-6135-ee9f"}},
+            {"00000000-6135-eff8": {
+                "dealId": "00000000-6135-eff8", "direction": "SELL", "level": 4410.15,
+                "stopLevel": 4411.65, "profitLevel": 4405.14,
+            }},
+        ])
+        bot._tick_cycle = Mock()
+
+        bot._open_passed_trigger_at_market(
+            stopped, D("4406.10"), "error.validation.stop.price"
+        )
+
+        self.assertEqual(bot.state.short.deal_id, "00000000-6135-eff8")
+        self.assertEqual(bot.state.short.current_entry, D("4410.15"))
+        self.assertEqual(bot.state.short.original_trigger_level, D("4411.11"))
+        self.assertEqual(
+            bot.capital.wait_position.call_args.args[:3],
+            ("00000000-6135-eff8", "o_3a2964aa", "SELL"),
+        )
+        bot._tick_cycle.assert_called_once()
+        reports = "\n".join(call.args[0] for call in bot.telegram.send.call_args_list)
+        self.assertIn("Confirmation dealId: 00000000-6135-eff5", reports)
+        self.assertIn("Фактический Deal ID: 00000000-6135-eff8", reports)
+        self.assertIn("Причина STOP-отказа: error.validation.stop.price", reports)
+
+    def test_market_fallback_unknown_confirmation_never_submits_twice(self):
+        bot = self.make_bot()
+        stopped = bot.strategy.stopped("SELL", D("4011.10"))
+        bot.capital.open_position.side_effect = CapitalError("write timed out")
+        bot.capital.wait_confirmation.side_effect = CapitalError("confirmation unavailable")
+
+        with self.assertRaisesRegex(CapitalError, "повторная заявка заблокирована"):
+            bot._open_passed_trigger_at_market(stopped, D("4007.50"), "level crossed")
+
+        bot.capital.open_position.assert_called_once()
+
+    def test_market_position_resolves_from_activity_if_it_closed_before_positions_sync(self):
+        bot = self.make_bot()
+        bot.capital.wait_position.side_effect = CapitalError("not visible")
+        bot.capital.activity.return_value = [{
+            "dateUTC": "2026-09-08T13:00:20.414",
+            "dealId": "00000000-6135-eff8",
+            "source": "USER",
+            "type": "POSITION",
+            "status": "ACCEPTED",
+            "details": {
+                "dealReference": "p_00000000-6135-eff8",
+                "workingOrderId": "00000000-6135-eff5",
+                "direction": "SELL",
+                "level": 4410.15,
+            },
+        }]
+        confirmation = {
+            "dealId": "00000000-6135-eff5",
+            "affectedDeals": [{"dealId": "00000000-6135-eff8", "status": "OPENED"}],
+        }
+
+        position = bot._resolve_market_position(
+            confirmation, "o_3a2964aa", "SELL", {"old-sell"}
+        )
+
+        self.assertEqual(position["dealId"], "00000000-6135-eff8")
+        self.assertEqual(position["workingOrderId"], "00000000-6135-eff5")
+        self.assertEqual(position["level"], D("4410.15"))
+
+    def test_demo_both_absent_closes_cycle_using_actual_market_position_id(self):
+        bot = self.make_bot()
+        bot.state.long.deal_id = "00000000-6135-ee9f"
+        bot.state.short.deal_id = "00000000-6135-eff8"
+        bot.state.long.current_entry = D("4411.91")
+        bot.state.long.stop = D("4410.41")
+        bot.state.short.current_entry = D("4410.15")
+        bot.state.short.stop = D("4411.65")
+        bot.state.short.take_profit = D("4405.14")
+        bot.state.scenario = 3
+        bot.state.recovery = D("5.01")
+        bot.capital.positions.return_value = []
+        bot.capital.activity.side_effect = lambda deal_id="", last_period=86400: [
+            {
+                "dealId": "00000000-6135-ee9f", "source": "SL", "type": "POSITION",
+                "status": "ACCEPTED", "details": {"level": 4410.34, "direction": "SELL"},
+            },
+            {
+                "dealId": "00000000-6135-eff8", "source": "TP", "type": "POSITION",
+                "status": "ACCEPTED", "details": {"level": 4406.09, "direction": "BUY"},
+            },
+        ] if not deal_id else [item for item in [
+            {
+                "dealId": "00000000-6135-ee9f", "source": "SL", "type": "POSITION",
+                "status": "ACCEPTED", "details": {"level": 4410.34, "direction": "SELL"},
+            },
+            {
+                "dealId": "00000000-6135-eff8", "source": "TP", "type": "POSITION",
+                "status": "ACCEPTED", "details": {"level": 4406.09, "direction": "BUY"},
+            },
+        ] if item["dealId"] == deal_id]
+
+        with patch("trader.app.time.sleep"):
+            bot._tick_cycle()
+
+        self.assertFalse(bot.state.active)
+        self.assertEqual(bot.state.gross_take_profit, D("4.06"))
+        self.assertEqual(bot.state.realized_losses, D("1.57"))
+        self.assertEqual(bot.state.net_cycle_result, D("2.49"))
 
     def test_startup_replays_unambiguous_stop_and_creates_trigger(self):
         bot = self.make_bot()

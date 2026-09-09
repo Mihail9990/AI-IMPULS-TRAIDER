@@ -513,35 +513,45 @@ class Bot:
     def _open_initial_leg(self, leg: Leg) -> str | None:
         last_error = "заявка отклонена"
         for _attempt in range(self.execution_policy.attempts):
+            preexisting_ids = set(self._cycle_positions())
             try:
                 # The previous cycle can remain briefly visible in /positions. Remember every
                 # pre-existing id so wait_position cannot bind the new leg to a stale position
                 # merely because it has the same direction.
-                preexisting_ids = set(self._cycle_positions())
                 reference = self.capital.open_position(
                     self.cfg.epic, leg.direction, self.cfg.size,
                     stop_distance=self.cfg.stop_distance,
                 )
-                confirmation = self.capital.wait_confirmation(reference)
-                if confirmation.get("dealStatus") != "ACCEPTED":
-                    last_error = confirmation.get("reason") or last_error
-                    continue
-                # From this point a broker position may exist. Never submit another MARKET order
-                # just because /positions has not synchronized yet.
-                leg.deal_reference = reference
-                deal_id = str(confirmation.get("dealId", ""))
-                affected = confirmation.get("affectedDeals") or []
-                if affected and isinstance(affected[0], dict):
-                    deal_id = str(affected[0].get("dealId") or deal_id)
-                # Preserve the accepted fill before waiting for /positions.  A tight broker-side
-                # stop can execute before the list endpoint ever exposes the position.
-                leg.deal_id = deal_id
-                if confirmation.get("level") is not None:
-                    leg.current_entry = D(str(confirmation["level"]))
-                    leg.original_trigger_level = leg.current_entry
-                    leg.stop = stop_for(leg.direction, leg.current_entry, self.cfg.stop_distance)
+            except Exception as exc:
+                # Capital generates dealReference in the response. If that response is lost there
+                # is no safe idempotency key with which to distinguish a delayed position from a
+                # rejected request. Stop here rather than opening the same side again.
+                return (
+                    "результат MARKET-заявки не установлен; повторное открытие заблокировано: "
+                    f"{exc}"
+                )
+            try:
+                confirmation = self._wait_market_submission(reference, rounds=3)
+            except Exception as exc:
+                # A missing confirmation is an unknown result, not permission to submit again.
+                return (
+                    "результат MARKET-заявки не установлен; повторное открытие заблокировано: "
+                    f"{exc}"
+                )
+            if confirmation.get("dealStatus") != "ACCEPTED":
+                last_error = confirmation.get("reason") or last_error
+                continue
+            # From this point a broker position may exist. Never submit another MARKET order just
+            # because /positions has not synchronized yet.
+            leg.deal_reference = reference
+            leg.deal_id = self._confirmed_position_id(confirmation)
+            if confirmation.get("level") is not None:
+                leg.current_entry = D(str(confirmation["level"]))
+                leg.original_trigger_level = leg.current_entry
+                leg.stop = stop_for(leg.direction, leg.current_entry, self.cfg.stop_distance)
+            try:
                 position = self.capital.wait_position(
-                    deal_id, reference, leg.direction, excluded_ids=preexisting_ids,
+                    leg.deal_id, reference, leg.direction, excluded_ids=preexisting_ids,
                     epic=self.cfg.epic,
                 )
                 leg.deal_id = str(position["dealId"])
@@ -556,20 +566,43 @@ class Bot:
                 return None
             except Exception as exc:
                 last_error = str(exc)
-                if leg.deal_reference:
-                    close = self._wait_accepted_initial_close(leg)
-                    if close is not None:
-                        source, fill = close
-                        leg.open = False
-                        self._initial_entry_close = (leg, source, fill)
-                        LOG.warning(
-                            "Accepted initial %s closed by %s before /positions synchronized: "
-                            "dealId=%s entry=%s fill=%s",
-                            leg.direction, source, leg.deal_id, leg.current_entry, fill,
-                        )
-                        return f"позиция закрылась по {source} до синхронизации /positions"
-                    return f"заявка принята, но постоянная позиция не синхронизирована: {last_error}"
+                close = self._wait_accepted_initial_close(leg)
+                if close is not None:
+                    source, fill = close
+                    leg.open = False
+                    self._initial_entry_close = (leg, source, fill)
+                    LOG.warning(
+                        "Accepted initial %s closed by %s before /positions synchronized: "
+                        "dealId=%s entry=%s fill=%s",
+                        leg.direction, source, leg.deal_id, leg.current_entry, fill,
+                    )
+                    return f"позиция закрылась по {source} до синхронизации /positions"
+                return f"заявка принята, но постоянная позиция не синхронизирована: {last_error}"
         return last_error
+
+    def _wait_market_submission(self, reference: str, rounds: int = 2) -> dict:
+        """Wait longer for one MARKET submission without ever repeating its POST."""
+        last_error: Exception | None = None
+        for _ in range(rounds):
+            try:
+                return self.capital.wait_confirmation(reference)
+            except Exception as exc:
+                last_error = exc
+        raise CapitalError(f"Нет окончательного confirmation для {reference}: {last_error}")
+
+    @staticmethod
+    def _confirmed_position_id(confirmation: dict) -> str:
+        """Prefer the position ID from affectedDeals over an execution/working-order ID."""
+        affected = confirmation.get("affectedDeals") or []
+        for item in affected:
+            if isinstance(item, dict) and str(item.get("status", "")).upper() in {
+                "OPEN", "OPENED"
+            } and item.get("dealId"):
+                return str(item["dealId"])
+        for item in affected:
+            if isinstance(item, dict) and item.get("dealId"):
+                return str(item["dealId"])
+        return str(confirmation.get("dealId", ""))
 
     def _wait_accepted_initial_close(
         self, leg: Leg, attempts: int = 120, delay: float = 0.5
@@ -1226,12 +1259,12 @@ class Bot:
                     return
                 last_error = result.get("reason") or last_error
                 if self._trigger_level_passed(leg) and self._is_crossed_level_rejection(last_error):
-                    self._open_passed_trigger_at_market(leg, projected_target)
+                    self._open_passed_trigger_at_market(leg, projected_target, last_error)
                     return
             except Exception as exc:
                 last_error = str(exc)
                 if self._trigger_level_passed(leg) and self._is_crossed_level_rejection(last_error):
-                    self._open_passed_trigger_at_market(leg, projected_target)
+                    self._open_passed_trigger_at_market(leg, projected_target, last_error)
                     return
         self._manual(f"Trigger {leg.direction} не создан после 4 попыток: {last_error}")
 
@@ -1243,20 +1276,36 @@ class Bot:
     def _is_crossed_level_rejection(reason: str) -> bool:
         return is_crossed_level_rejection(reason)
 
-    def _open_passed_trigger_at_market(self, leg: Leg, projected_target: D) -> None:
+    def _open_passed_trigger_at_market(
+        self, leg: Leg, projected_target: D, rejection_reason: str = "trigger level crossed"
+    ) -> None:
         """Reopen immediately when Capital rejects a STOP whose level is already crossed."""
         last_error = "MARKET fallback отклонён"
-        accepted = None
+        accepted: dict | None = None
         reference = ""
+        preexisting_ids = set(self._cycle_positions())
         for _ in range(self.execution_policy.attempts):
             try:
                 projected_stop = stop_for(
                     leg.direction, leg.original_trigger_level, self.cfg.stop_distance
                 )
                 reference = self.capital.open_position(
-                    self.cfg.epic, leg.direction, self.cfg.size, projected_stop, projected_target
+                    self.cfg.epic, leg.direction, self.cfg.size, projected_stop, projected_target,
                 )
-                result = self.capital.wait_confirmation(reference)
+            except Exception as exc:
+                raise CapitalError(
+                    "MARKET fallback имеет неизвестный результат; повторная заявка заблокирована: "
+                    f"{exc}"
+                ) from exc
+            try:
+                result = self._wait_market_submission(reference, rounds=3)
+            except Exception as exc:
+                # Never repeat an open request whose result is still unknown.
+                raise CapitalError(
+                    "MARKET fallback имеет неизвестный результат; повторная заявка заблокирована: "
+                    f"{exc}"
+                ) from exc
+            try:
                 if result.get("dealStatus") != "ACCEPTED" or not result.get("dealId"):
                     last_error = result.get("reason") or last_error
                     continue
@@ -1268,25 +1317,106 @@ class Bot:
                 last_error = str(exc)
         if accepted is None:
             raise CapitalError(last_error)
-        fill = D(str(accepted["level"]))
+        confirmation_id = str(accepted.get("dealId", ""))
+        expected_id = self._confirmed_position_id(accepted)
+        self.telegram.send(
+            "⚠️ Trigger отклонён — MARKET fallback принят брокером\n"
+            f"Причина STOP-отказа: {rejection_reason}\nСторона: {leg.direction}\n"
+            f"Следующий сценарий: {self.state.scenario + 1}\n"
+            f"Сохранённый trigger: {leg.original_trigger_level}\n"
+            f"Confirmation dealId: {confirmation_id}\n"
+            f"affectedDeals position ID: {expected_id or '-'}\n"
+            "Ожидаю появление и проверку фактической позиции."
+        )
+        position = self._resolve_market_position(
+            accepted, reference, leg.direction, preexisting_ids
+        )
+        actual_id = str(position["dealId"])
+        fill_value = position.get("level", accepted.get("level"))
+        if fill_value is None:
+            raise CapitalError("MARKET fallback position has no actual fill level")
+        fill = D(str(fill_value))
         self.strategy.reopened(
-            leg.direction, fill, str(accepted["dealId"]), f"reopen:{accepted['dealId']}"
+            leg.direction, fill, actual_id, f"reopen:{actual_id}"
         )
         leg.deal_reference = reference
+        slippage = abs(leg.original_trigger_level - fill)
+        self.telegram.send(
+            "✅ MARKET-позиция подтверждена\n"
+            f"Сторона: {leg.direction}\nСценарий: {self.state.scenario}\n"
+            f"Сохранённый trigger: {leg.original_trigger_level}\nФактический вход: {fill}\n"
+            f"Фактический Deal ID: {actual_id}\nTrigger slippage: {slippage}\n"
+            f"Recovery: {self.state.recovery}\nРасчётный SL: {leg.stop}\n"
+            f"Расчётный TP: {leg.take_profit}"
+        )
         try:
             if self.state.scenario == self.cfg.max_scenarios:
                 self._enter_manual_nine()
             else:
-                self._apply_protection(self.state.long)
-                self._apply_protection(self.state.short)
+                long_ok = self._apply_protection(self.state.long)
+                short_ok = self._apply_protection(self.state.short)
         except Exception as exc:
             self._manual(f"MARKET trigger исполнен, но защита не подтверждена: {exc}")
             return
         self.state.save(self.cfg.state_file)
+        if not self.state.active:
+            return
+        positions = self._cycle_positions()
+        actual = positions.get(actual_id)
+        opposite = self.state.short if leg.direction == "BUY" else self.state.long
         self.telegram.send(
-            f"Сценарий {self.state.scenario}: пройденный trigger {leg.direction} "
-            f"переоткрыт MARKET по {fill}"
+            "🔎 Сверка защиты после MARKET-переоткрытия\n"
+            f"Сторона: {leg.direction}; Deal ID: {actual_id}\n"
+            f"Расчётные SL/TP: {leg.stop} / {leg.take_profit}\n"
+            f"Брокерские SL/TP: "
+            f"{actual.get('stopLevel') if actual else '-'} / "
+            f"{actual.get('profitLevel') if actual else '-'}\n"
+            f"Защита BUY/SELL применена: {long_ok}/{short_ok}\n"
+            f"Противоположная сторона: {opposite.direction if opposite else '-'}; "
+            f"позиция видна: {bool(opposite and opposite.deal_id in positions)}\n"
+            "Исчезнувшая сторона будет учтена только после подтверждения SL/TP из history."
         )
+        # Process an opposite SL that happened while the MARKET position was being resolved and
+        # protected; event keys in Strategy keep this immediate reconciliation idempotent.
+        if opposite and opposite.open and opposite.deal_id and opposite.deal_id not in positions:
+            self._tick_cycle()
+
+    def _resolve_market_position(
+        self, confirmation: dict, reference: str, direction: str,
+        preexisting_ids: set[str],
+    ) -> dict:
+        """Resolve Capital's actual position ID, including the affectedDeals/workingOrder split."""
+        confirmation_id = str(confirmation.get("dealId", ""))
+        expected_id = self._confirmed_position_id(confirmation)
+        try:
+            return self.capital.wait_position(
+                expected_id, reference, direction, excluded_ids=preexisting_ids,
+                epic=self.cfg.epic,
+            )
+        except CapitalError as position_error:
+            # The position can close before /positions publishes it.  The global activity entry
+            # links the real position to Capital's execution ID through workingOrderId.
+            for attempt in range(20):
+                try:
+                    activity = self.capital.activity()
+                    opened = find_trigger_open_event(activity, confirmation_id, direction)
+                    if opened and opened.deal_id and opened.level is not None:
+                        return {
+                            "dealId": opened.deal_id,
+                            "dealReference": opened.deal_reference,
+                            "workingOrderId": confirmation_id,
+                            "direction": direction,
+                            "level": opened.level,
+                        }
+                except CapitalError:
+                    LOG.warning("MARKET position activity is not available yet", exc_info=True)
+                if attempt + 1 < 20:
+                    time.sleep(0.5)
+            raise CapitalError(
+                "Принятый MARKET fallback не связан с фактической позицией: "
+                f"confirmation dealId={confirmation_id}, affected dealId={expected_id}: "
+                f"{position_error}"
+            ) from position_error
 
     def reconcile_startup(self) -> None:
         positions = self._cycle_positions()
@@ -1842,7 +1972,8 @@ class Bot:
                 text = str(exc).lower()
                 if "error.not-found.dealid" in text:
                     LOG.info(
-                        "Protection skipped because deal closed before PUT: direction=%s "
+                        "Protection deferred because dealId is not currently visible; "
+                        "closure is not inferred from 404: direction=%s "
                         "dealId=%s expectedSL=%s expectedTP=%s",
                         leg.direction, leg.deal_id, leg.stop, leg.take_profit,
                     )
@@ -1908,6 +2039,7 @@ class Bot:
         if result.get("level") is None:
             raise CapitalError("Закрытие достигнутого TP принято без фактической цены")
         fill = D(str(result["level"]))
+        self._cancel_pending_trigger_for_completion(leg)
         self._complete_cycle(leg.direction, fill)
         self.state.armed = not self.state.paused
         self.state.phase = "FILTER" if self.state.armed else "PAUSED"
@@ -1922,6 +2054,24 @@ class Bot:
             f"Фактическое MARKET-закрытие: {fill}\n{suffix}\n"
             f"{cycle_result_text(self.state, leg.direction, fill, self.cfg.size)}"
         )
+
+    def _cancel_pending_trigger_for_completion(self, winner: Leg) -> None:
+        """Prove the opposite recovery trigger harmless before declaring TP completion."""
+        pending = self.state.short if winner.direction == "BUY" else self.state.long
+        if not pending or not pending.trigger_id:
+            return
+        trigger_id = pending.trigger_id
+        cancelled = self.capital.delete_working_order(trigger_id)
+        if not cancelled:
+            race_loss = self._close_trigger_that_raced_with_tp(pending)
+            if race_loss is None:
+                raise CapitalError(
+                    "Достигнут TP, но результат одновременного trigger-fill не подтверждён: "
+                    f"workingOrderId={trigger_id}"
+                )
+            self.state.realized_losses += race_loss
+        pending.trigger_id = pending.trigger_reference = ""
+        self.state.save(self.cfg.state_file)
 
     def _apply_stop_only(self, leg: Leg | None) -> None:
         """Install an exact SL, verify its broker level, and deliberately leave TP unset."""
