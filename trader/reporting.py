@@ -10,6 +10,8 @@ def status_text(state: CycleState) -> str:
         f"active={state.active}, armed={state.armed}, phase={state.phase}, "
         f"scenario={state.scenario}, recovery={state.recovery}, "
         f"paused={state.paused}, manual={state.manual}, "
+        f"attempt={state.active_attempt_id or '-'}, attempts_total={state.attempt_counter}, "
+        f"completed_cycles={state.completed_cycles}, all_attempts_result={state.attempt_result_total}, "
         f"cycle_target={state.cycle_target_profit}, "
         f"profit200={state.profit_override}, remaining={state.profit_override_remaining}"
     )
@@ -40,7 +42,10 @@ def pnl_text(state: CycleState, positions: list[dict], transactions: list[dict])
         f"Сценарий: {state.scenario}\nRecovery: {state.recovery}\n"
         f"Закрытый P&L за период истории: {realized} {currency}\n"
         f"Нереализованный P&L: {unrealized} {currency}\n"
-        f"Суммарно: {realized + unrealized} {currency}"
+        f"Суммарно: {realized + unrealized} {currency} (по истории брокера)\n"
+        f"Сохранённый результат всех торговых попыток: {state.attempt_result_total}\n"
+        f"Завершённых полных циклов: {state.completed_cycles}; "
+        f"создано попыток: {state.attempt_counter}"
     )
 
 

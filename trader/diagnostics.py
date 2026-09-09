@@ -41,17 +41,18 @@ class CycleFileHandler(logging.FileHandler):
         temporary.write_text(json.dumps(self._index, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(temporary, self.index_path)
 
-    def _new_segment(self, kind: str, cycle: int) -> Path:
+    def _new_segment(self, kind: str, cycle: int, completed_cycles: int = 0) -> Path:
         ordinal = int(self._index.get("next_segment", 1))
         name = f"{ordinal:012d}-{kind}-cycle-{cycle:09d}.log"
         self._index["next_segment"] = ordinal + 1
         self._index.setdefault("segments", []).append(
-            {"name": name, "kind": kind, "cycle": cycle, "ordinal": ordinal}
+            {"name": name, "kind": kind, "cycle": cycle, "ordinal": ordinal,
+             "completed_cycles": completed_cycles}
         )
         self._save_index()
         return self.history_dir / name
 
-    def switch(self, kind: str, cycle: int) -> None:
+    def switch(self, kind: str, cycle: int, completed_cycles: int = 0) -> None:
         self.acquire()
         try:
             if self._kind == kind and self._cycle == cycle:
@@ -59,26 +60,26 @@ class CycleFileHandler(logging.FileHandler):
             self.flush()
             if self.stream:
                 self.stream.close()
-            self.baseFilename = os.fspath(self._new_segment(kind, cycle))
+            self.baseFilename = os.fspath(self._new_segment(kind, cycle, completed_cycles))
             self.stream = self._open()
             self._kind, self._cycle = kind, cycle
-            marker = f"===== {'ТОРГОВЫЙ ЦИКЛ' if kind == 'cycle' else 'МЕЖДУ ЦИКЛАМИ; СЛЕДУЮЩИЙ ЦИКЛ'} {cycle} =====\n"
+            marker = f"===== {'ТОРГОВАЯ ПОПЫТКА' if kind == 'cycle' else 'МЕЖДУ ПОПЫТКАМИ; СЛЕДУЮЩАЯ ПОПЫТКА'} {cycle} =====\n"
             self.stream.write(marker)
             self.flush()
         finally:
             self.release()
 
-    def begin_cycle(self, cycle: int) -> None:
-        self.switch("cycle", cycle)
+    def begin_cycle(self, cycle: int, completed_cycles: int = 0) -> None:
+        self.switch("cycle", cycle, completed_cycles)
         # Pruning is deliberately performed only when the next cycle begins. Keep cycles
         # cycle-20..cycle-1 plus the current one, and their between-cycle diagnostics.
-        cutoff = cycle - _MAX_COMPLETED
+        cutoff = completed_cycles - _MAX_COMPLETED
         self.acquire()
         try:
             kept = []
             for item in self._index.get("segments", []):
-                item_cycle = int(item.get("cycle", 0))
-                if item_cycle and item_cycle < cutoff:
+                completed_anchor = int(item.get("completed_cycles", completed_cycles))
+                if completed_anchor < cutoff:
                     (self.history_dir / str(item.get("name", ""))).unlink(missing_ok=True)
                 else:
                     kept.append(item)
@@ -87,8 +88,8 @@ class CycleFileHandler(logging.FileHandler):
         finally:
             self.release()
 
-    def end_cycle(self, next_cycle: int) -> None:
-        self.switch("between", next_cycle)
+    def end_cycle(self, next_cycle: int, completed_cycles: int = 0) -> None:
+        self.switch("between", next_cycle, completed_cycles)
 
     def _legacy_sources(self) -> list[Path]:
         rotated = []
@@ -217,16 +218,16 @@ def configure_diagnostics(path: str) -> None:
         root.addHandler(console)
 
 
-def begin_diagnostic_cycle(path: str, cycle: int) -> None:
+def begin_diagnostic_cycle(path: str, cycle: int, completed_cycles: int = 0) -> None:
     handler = _handler(path)
     if handler:
-        handler.begin_cycle(cycle)
+        handler.begin_cycle(cycle, completed_cycles)
 
 
-def end_diagnostic_cycle(path: str, next_cycle: int) -> None:
+def end_diagnostic_cycle(path: str, next_cycle: int, completed_cycles: int = 0) -> None:
     handler = _handler(path)
     if handler:
-        handler.end_cycle(next_cycle)
+        handler.end_cycle(next_cycle, completed_cycles)
 
 
 def snapshot_diagnostics(path: str, max_part_bytes: int = _TELEGRAM_PART_BYTES) -> list[str]:

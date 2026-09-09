@@ -55,23 +55,82 @@ class Bot:
         self._last_cycle_rest_check = 0.0
         self.execution_policy = ExecutionPolicy()
         if self.state.active:
-            cycle = self.state.diagnostic_cycle_number or self.state.completed_cycles + 1
-            self.state.diagnostic_cycle_number = cycle
-            begin_diagnostic_cycle(self.cfg.diagnostic_log_file, cycle)
+            attempt = (
+                self.state.active_attempt_id or self.state.diagnostic_cycle_number
+                or self.state.attempt_counter + 1
+            )
+            self.state.active_attempt_id = self.state.diagnostic_cycle_number = attempt
+            self.state.attempt_counter = max(self.state.attempt_counter, attempt)
+            begin_diagnostic_cycle(
+                self.cfg.diagnostic_log_file, attempt, self.state.completed_cycles
+            )
         else:
             end_diagnostic_cycle(
-                self.cfg.diagnostic_log_file, self.state.completed_cycles + 1
+                self.cfg.diagnostic_log_file,
+                max(self.state.attempt_counter, self.state.diagnostic_cycle_number) + 1,
+                self.state.completed_cycles,
             )
 
     def _complete_cycle(self, direction: str, fill: Decimal | None) -> None:
         """Complete one cycle and move subsequent startup/gap records outside its boundary."""
+        attempt_id = self.state.active_attempt_id
         self.strategy.complete(direction, fill)
-        self.state.save(self.cfg.state_file)
-        LOG.info(
-            "TRADING CYCLE %s COMPLETED direction=%s fill=%s result=%s",
-            self.state.diagnostic_cycle_number, direction, fill, self.state.net_cycle_result,
+        self.state.remember_attempt(
+            "COMPLETED_CYCLE", self.state.net_cycle_result * self.cfg.size,
+            scenario=self.state.scenario, completed_cycle=self.state.completed_cycles,
         )
-        end_diagnostic_cycle(self.cfg.diagnostic_log_file, self.state.completed_cycles + 1)
+        LOG.info(
+            "TRADING ATTEMPT %s COMPLETED direction=%s fill=%s result=%s",
+            attempt_id, direction, fill, self.state.net_cycle_result,
+        )
+        self.state.active_attempt_id = 0
+        self.state.save(self.cfg.state_file)
+        end_diagnostic_cycle(
+            self.cfg.diagnostic_log_file, self.state.attempt_counter + 1,
+            self.state.completed_cycles,
+        )
+
+    def _finish_failed_initial_attempt(
+        self, leg: Leg, source: str, fill: Decimal, *, opposite_sent: bool
+    ) -> None:
+        """Account for a resolved one-sided initial attempt and require an explicit /start."""
+        entry = leg.current_entry
+        points = fill - entry if leg.direction == "BUY" else entry - fill
+        money = points * self.cfg.size
+        attempt_id = self.state.active_attempt_id or self.state.diagnostic_cycle_number
+        self.state.remember_deal(leg, scenario=1)
+        self.state.remember_close(leg.deal_id, source, fill)
+        self.state.remember_attempt(
+            "INITIAL_PAIR_NOT_FORMED", money,
+            direction=leg.direction, entry=entry, close=fill, close_source=source,
+            deal_id=leg.deal_id, deal_reference=leg.deal_reference, planned_stop=leg.stop,
+            opposite_order_sent=opposite_sent, completed_cycle=None,
+        )
+        LOG.warning(
+            "TRADING ATTEMPT %s FAILED_INITIAL direction=%s entry=%s close=%s source=%s "
+            "result=%s opposite_sent=%s",
+            attempt_id, leg.direction, entry, fill, source, money, opposite_sent,
+        )
+        total = self.state.attempt_result_total
+        self.state.reset()
+        self.state.paused = True
+        self.state.armed = False
+        self.state.phase = "PAUSED"
+        self.state.save(self.cfg.state_file)
+        end_diagnostic_cycle(
+            self.cfg.diagnostic_log_file, self.state.attempt_counter + 1,
+            self.state.completed_cycles,
+        )
+        self.telegram.send(
+            f"⏸ Начальная торговая попытка №{attempt_id} завершена без пары\n"
+            f"Сторона: {leg.direction}\nПричина закрытия: {source}\n"
+            f"Фактический вход: {entry}\nФактическое закрытие: {fill}\n"
+            f"Результат попытки: {points} пункта / {money} при размере {self.cfg.size}\n"
+            f"Противоположная заявка отправлялась: {'ДА' if opposite_sent else 'НЕТ'}\n"
+            f"Общий результат сохранённых попыток: {total}\n"
+            "Открытых связанных позиций и ордеров не осталось. Автоматика на паузе; "
+            "следующий вход только после /start."
+        )
 
     def run(self) -> None:
         self.telegram.start()
@@ -331,11 +390,23 @@ class Bot:
             LOG.info("Broker flat check %s/3 before new cycle", self._flat_checks)
             return
         self._flat_checks = 0
-        cycle_number = self.state.completed_cycles + 1
+        if self.state.active_attempt_id:
+            cycle_number = self.state.active_attempt_id
+        else:
+            self.state.attempt_counter = max(
+                self.state.attempt_counter, self.state.diagnostic_cycle_number
+            ) + 1
+            cycle_number = self.state.attempt_counter
+        self.state.active_attempt_id = cycle_number
         self.state.diagnostic_cycle_number = cycle_number
         self.state.save(self.cfg.state_file)
-        begin_diagnostic_cycle(self.cfg.diagnostic_log_file, cycle_number)
-        LOG.info("TRADING CYCLE %s START filter=%s", cycle_number, filter_reason)
+        begin_diagnostic_cycle(
+            self.cfg.diagnostic_log_file, cycle_number, self.state.completed_cycles
+        )
+        LOG.info(
+            "TRADING ATTEMPT %s START completed_cycles=%s filter=%s",
+            cycle_number, self.state.completed_cycles, filter_reason,
+        )
         bid, ask = self.capital.quote(self.cfg.epic)
         self.strategy.begin(ask, bid)
         assert self.state.long and self.state.short
@@ -354,14 +425,24 @@ class Bot:
                     "first initial leg disappeared before opposite entry",
                     RuntimeError(f"{lost.direction} {lost.deal_id} already closed"),
                 )
-                self.state.reset()
-                self.state.paused = True
-                self.state.phase = "PAUSED"
+                close = self._wait_accepted_initial_close(lost)
+                if close is not None:
+                    source, fill = close
+                    self._finish_failed_initial_attempt(
+                        lost, source, fill, opposite_sent=False
+                    )
+                    return
+                self._set_pending_market(
+                    lost, "INITIAL", set(),
+                    reason="first initial leg disappeared before opposite submission",
+                    unknown_post=False,
+                )
+                lost.pending_market_reference = lost.deal_reference
                 self.state.save(self.cfg.state_file)
                 self.telegram.send(
-                    f"🚨 Начальный hedge отменён: первая сторона {lost.direction} закрылась "
-                    "до открытия противоположной стороны. Вторая заявка не отправлена. "
-                    "Проверьте /pnl и запустите новый цикл вручную командой /start."
+                    f"⏳ Первая сторона {lost.direction} исчезла до открытия противоположной. "
+                    "Вторая заявка не отправлена; новый вход заблокирован до появления связанного "
+                    "SL/TP в истории."
                 )
                 return
             error = self._open_initial_leg(leg)
@@ -379,20 +460,8 @@ class Bot:
                         return
                 if not opened and early_close and early_close[0] is leg:
                     _, source, fill = early_close
-                    entry = leg.current_entry
-                    result = (fill - entry) if leg.direction == "BUY" else (entry - fill)
-                    self.state.reset()
-                    self.state.armed = True
-                    self.state.phase = "FILTER"
                     self._initial_entry_close = None
-                    self.state.save(self.cfg.state_file)
-                    self.telegram.send(
-                        f"⚠️ Первая сторона {leg.direction} была принята, но закрылась по {source} "
-                        "до открытия второй стороны.\n"
-                        f"Вход: {entry}\nФактическое закрытие: {fill}\n"
-                        f"Результат движения цены: {result}\n"
-                        "Вторая заявка не отправлена. Цикл не начат; бот снова ожидает свечной фильтр."
-                    )
+                    self._finish_failed_initial_attempt(leg, source, fill, opposite_sent=False)
                     return
                 if opened or leg.deal_reference:
                     self._manual(f"Неполный или несинхронизированный hedge {leg.direction}: {error}")
@@ -698,6 +767,21 @@ class Bot:
                 return str(item["dealId"])
         return str(confirmation.get("dealId", ""))
 
+    @staticmethod
+    def _confirmation_close_level(confirmation: dict, expected_deal_id: str) -> Decimal | None:
+        """Use a close price only when confirmation explicitly belongs to the expected deal."""
+        identifiers = {
+            str(confirmation.get("dealId", "")),
+            *(str(item.get("dealId", "")) for item in confirmation.get("affectedDeals") or []
+              if isinstance(item, dict)),
+        }
+        identifiers.discard("")
+        # Some Capital confirmations omit every identifier. They cannot contradict the request
+        # and remain usable for backward compatibility. An explicit different ID must never be.
+        if (identifiers and expected_deal_id not in identifiers) or confirmation.get("level") is None:
+            return None
+        return D(str(confirmation["level"]))
+
     def _wait_accepted_initial_close(
         self, leg: Leg, attempts: int = 120, delay: float = 0.5
     ) -> tuple[str, Decimal] | None:
@@ -710,9 +794,25 @@ class Bot:
         """
         if not leg.deal_id:
             return None
+        execution_id = leg.deal_id
         for attempt in range(attempts):
             try:
                 activity = self.capital.activity(leg.deal_id)
+                direct_close = next(
+                    (event for source in ("SL", "TP")
+                     if (event := find_close_event(activity, leg.deal_id, source)) is not None
+                     and event.level is not None),
+                    None,
+                )
+                if direct_close is not None:
+                    return direct_close.source, direct_close.level
+                global_activity = self.capital.activity()
+                opened = find_trigger_open_event(global_activity, execution_id, leg.direction)
+                if opened is not None and opened.deal_id:
+                    leg.deal_id = opened.deal_id
+                    if opened.level is not None:
+                        leg.current_entry = leg.original_trigger_level = opened.level
+                    activity = global_activity
                 for source in ("SL", "TP"):
                     event = find_close_event(activity, leg.deal_id, source)
                     if event is not None and event.level is not None:
@@ -1079,6 +1179,39 @@ class Bot:
         if position.get("level") is not None:
             leg.current_entry = leg.original_trigger_level = D(str(position["level"]))
             leg.stop = stop_for(leg.direction, leg.current_entry, self.cfg.stop_distance)
+        current = self._cycle_positions()
+        if leg.deal_id not in current:
+            related_orders = [
+                item for item in self.capital.working_orders()
+                if self._order_epic(item) == self.cfg.epic
+            ]
+            if current or related_orders:
+                leg.pending_market_reason = (
+                    "linked initial close pending while other positions/orders are reconciled"
+                )
+                self.state.save(self.cfg.state_file)
+                return True
+            try:
+                activity = self.capital.activity(leg.deal_id)
+                if not activity:
+                    activity = self.capital.activity()
+                for source in ("SL", "TP"):
+                    closed = find_close_event(activity, leg.deal_id, source)
+                    if closed is not None and closed.level is not None:
+                        self._clear_pending_market(leg)
+                        self._finish_failed_initial_attempt(
+                            leg, source, closed.level, opposite_sent=False
+                        )
+                        return True
+            except Exception as exc:
+                leg.pending_market_reason = str(exc)
+                self.state.save(self.cfg.state_file)
+                return True
+            # A historical opening is not proof that the position is still open. Preserve the
+            # submission lock until either /positions or a linked close event proves its outcome.
+            leg.pending_market_reason = "historical opening found; linked close still pending"
+            self.state.save(self.cfg.state_file)
+            return True
         self._clear_pending_market(leg)
         self._manual(
             f"Начальная MARKET-позиция {leg.direction} найдена после неопределённого ответа; "
@@ -1124,9 +1257,9 @@ class Bot:
             if position is not None:
                 reference = self.capital.close_position(deal_id)
                 result = self.capital.wait_confirmation(reference)
-                if result.get("dealStatus") != "ACCEPTED" or result.get("level") is None:
+                close = self._confirmation_close_level(result, deal_id)
+                if result.get("dealStatus") != "ACCEPTED" or close is None:
                     raise CapitalError(result.get("reason") or "Поздняя trigger-позиция не закрыта")
-                close = D(str(result["level"]))
             else:
                 close_event = (
                     find_close_event(activity, deal_id, "SL")
@@ -1640,11 +1773,11 @@ class Bot:
             return False
         reference = self.capital.close_position(reopened.deal_id)
         result = self.capital.wait_confirmation(reference)
-        if result.get("dealStatus") != "ACCEPTED" or result.get("level") is None:
+        close = self._confirmation_close_level(result, reopened.deal_id)
+        if result.get("dealStatus") != "ACCEPTED" or close is None:
             raise CapitalError(
                 result.get("reason") or "MARKET-позиция после TP противоположной стороны не закрыта"
             )
-        close = D(str(result["level"]))
         loss = max(D("0"), reopened.current_entry - close) if reopened.direction == "BUY" else max(
             D("0"), close - reopened.current_entry
         )
@@ -1896,9 +2029,19 @@ class Bot:
             for future in as_completed(confirmation_futures):
                 direction = confirmation_futures[future]
                 result = future.result()
-                if result.get("dealStatus") != "ACCEPTED" or result.get("level") is None:
+                expected_leg = next(leg for leg in open_legs if leg.direction == direction)
+                confirmed_fill = self._confirmation_close_level(result, expected_leg.deal_id)
+                if result.get("dealStatus") != "ACCEPTED":
                     raise CapitalError(result.get("reason") or f"Закрытие {direction} не подтверждено")
-                fills[direction] = D(str(result["level"]))
+                if confirmed_fill is None:
+                    LOG.warning(
+                        "Ignoring mismatched close confirmation direction=%s expected=%s "
+                        "confirmation_deal=%s affected=%s",
+                        direction, expected_leg.deal_id, result.get("dealId"),
+                        result.get("affectedDeals"),
+                    )
+                    continue
+                fills[direction] = confirmed_fill
                 if direction == "BUY":
                     self.state.scenario_nine_long_fill = fills[direction]
                 else:
@@ -1930,19 +2073,29 @@ class Bot:
         # Keep the pre-close loss snapshot even if another helper touched state while resolving
         # broker history; scenario 9 adds only the absolute gap between its two actual fills.
         self.state.realized_losses = prior_losses
+        attempt_id = self.state.active_attempt_id
         self.strategy.complete_scenario_nine(long_fill, short_fill, extra_loss)
+        self.state.remember_attempt(
+            "COMPLETED_SCENARIO_9", self.state.net_cycle_result * self.cfg.size,
+            include_in_total=False, result_kind="STRATEGY_CALCULATED_NOT_BROKER_PNL",
+            completed_cycle=self.state.completed_cycles,
+        )
         for leg in legs:
             leg.open = False
             leg.stop = leg.take_profit = None
             leg.trigger_id = leg.trigger_reference = ""
         self.state.armed = not self.state.paused
         self.state.phase = "FILTER" if self.state.armed else "PAUSED"
-        self.state.save(self.cfg.state_file)
         LOG.info(
-            "TRADING CYCLE %s COMPLETED scenario=9 result=%s",
-            self.state.diagnostic_cycle_number, self.state.net_cycle_result,
+            "TRADING ATTEMPT %s COMPLETED scenario=9 calculated_result=%s",
+            attempt_id, self.state.net_cycle_result,
         )
-        end_diagnostic_cycle(self.cfg.diagnostic_log_file, self.state.completed_cycles + 1)
+        self.state.active_attempt_id = 0
+        self.state.save(self.cfg.state_file)
+        end_diagnostic_cycle(
+            self.cfg.diagnostic_log_file, self.state.attempt_counter + 1,
+            self.state.completed_cycles,
+        )
         self.telegram.send(scenario_nine_result_text(self.state, long_fill, short_fill))
 
     def _cancel_and_verify_scenario_nine_triggers(self) -> set[str]:
@@ -2068,11 +2221,11 @@ class Bot:
                 entry = D(str(position.get("level", "0")))
                 reference = self.capital.close_position(deal_id)
                 result = self.capital.wait_confirmation(reference)
-                if result.get("dealStatus") != "ACCEPTED" or result.get("level") is None:
+                close = self._confirmation_close_level(result, deal_id)
+                if result.get("dealStatus") != "ACCEPTED" or close is None:
                     raise CapitalError(
                         result.get("reason") or f"Сценарий 9: trigger-позиция {deal_id} не закрыта"
                     )
-                close = D(str(result["level"]))
                 loss = max(D("0"), entry - close) if direction == "BUY" else max(
                     D("0"), close - entry
                 )
@@ -2112,6 +2265,18 @@ class Bot:
                 fill = self._closing_fill(leg, source)
                 if fill is not None:
                     return fill
+            try:
+                expected_close_direction = "SELL" if leg.direction == "BUY" else "BUY"
+                manual_closes = [
+                    event for event in normalize_events(self.capital.activity(leg.deal_id))
+                    if event.deal_id == leg.deal_id and event.source == "USER"
+                    and event.event_type == "POSITION" and event.status != "REJECTED"
+                    and event.direction == expected_close_direction and event.level is not None
+                ]
+                if manual_closes:
+                    return manual_closes[-1].level
+            except Exception:
+                LOG.warning("Manual close history is not available for %s", leg.deal_id)
             if attempt + 1 < attempts:
                 time.sleep(delay)
         return None
@@ -2352,9 +2517,13 @@ class Bot:
         result = self.capital.wait_confirmation(reference)
         if result.get("dealStatus") != "ACCEPTED":
             raise CapitalError(result.get("reason") or "Закрытие достигнутого TP отклонено")
-        if result.get("level") is None:
-            raise CapitalError("Закрытие достигнутого TP принято без фактической цены")
-        fill = D(str(result["level"]))
+        fill = self._confirmation_close_level(result, leg.deal_id)
+        if fill is None:
+            fill = self._wait_any_closing_fill(leg, attempts=20, delay=0.5)
+        if fill is None:
+            raise CapitalError(
+                "Закрытие достигнутого TP не связано с ожидаемой позицией; история ещё не готова"
+            )
         # Persist the confirmed close before resolving the trigger race. If Android stops here, the
         # next tick/restart must not send a second DELETE or lose the actual fill.
         self.state.pending_tp_direction = leg.direction

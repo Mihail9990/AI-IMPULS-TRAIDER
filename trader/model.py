@@ -68,6 +68,10 @@ class CycleState:
     completed_cycles: int = 0
     diagnostic_cleanup_cycle: int = 0
     diagnostic_cycle_number: int = 0
+    attempt_counter: int = 0
+    active_attempt_id: int = 0
+    attempt_result_total: Decimal = D("0")
+    attempt_history: list[dict] = field(default_factory=list)
     processed_events: list[str] = field(default_factory=list)
     cycle_trigger_ids: list[str] = field(default_factory=list)
     # Durable broker ledger.  Leg.deal_id necessarily changes after every trigger fill, while
@@ -112,6 +116,24 @@ class CycleState:
         record.update({"close_source": source.upper(), "close_level": str(level)})
         del self.deal_history[:-500]
 
+    def remember_attempt(
+        self, status: str, result: Decimal, *, include_in_total: bool = True, **details
+    ) -> None:
+        """Persist one unique trading attempt without feeding it into strategy recovery."""
+        attempt_id = self.active_attempt_id or self.diagnostic_cycle_number
+        if not attempt_id or any(item.get("attempt_id") == attempt_id for item in self.attempt_history):
+            return
+        self.attempt_history.append({
+            "attempt_id": attempt_id,
+            "status": status,
+            "result": str(result),
+            **{key: str(value) if isinstance(value, Decimal) else value
+               for key, value in details.items()},
+        })
+        if include_in_total:
+            self.attempt_result_total += result
+        del self.attempt_history[:-500]
+
     def save(self, path: str) -> None:
         payload = asdict(self)
         payload["recovery"] = str(self.recovery)
@@ -119,6 +141,7 @@ class CycleState:
         payload["realized_losses"] = str(self.realized_losses)
         payload["gross_take_profit"] = str(self.gross_take_profit)
         payload["net_cycle_result"] = str(self.net_cycle_result)
+        payload["attempt_result_total"] = str(self.attempt_result_total)
         payload["scenario_nine_prior_losses"] = str(self.scenario_nine_prior_losses)
         payload["scenario_nine_close_gap"] = str(self.scenario_nine_close_gap)
         payload["scenario_nine_total_loss"] = str(self.scenario_nine_total_loss)
@@ -163,6 +186,7 @@ class CycleState:
         raw["recovery"] = D(str(raw.get("recovery", "0")))
         for name in (
             "entry_spread", "realized_losses", "gross_take_profit", "net_cycle_result",
+            "attempt_result_total",
             "scenario_nine_prior_losses", "scenario_nine_close_gap",
             "scenario_nine_total_loss", "scenario_nine_extra_loss",
             "cycle_target_profit", "profit_override", "pending_tp_fill",
@@ -193,6 +217,7 @@ class CycleState:
         self.phase = "IDLE"
         self.processed_events.clear()
         self.cycle_trigger_ids.clear()
+        self.active_attempt_id = 0
 
 
 def stop_for(direction: str, entry: Decimal, distance: Decimal) -> Decimal:
