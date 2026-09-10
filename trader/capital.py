@@ -3,6 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from datetime import datetime
 import itertools
+import hashlib
 import json
 import logging
 import threading
@@ -36,6 +37,8 @@ class CapitalClient:
         self.session_generation = 0
         self._login_lock = threading.Lock()
         self._request_ids = itertools.count(1)
+        self._activity_log_lock = threading.Lock()
+        self._logged_activity_events: set[str] = set()
 
     def login(self, *, force: bool = False) -> None:
         with self._login_lock:
@@ -99,14 +102,38 @@ class CapitalClient:
             LOG.warning("CAPITAL REQUEST id=%s received 401; refreshing session", request_id)
             self.login()
             response = self.http.request(method, self.base + path, timeout=20, **kwargs)
-        self._log_response(request_id, response, started)
+        self._log_response(request_id, response, started, path=path)
         self._check(response)
         return response.json() if response.content else {}
 
-    @staticmethod
-    def _log_response(request_id, response: requests.Response, started: float) -> None:
+    def _log_response(self, request_id, response: requests.Response, started: float,
+                      *, path: str = "") -> None:
         try:
-            body = _json_text(_redact(response.json())) if response.content else "<empty>"
+            payload = _redact(response.json()) if response.content else None
+            if path == "/history/activity" and isinstance(payload, dict):
+                activities = payload.get("activities", [])
+                if isinstance(activities, list):
+                    unique = []
+                    with self._activity_log_lock:
+                        for event in activities:
+                            encoded = _json_text(event)
+                            digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+                            if digest not in self._logged_activity_events:
+                                self._logged_activity_events.add(digest)
+                                unique.append(event)
+                        # A bounded cache prevents an unusually long process from leaking memory.
+                        # Clearing only affects diagnostic de-duplication, never broker recovery.
+                        if len(self._logged_activity_events) > 20000:
+                            self._logged_activity_events.clear()
+                    body = _json_text({
+                        "activities_total": len(activities),
+                        "new_unique_activities": unique,
+                        "repeated_activities_suppressed": len(activities) - len(unique),
+                    })
+                else:
+                    body = _json_text(payload)
+            else:
+                body = _json_text(payload) if response.content else "<empty>"
         except (ValueError, TypeError):
             body = response.text
         LOG.info(

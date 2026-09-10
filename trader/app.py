@@ -1024,6 +1024,14 @@ class Bot:
                         + cycle_result_text(self.state, winner.direction, fill, self.cfg.size)
                     )
                     return
+                sl_closes = [
+                    (leg, self._closing_fill_any_index(leg, "SL", global_activity))
+                    for leg in missing
+                ]
+                confirmed_stops = [(leg, fill) for leg, fill in sl_closes if fill is not None]
+                if len(confirmed_stops) == len(missing) == 2:
+                    self._pause_after_double_stop(confirmed_stops)
+                    return
                 # Capital.com commonly publishes the SL activity first and the opposite TP
                 # several seconds later.  The diagnostic log showed exactly that ordering:
                 # both positions were already absent, BUY had source=SL, while SELL activity
@@ -1769,21 +1777,52 @@ class Bot:
             f"Recovery: {self.state.recovery}\nРасчётный SL: {leg.stop}\n"
             f"Расчётный TP: {leg.take_profit}"
         )
-        if self._resolve_opposite_tp_after_market(leg):
-            return
+        # Re-read both positions before any PUT. A close can be indexed while MARKET is being
+        # confirmed; never delay protection of the new leg by updating a confirmed-closed one.
+        positions = self._cycle_positions()
+        opposite = self.state.short if leg.direction == "BUY" else self.state.long
+        if opposite and opposite.deal_id not in positions:
+            try:
+                if self._resolve_opposite_tp_after_market(leg):
+                    return
+            except TypeError:
+                # Test doubles and temporarily malformed history are not closure evidence.
+                LOG.warning("Opposite TP history is not iterable; reconciliation deferred")
+            try:
+                opposite_sl = self._closing_fill(opposite, "SL")
+            except (CapitalError, TypeError):
+                opposite_sl = None
+            if opposite_sl is not None:
+                self._tick_cycle()
+                return
+        if actual_id not in positions:
+            try:
+                reopened_closed = (
+                    self._closing_fill(leg, "SL") is not None
+                    or self._closing_fill(leg, "TP") is not None
+                )
+            except (CapitalError, TypeError):
+                reopened_closed = False
+            if reopened_closed:
+                self._tick_cycle()
+                return
         try:
             if self.state.scenario == self.cfg.max_scenarios:
                 self._enter_manual_nine()
             else:
-                long_ok = self._apply_protection(self.state.long)
-                short_ok = self._apply_protection(self.state.short)
+                reopened_ok = self._apply_protection(leg)
+                opposite_ok = (
+                    self._apply_protection(opposite)
+                    if opposite and opposite.deal_id in positions else False
+                )
+                long_ok = reopened_ok if leg.direction == "BUY" else opposite_ok
+                short_ok = reopened_ok if leg.direction == "SELL" else opposite_ok
         except Exception as exc:
             self._manual(f"MARKET trigger исполнен, но защита не подтверждена: {exc}")
             return
         self.state.save(self.cfg.state_file)
         if not self.state.active:
             return
-        positions = self._cycle_positions()
         actual = positions.get(actual_id)
         opposite = self.state.short if leg.direction == "BUY" else self.state.long
         self.telegram.send(
@@ -1802,6 +1841,43 @@ class Bot:
         # protected; event keys in Strategy keep this immediate reconciliation idempotent.
         if opposite and opposite.open and opposite.deal_id and opposite.deal_id not in positions:
             self._tick_cycle()
+
+    def _pause_after_double_stop(self, closes: list[tuple[Leg, Decimal]]) -> None:
+        """Persist an unambiguous flat/two-SL outcome without inventing a reopen rule."""
+        attempt_id = self.state.active_attempt_id or self.state.diagnostic_cycle_number
+        details = []
+        for leg, fill in closes:
+            if leg.open:
+                self.strategy.stopped(leg.direction, fill, f"stop:{leg.deal_id}:{fill}")
+            points = fill - leg.current_entry if leg.direction == "BUY" else leg.current_entry - fill
+            details.append((leg, fill, points * self.cfg.size))
+        money = sum((item[2] for item in details), D("0"))
+        self.state.remember_attempt(
+            "DOUBLE_SL_PAUSED", money, scenario=self.state.scenario,
+            closes=[{"direction": leg.direction, "deal_id": leg.deal_id,
+                     "fill": str(fill), "result": str(result)}
+                    for leg, fill, result in details],
+            completed_cycle=None,
+        )
+        self.state.active = False
+        self.state.armed = False
+        self.state.paused = True
+        self.state.manual = False
+        self.state.phase = "PAUSED_DOUBLE_SL"
+        self.state.active_attempt_id = 0
+        self.state.save(self.cfg.state_file)
+        end_diagnostic_cycle(self.cfg.diagnostic_log_file, self.state.attempt_counter + 1,
+                             self.state.completed_cycles)
+        lines = "\n".join(
+            f"{leg.direction}: вход {leg.current_entry}, SL fill {fill}, результат {result}"
+            for leg, fill, result in details
+        )
+        self.telegram.send(
+            f"⏸ Попытка №{attempt_id}: обе позиции подтверждённо закрыты по SL\n"
+            f"{lines}\nИтог попытки: {money}\nRecovery сохранён: {self.state.recovery}\n"
+            "Открытых позиций нет, а правило следующего автоматического действия не задано. "
+            "Автоматика поставлена на паузу; продолжение только после /start."
+        )
 
     def _resolve_opposite_tp_after_market(self, reopened: Leg) -> bool:
         """Close a resolved MARKET leg if the former survivor already completed by TP."""

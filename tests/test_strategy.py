@@ -2012,6 +2012,36 @@ class EntryRetryTest(unittest.TestCase):
         self.assertEqual(bot.state.short.trigger_id, "trigger-1")
 
 
+    def test_two_confirmed_stops_pause_attempt_once(self):
+        bot = self.make_bot()
+        object.__setattr__(bot.cfg, "size", D("10"))
+        bot.state.active_attempt_id = bot.state.attempt_counter = 224
+        bot.state.long.deal_id = "buy-224"
+        bot.state.short.deal_id = "sell-224"
+        bot.state.long.current_entry = D("4372.74")
+        bot.state.short.current_entry = D("4371.16")
+        with tempfile.TemporaryDirectory() as directory:
+            object.__setattr__(bot.cfg, "state_file", str(Path(directory) / "state.json"))
+            object.__setattr__(
+                bot.cfg, "diagnostic_log_file", str(Path(directory) / "diagnostics.log")
+            )
+            with patch("trader.app.end_diagnostic_cycle"):
+                bot._pause_after_double_stop([
+                    (bot.state.long, D("4371.22")),
+                    (bot.state.short, D("4373.53")),
+                ])
+                total = bot.state.attempt_result_total
+                bot._pause_after_double_stop([
+                    (bot.state.long, D("4371.22")),
+                    (bot.state.short, D("4373.53")),
+                ])
+        self.assertEqual(bot.state.phase, "PAUSED_DOUBLE_SL")
+        self.assertFalse(bot.state.active)
+        self.assertEqual(total, D("-38.90"))
+        self.assertEqual(bot.state.attempt_result_total, total)
+        self.assertEqual(len(bot.state.attempt_history), 1)
+
+
 class DiagnosticHistoryTest(unittest.TestCase):
     def _write(self, handler, text):
         handler.emit(__import__("logging").LogRecord(
@@ -2065,6 +2095,18 @@ class DiagnosticHistoryTest(unittest.TestCase):
 
 
 class CapitalClientTest(unittest.TestCase):
+    def test_repeated_activity_responses_log_unique_events_once(self):
+        client = CapitalClient(Settings(api_key="key", identifier="id", password="password"))
+        response = Mock(status_code=200, content=b"yes", text="")
+        event = {"dealId": "sell-224", "source": "SL", "details": {"level": 4373.53}}
+        response.json.return_value = {"activities": [event]}
+        with self.assertLogs("trader.capital", level="INFO") as captured:
+            client._log_response(1, response, time.monotonic(), path="/history/activity")
+            client._log_response(2, response, time.monotonic(), path="/history/activity")
+        joined = "\n".join(captured.output)
+        self.assertEqual(joined.count('"dealId":"sell-224"'), 1)
+        self.assertIn('"repeated_activities_suppressed":1', joined)
+
     def test_parallel_session_refresh_is_performed_once(self):
         client = CapitalClient(Settings(api_key="key", identifier="id", password="password"))
         response = Mock(ok=True, status_code=200, content=b"{}")
