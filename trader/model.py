@@ -61,6 +61,9 @@ class CycleState:
     profit_override_remaining: int = 0
     pending_tp_direction: str = ""
     pending_tp_fill: Decimal | None = None
+    pending_close_direction: str = ""
+    pending_close_reference: str = ""
+    pending_close_reason: str = ""
     long: Leg | None = None
     short: Leg | None = None
     phase: str = "IDLE"
@@ -72,6 +75,10 @@ class CycleState:
     active_attempt_id: int = 0
     attempt_result_total: Decimal = D("0")
     attempt_history: list[dict] = field(default_factory=list)
+    initial_submitted_directions: list[str] = field(default_factory=list)
+    attempt_deal_ids: list[str] = field(default_factory=list)
+    pending_actual_attempt_id: int = 0
+    pending_actual_deal_ids: list[str] = field(default_factory=list)
     processed_events: list[str] = field(default_factory=list)
     cycle_trigger_ids: list[str] = field(default_factory=list)
     # Durable broker ledger.  Leg.deal_id necessarily changes after every trigger fill, while
@@ -92,6 +99,7 @@ class CycleState:
             "direction": leg.direction,
             "entry": str(leg.current_entry),
             "scenario": self.scenario if scenario is None else scenario,
+            "attempt_id": self.active_attempt_id or self.diagnostic_cycle_number,
             "trigger_id": leg.trigger_id,
             "close_source": "",
             "close_level": None,
@@ -103,6 +111,8 @@ class CycleState:
             values["close_source"] = record.get("close_source", "")
             values["close_level"] = record.get("close_level")
             record.update(values)
+        if leg.deal_id not in self.attempt_deal_ids:
+            self.attempt_deal_ids.append(leg.deal_id)
         # This is diagnostic/recovery metadata rather than an unbounded transaction database.
         del self.deal_history[:-500]
 
@@ -213,10 +223,13 @@ class CycleState:
         self.scenario_nine_long_fill = self.scenario_nine_short_fill = None
         self.pending_tp_direction = ""
         self.pending_tp_fill = None
+        self.pending_close_direction = self.pending_close_reference = self.pending_close_reason = ""
         self.long = self.short = None
         self.phase = "IDLE"
         self.processed_events.clear()
         self.cycle_trigger_ids.clear()
+        self.initial_submitted_directions.clear()
+        self.attempt_deal_ids.clear()
         self.active_attempt_id = 0
 
 

@@ -197,6 +197,9 @@ class StrategyTest(unittest.TestCase):
         self.state.attempt_result_total = D("-46.40")
         self.state.attempt_history = [{"attempt_id": 212, "status": "INITIAL_PAIR_NOT_FORMED",
                                        "result": "-15.20"}]
+        self.state.initial_submitted_directions = ["BUY", "SELL"]
+        self.state.pending_close_direction = "SELL"
+        self.state.pending_close_reference = "close-ref"
         with tempfile.NamedTemporaryFile() as file:
             self.state.save(file.name)
             restored = CycleState.load(file.name)
@@ -209,6 +212,8 @@ class StrategyTest(unittest.TestCase):
         self.assertEqual(restored.active_attempt_id, 212)
         self.assertEqual(restored.attempt_result_total, D("-46.40"))
         self.assertEqual(restored.attempt_history[0]["attempt_id"], 212)
+        self.assertEqual(restored.initial_submitted_directions, ["BUY", "SELL"])
+        self.assertEqual(restored.pending_close_reference, "close-ref")
 
     def test_deal_ids_survive_reopen_reset_and_state_round_trip(self):
         self.state.long.deal_id = "long-1"
@@ -382,6 +387,78 @@ class EntryRetryTest(unittest.TestCase):
         self.assertEqual(bot.state.scenario_nine_short_fill, D("4406.50"))
         self.assertEqual(bot.state.scenario_nine_close_gap, D("0.48"))
 
+    def test_scenario_nine_actual_deal_result_updates_attempt_total_once(self):
+        bot = self.make_bot()
+        bot.cfg = Settings(
+            dry_run=False, api_key="key", identifier="id", password="password",
+            size=D("10"), state_file=bot.cfg.state_file,
+        )
+        bot.strategy = Strategy(bot.cfg, bot.state)
+        bot.state.scenario = 8
+        bot.state.attempt_counter = bot.state.active_attempt_id = 9
+        bot.state.diagnostic_cycle_number = 9
+        bot.state.attempt_result_total = D("20")
+        bot.state.long.deal_id, bot.state.long.current_entry = "long-9", D("100")
+        bot.state.short.deal_id, bot.state.short.current_entry = "short-9", D("100")
+        bot.state.attempt_deal_ids = ["long-9", "short-9"]
+        bot.state.remember_deal(bot.state.long)
+        bot.state.remember_deal(bot.state.short)
+        bot.capital.positions.return_value = [
+            {"position": {"dealId": "long-9", "direction": "BUY", "level": 100},
+             "market": {"epic": bot.cfg.epic}},
+            {"position": {"dealId": "short-9", "direction": "SELL", "level": 100},
+             "market": {"epic": bot.cfg.epic}},
+        ]
+        bot.capital.update_position.side_effect = lambda deal_id, stop, tp: f"update-{deal_id}"
+        bot.capital.close_position.side_effect = lambda deal_id: f"close-{deal_id}"
+        bot.capital.wait_confirmation.side_effect = lambda reference: (
+            {"dealStatus": "ACCEPTED"} if reference.startswith("update-") else
+            {"dealStatus": "ACCEPTED", "dealId": reference.removeprefix("close-"),
+             "level": 94 if reference.endswith("long-9") else 107}
+        )
+
+        with patch("trader.app.time.sleep"):
+            bot._enter_manual_nine()
+            bot._refresh_actual_attempt_result()
+
+        attempt = next(item for item in bot.state.attempt_history if item["attempt_id"] == 9)
+        self.assertEqual(attempt["actual_result"], "-130")
+        self.assertEqual(attempt["actual_result_status"], "CONFIRMED")
+        self.assertEqual(bot.state.attempt_result_total, D("-110"))
+        self.assertEqual(bot.state.pending_actual_attempt_id, 0)
+
+    def test_pending_scenario_nine_actual_result_survives_reload_and_is_idempotent(self):
+        bot = self.make_bot()
+        bot.cfg = Settings(
+            dry_run=False, api_key="key", identifier="id", password="password",
+            size=D("10"), state_file=bot.cfg.state_file,
+        )
+        bot.state.attempt_history = [{
+            "attempt_id": 12, "status": "COMPLETED_SCENARIO_9",
+            "result": "-99", "actual_result_status": "PENDING",
+        }]
+        bot.state.deal_history = [{
+            "deal_id": "scenario9-deal", "direction": "BUY", "entry": "100",
+            "close_level": None,
+        }]
+        bot.state.pending_actual_attempt_id = 12
+        bot.state.pending_actual_deal_ids = ["scenario9-deal"]
+        bot.capital.activity.return_value = []
+        self.assertFalse(bot._refresh_actual_attempt_result())
+        restored = CycleState.load(bot.cfg.state_file)
+        self.assertEqual(restored.pending_actual_attempt_id, 12)
+
+        bot.state = restored
+        bot.strategy = Strategy(bot.cfg, bot.state)
+        bot.capital.activity.return_value = [{
+            "dealId": "scenario9-deal", "source": "USER", "type": "POSITION",
+            "status": "ACCEPTED", "details": {"direction": "SELL", "level": 97},
+        }]
+        self.assertTrue(bot._refresh_actual_attempt_result())
+        self.assertTrue(bot._refresh_actual_attempt_result())
+        self.assertEqual(bot.state.attempt_result_total, D("-30"))
+        self.assertEqual(bot.state.attempt_history[0]["actual_result_status"], "CONFIRMED")
+
     def test_scenario_nine_closes_trigger_that_executes_during_cancellation(self):
         bot = self.make_bot()
         bot.capital.activity.return_value = []
@@ -394,7 +471,7 @@ class EntryRetryTest(unittest.TestCase):
         }]
         bot.capital.close_position.return_value = "close-extra"
         bot.capital.wait_confirmation.return_value = {
-            "dealStatus": "ACCEPTED", "level": 4001,
+            "dealStatus": "ACCEPTED", "dealId": "extra-sell", "level": 4001,
         }
 
         with patch("trader.app.time.sleep"):
@@ -470,7 +547,7 @@ class EntryRetryTest(unittest.TestCase):
         bot.capital.quote.return_value = (D("4008.00"), D("4008.20"))
         bot.capital.close_position.return_value = "close-ref"
         bot.capital.wait_confirmation.return_value = {
-            "dealStatus": "ACCEPTED", "level": 4008.18,
+            "dealStatus": "ACCEPTED", "dealId": "short-1", "level": 4008.18,
         }
 
         protected = bot._apply_protection(leg)
@@ -491,7 +568,7 @@ class EntryRetryTest(unittest.TestCase):
         bot.capital.quote.return_value = (D("4008.00"), D("4008.20"))
         bot.capital.close_position.return_value = "close-ref"
         bot.capital.wait_confirmation.return_value = {
-            "dealStatus": "ACCEPTED", "level": 4008.18,
+            "dealStatus": "ACCEPTED", "dealId": "short-1", "level": 4008.18,
         }
         bot.capital.delete_working_order.return_value = True
 
@@ -510,7 +587,7 @@ class EntryRetryTest(unittest.TestCase):
         bot.capital.quote.return_value = (D("4008.00"), D("4008.20"))
         bot.capital.close_position.return_value = "close-ref"
         bot.capital.wait_confirmation.return_value = {
-            "dealStatus": "ACCEPTED", "level": 4008.18,
+            "dealStatus": "ACCEPTED", "dealId": "short-1", "level": 4008.18,
         }
         bot.capital.delete_working_order.return_value = False
         bot._close_trigger_that_raced_with_tp = Mock(return_value=D("0.20"))
@@ -530,7 +607,7 @@ class EntryRetryTest(unittest.TestCase):
         bot.capital.quote.return_value = (D("4008.00"), D("4008.20"))
         bot.capital.close_position.return_value = "close-ref"
         bot.capital.wait_confirmation.return_value = {
-            "dealStatus": "ACCEPTED", "level": 4008.18,
+            "dealStatus": "ACCEPTED", "dealId": "short-1", "level": 4008.18,
         }
         bot.capital.delete_working_order.return_value = False
         bot._close_trigger_that_raced_with_tp = Mock(side_effect=[None, D("0.20")])
@@ -548,6 +625,37 @@ class EntryRetryTest(unittest.TestCase):
         self.assertIsNone(bot.state.pending_tp_fill)
         self.assertEqual(bot.state.net_cycle_result, D("0.57"))
 
+    def test_identifierless_close_waits_for_history_without_second_delete(self):
+        bot = self.make_bot()
+        winner = bot.state.long
+        winner.deal_id = "buy-close-id"
+        winner.take_profit = D("4011.60")
+        bot.state.phase = "LONG_ONLY"
+        bot.state.short.open = False
+        bot.capital.quote.return_value = D("4011.70"), D("4011.90")
+        bot.capital.close_position.return_value = "close-ref"
+        # ACCEPTED level is deliberately untrusted because both dealId and affectedDeals are absent.
+        bot.capital.wait_confirmation.return_value = {
+            "dealStatus": "ACCEPTED", "level": 4011.72,
+        }
+        close_visible = False
+        bot.capital.activity.side_effect = lambda deal_id="", last_period=86400: ([{
+            "dealId": "buy-close-id", "source": "TP", "type": "POSITION",
+            "status": "ACCEPTED", "details": {"level": 4011.71, "direction": "SELL"},
+        }] if close_visible else [])
+
+        with patch("trader.app.time.sleep"):
+            self.assertFalse(bot._apply_protection(winner))
+        self.assertEqual(bot.state.pending_close_reference, "close-ref")
+        bot.capital.close_position.assert_called_once()
+
+        close_visible = True
+        with patch("trader.app.time.sleep"):
+            bot._tick_cycle()
+        bot.capital.close_position.assert_called_once()
+        self.assertEqual(bot.state.pending_close_reference, "")
+        self.assertFalse(bot.state.active)
+
     def test_take_profit_maxvalue_race_falls_back_to_market_close(self):
         bot = self.make_bot()
         leg = bot.state.short
@@ -562,7 +670,7 @@ class EntryRetryTest(unittest.TestCase):
         )
         bot.capital.close_position.return_value = "close-ref"
         bot.capital.wait_confirmation.return_value = {
-            "dealStatus": "ACCEPTED", "level": 4008.18,
+            "dealStatus": "ACCEPTED", "dealId": "short-1", "level": 4008.18,
         }
 
         self.assertFalse(bot._apply_protection(leg))
@@ -831,6 +939,103 @@ class EntryRetryTest(unittest.TestCase):
         self.assertTrue(bot.state.paused)
         self.assertEqual(bot.state.attempt_history[-1]["attempt_id"], 17)
         self.assertEqual(bot.state.attempt_result_total, D("-15.20"))
+
+    def _pending_second_initial_bot(self, both_closed=False):
+        bot = self.make_bot()
+        bot.cfg = Settings(
+            dry_run=False, api_key="key", identifier="id", password="password",
+            size=D("10"), stop_distance=D("1.5"), target_profit=D("0.5"),
+            state_file=bot.cfg.state_file,
+        )
+        bot.state.reset()
+        bot.strategy = Strategy(bot.cfg, bot.state)
+        bot.strategy.begin(D("100"), D("99.5"))
+        bot.state.attempt_counter = bot.state.active_attempt_id = 21
+        bot.state.diagnostic_cycle_number = 21
+        bot.state.initial_submitted_directions = ["BUY", "SELL"]
+        bot.state.long.deal_id = "buy-position"
+        bot.state.long.deal_reference = "buy-ref"
+        bot.state.short.pending_market_kind = "INITIAL"
+        bot.state.short.pending_market_reference = "sell-ref"
+        bot.state.short.pending_market_preexisting_ids = ["buy-position"]
+        bot.capital.wait_confirmation.return_value = {
+            "dealStatus": "ACCEPTED", "dealId": "sell-execution",
+            "affectedDeals": [{"dealId": "sell-position", "status": "OPENED"}],
+            "level": 99.5, "direction": "SELL",
+        }
+        bot.capital.wait_position.return_value = {
+            "dealId": "sell-position", "direction": "SELL", "level": 99.5,
+        }
+        sell_position = {"position": {
+            "dealId": "sell-position", "direction": "SELL", "level": 99.5,
+            "stopLevel": 101.0, "profitLevel": 97.5,
+        }, "market": {"epic": bot.cfg.epic}}
+        bot.capital.positions.return_value = [] if both_closed else [sell_position]
+        events = [{
+            "dealId": "buy-position", "source": "SL", "type": "POSITION",
+            "status": "ACCEPTED", "details": {"level": 98.5, "direction": "SELL"},
+        }]
+        if both_closed:
+            events.append({
+                "dealId": "sell-position", "source": "TP", "type": "POSITION",
+                "status": "ACCEPTED", "details": {"level": 97.5, "direction": "BUY"},
+            })
+        bot.capital.activity.side_effect = lambda deal_id="", last_period=86400: (
+            [item for item in events if not deal_id or item["dealId"] == deal_id]
+        )
+        bot.capital.working_orders.return_value = []
+        bot.capital.working_stop.return_value = "buy-trigger-ref"
+        bot.capital.wait_confirmation.side_effect = lambda reference: (
+            {"dealStatus": "ACCEPTED", "dealId": "buy-trigger"}
+            if reference == "buy-trigger-ref" else {
+                "dealStatus": "ACCEPTED", "dealId": "sell-execution",
+                "affectedDeals": [{"dealId": "sell-position", "status": "OPENED"}],
+                "level": 99.5, "direction": "SELL",
+            }
+        )
+        return bot
+
+    def test_delayed_second_initial_with_opposite_sl_continues_formed_cycle(self):
+        bot = self._pending_second_initial_bot()
+        with patch("trader.app.time.sleep"):
+            bot._tick_cycle()
+        bot.capital.open_position.assert_not_called()
+        self.assertEqual(bot.state.phase, "SHORT_ONLY")
+        self.assertEqual(bot.state.realized_losses, D("1.5"))
+        self.assertEqual(bot.state.long.trigger_id, "buy-trigger")
+        self.assertFalse(bot.state.paused)
+
+    def test_delayed_second_initial_both_closed_accounts_sl_before_tp_once(self):
+        bot = self._pending_second_initial_bot(both_closed=True)
+        with patch("trader.app.time.sleep"):
+            bot._tick_cycle()
+            self.assertFalse(bot._resume_pending_market())
+        self.assertFalse(bot.state.active)
+        self.assertEqual(bot.state.realized_losses, D("1.5"))
+        self.assertEqual(bot.state.gross_take_profit, D("2.0"))
+        self.assertEqual(bot.state.net_cycle_result, D("0.5"))
+        self.assertEqual(bot.state.attempt_result_total, D("5.0"))
+        self.assertEqual(len(bot.state.attempt_history), 1)
+        bot.capital.open_position.assert_not_called()
+
+    def test_delayed_second_initial_rejection_accounts_first_close_and_pauses(self):
+        bot = self._pending_second_initial_bot()
+        bot.capital.positions.return_value = []
+        bot.capital.wait_confirmation.side_effect = None
+        bot.capital.wait_confirmation.return_value = {
+            "dealStatus": "REJECTED", "dealId": "sell-execution", "reason": "rejected",
+        }
+        bot.capital.activity.side_effect = lambda deal_id="", last_period=86400: ([{
+            "dealId": "buy-position", "source": "SL", "type": "POSITION",
+            "status": "ACCEPTED", "details": {"level": 98.5, "direction": "SELL"},
+        }] if not deal_id or deal_id == "buy-position" else [])
+        with patch("trader.app.time.sleep"):
+            bot._tick_cycle()
+            bot.tick()
+        self.assertTrue(bot.state.paused)
+        self.assertEqual(bot.state.attempt_result_total, D("-15.0"))
+        self.assertEqual(bot.state.attempt_history[-1]["opposite_order_sent"], True)
+        bot.capital.open_position.assert_not_called()
 
     def test_first_initial_leg_is_checked_before_second_entry(self):
         bot = self.make_bot()
@@ -1452,7 +1657,8 @@ class EntryRetryTest(unittest.TestCase):
                 "affectedDeals": [{"dealId": "sell-new", "status": "OPENED"}],
                 "level": 4009.68,
             },
-            "close-sell": {"dealStatus": "ACCEPTED", "level": 4009.88},
+            "close-sell": {"dealStatus": "ACCEPTED", "dealId": "sell-new",
+                           "level": 4009.88},
             "trigger-ref": {"dealStatus": "ACCEPTED", "dealId": "buy-trigger"},
         }.get(reference, {"dealStatus": "ACCEPTED"})
         bot.capital.activity.side_effect = lambda deal_id="", last_period=86400: [{
@@ -1561,7 +1767,7 @@ class EntryRetryTest(unittest.TestCase):
         }]
         bot.capital.close_position.return_value = "close-late"
         bot.capital.wait_confirmation.return_value = {
-            "dealStatus": "ACCEPTED", "level": 4010.2,
+            "dealStatus": "ACCEPTED", "dealId": "late-sell", "level": 4010.2,
         }
 
         with patch("trader.app.time.sleep"):
