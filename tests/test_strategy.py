@@ -13,6 +13,7 @@ from pydroid_installer import copy_project, create_config, safe_extract
 from trader.app import Bot
 from trader.capital import CapitalClient, CapitalError
 from trader.config import Settings
+from trader.cycle_continuation import CycleContinuation
 from trader.diagnostics import CycleFileHandler
 from trader.engine import Strategy
 from trader.events import (
@@ -205,6 +206,8 @@ class StrategyTest(unittest.TestCase):
         self.state.continuation_pause_until = 1789146300.0
         self.state.continuation_stopped_by_user = True
         self.state.cycle_attempt_start_losses = D("14.71")
+        self.state.continuation_managed = True
+        self.state.continuation_stage = "FORMING_PAIR"
         with tempfile.NamedTemporaryFile() as file:
             self.state.save(file.name)
             restored = CycleState.load(file.name)
@@ -223,6 +226,8 @@ class StrategyTest(unittest.TestCase):
         self.assertEqual(restored.continuation_pause_until, 1789146300.0)
         self.assertTrue(restored.continuation_stopped_by_user)
         self.assertEqual(restored.cycle_attempt_start_losses, D("14.71"))
+        self.assertTrue(restored.continuation_managed)
+        self.assertEqual(restored.continuation_stage, "FORMING_PAIR")
         self.assertEqual(restored.pending_close_reference, "close-ref")
 
     def test_deal_ids_survive_reopen_reset_and_state_round_trip(self):
@@ -1051,6 +1056,8 @@ class EntryRetryTest(unittest.TestCase):
             object.__setattr__(bot.cfg, "diagnostic_log_file", str(Path(directory) / "log"))
             bot._tick_cycle()
             self.assertEqual(bot.state.phase, "DOUBLE_SL_PAUSE")
+            self.assertTrue(bot.state.continuation_managed)
+            self.assertEqual(bot.state.continuation_stage, "PAUSE")
             self.assertEqual(bot.state.continuation_pause_until, 1300)
             self.assertEqual(bot.state.realized_losses, D("14.71"))
             self.assertEqual(bot.state.attempt_result_total, D("-147.10"))
@@ -1060,6 +1067,23 @@ class EntryRetryTest(unittest.TestCase):
             with patch("trader.app.time.time", return_value=1301):
                 bot.tick()
             self.assertEqual(bot.state.phase, "CONTINUATION_FILTER")
+            self.assertEqual(bot.state.continuation_stage, "FILTER")
+
+    def test_continuation_controller_owns_pending_pair_reconciliation(self):
+        bot = self._pending_second_initial_bot(both_closed=False)
+        bot.state.cycle_id = 254
+        bot.state.cycle_attempt = 2
+        bot.state.continuation_managed = True
+        bot.state.continuation_stage = "FORMING_PAIR"
+        bot.continuation = CycleContinuation(bot)
+        bot.command("/stop")
+        with patch("trader.app.time.sleep"):
+            bot.tick()
+            bot.tick()
+        bot.capital.open_position.assert_not_called()
+        self.assertTrue(bot.state.continuation_managed)
+        self.assertTrue(bot.state.continuation_stopped_by_user)
+        self.assertIn(bot.state.continuation_stage, {"FORMING_PAIR", "ACTIVE"})
 
     def test_continuation_recovery_uses_losses_target_and_new_spread_once(self):
         bot = self.make_bot()

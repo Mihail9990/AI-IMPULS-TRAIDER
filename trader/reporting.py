@@ -14,6 +14,8 @@ def status_text(state: CycleState) -> str:
         f"cycle_id={state.cycle_id or '-'}, cycle_attempt={state.cycle_attempt or '-'}, "
         f"continuation_until={state.continuation_pause_until or '-'}, "
         f"continuation_blocked={state.continuation_stopped_by_user}, "
+        f"continuation_owner={state.continuation_managed}, "
+        f"continuation_stage={state.continuation_stage or '-'}, "
         f"completed_cycles={state.completed_cycles}, all_attempts_result={state.attempt_result_total}, "
         f"attempt_statistics={'УТОЧНЯЕТСЯ' if state.pending_actual_attempt_id else 'ПОЛНАЯ'}, "
         f"cycle_target={state.cycle_target_profit}, "

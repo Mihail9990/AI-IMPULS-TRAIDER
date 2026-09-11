@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .capital import CapitalClient, CapitalError
 from .config import Settings
+from .cycle_continuation import CycleContinuation
 from .diagnostics import (
     begin_diagnostic_cycle,
     configure_diagnostics,
@@ -54,6 +55,18 @@ class Bot:
         self._stream_signal = False
         self._last_cycle_rest_check = 0.0
         self.execution_policy = ExecutionPolicy()
+        self.continuation = CycleContinuation(self)
+        if (not self.state.continuation_managed and self.state.active
+                and self.state.cycle_attempt > 1):
+            self.state.continuation_managed = True
+            if any(leg and leg.pending_market_kind for leg in (self.state.long, self.state.short)):
+                self.state.continuation_stage = "FORMING_PAIR"
+            elif self.state.phase == "CONTINUATION_FILTER":
+                self.state.continuation_stage = "FILTER"
+            elif self.state.phase == "DOUBLE_SL_RECONCILING":
+                self.state.continuation_stage = "RECONCILING"
+            else:
+                self.state.continuation_stage = "ACTIVE"
         if self.state.phase == "PAUSED_DOUBLE_SL":
             # Compatible migration from the one-release safety pause. No broker mutation is
             # performed here; startup reconciliation still runs before the timer can release.
@@ -61,6 +74,8 @@ class Bot:
             self.state.paused = True
             self.state.phase = "DOUBLE_SL_PAUSE"
             self.state.continuation_pause_until = time.time() + 300
+            self.state.continuation_managed = True
+            self.state.continuation_stage = "PAUSE"
         if self.state.active:
             attempt = (
                 self.state.active_attempt_id or self.state.diagnostic_cycle_number
@@ -80,10 +95,17 @@ class Bot:
                 self.state.completed_cycles,
             )
 
+    def _get_continuation(self) -> CycleContinuation:
+        controller = getattr(self, "continuation", None)
+        if controller is None:
+            controller = self.continuation = CycleContinuation(self)
+        return controller
+
     def _complete_cycle(self, direction: str, fill: Decimal | None) -> None:
         """Complete one cycle and move subsequent startup/gap records outside its boundary."""
         attempt_id = self.state.active_attempt_id
         self.strategy.complete(direction, fill)
+        self._get_continuation().release()
         self.state.remember_attempt(
             "COMPLETED_CYCLE", self.state.net_cycle_result * self.cfg.size,
             scenario=self.state.scenario, completed_cycle=self.state.completed_cycles,
@@ -103,6 +125,9 @@ class Bot:
         self, leg: Leg, source: str, fill: Decimal, *, opposite_sent: bool
     ) -> None:
         """Account for a resolved one-sided initial attempt and require an explicit /start."""
+        if self.state.continuation_managed:
+            self._get_continuation().finish_single_leg(leg, source, fill)
+            return
         entry = leg.current_entry
         points = fill - entry if leg.direction == "BUY" else entry - fill
         money = points * self.cfg.size
@@ -263,7 +288,8 @@ class Bot:
             )
         elif command in {"/pause", "/stop"}:
             self.state.paused = True
-            if self.state.phase in {"DOUBLE_SL_PAUSE", "CONTINUATION_FILTER"}:
+            if (self.state.continuation_managed
+                    or self.state.phase in {"DOUBLE_SL_PAUSE", "CONTINUATION_FILTER"}):
                 self.state.continuation_stopped_by_user = True
             if not self.state.active:
                 self.state.armed = False
@@ -271,7 +297,8 @@ class Bot:
                 self.state.phase = "PAUSED"
                 self.telegram.send("Пауза: новый цикл не откроется до команды /start.")
             else:
-                if self.state.phase in {"DOUBLE_SL_PAUSE", "CONTINUATION_FILTER"}:
+                if (self.state.continuation_managed
+                        or self.state.phase in {"DOUBLE_SL_PAUSE", "CONTINUATION_FILTER"}):
                     self.telegram.send(
                         "⛔ /stop принят: автоматическое продолжение цикла после двух SL "
                         "заблокировано. Состояние и таймер сохранены."
@@ -351,7 +378,21 @@ class Bot:
             self.state.continuation_stopped_by_user = False
             self.state.paused = False
             self.state.phase = "CONTINUATION_FILTER"
+            self.state.continuation_managed = True
+            self.state.continuation_stage = "FILTER"
             self.state.save(self.cfg.state_file)
+            return
+        if self.state.phase == "CONTINUATION_MANUAL_PAIR_PAUSE":
+            if self._cycle_positions() or any(
+                self._order_epic(item) == self.cfg.epic for item in self.capital.working_orders()
+            ):
+                raise RuntimeError("Связанные позиции/ордера ещё не разрешены; /start заблокирован")
+            self.state.paused = False
+            self.state.armed = True
+            self.state.phase = "CONTINUATION_FILTER"
+            self.state.continuation_stage = "FILTER"
+            self.state.save(self.cfg.state_file)
+            self.telegram.send("🔎 Ручная пауза снята; ожидаю фильтр продолжения того же цикла.")
             return
         self.state.paused = False
         if self.state.active:
@@ -368,10 +409,8 @@ class Bot:
     def tick(self) -> None:
         if self.state.pending_actual_attempt_id:
             self._refresh_actual_attempt_result()
-        if self.state.phase == "DOUBLE_SL_PAUSE":
-            self._tick_continuation_pause()
-        elif self.state.phase == "CONTINUATION_FILTER" and not self.state.paused:
-            self._tick_filter()
+        if self.state.continuation_managed:
+            self._get_continuation().tick()
         elif self.state.armed and not self.state.active and not self.state.paused:
             self._tick_filter()
         elif self.state.active:
@@ -397,16 +436,20 @@ class Bot:
             return True
         return False
 
-    def _tick_filter(self) -> None:
+    def _tick_filter(self, starter=None) -> None:
+        starter = starter or self._start_cycle
         closed, current = self.capital.candle_ranges(self.cfg.epic, self.cfg.candle_minutes)
         if not self.state.waiting_current_candle and closed >= self.cfg.entry_range:
-            self._start_cycle(f"закрытая свеча: {closed}")
+            starter(f"закрытая свеча: {closed}")
         elif current >= self.cfg.entry_range:
-            self._start_cycle(f"текущая свеча: {current}")
+            starter(f"текущая свеча: {current}")
         else:
             self.state.waiting_current_candle = True
 
     def _start_cycle(self, filter_reason: str = "условие фильтра выполнено") -> None:
+        self._start_pair_common(filter_reason, continuation=False)
+
+    def _start_pair_common(self, filter_reason: str, *, continuation: bool) -> None:
         positions = self._cycle_positions()
         orders = [item for item in self.capital.working_orders()
                   if self._order_epic(item) == self.cfg.epic]
@@ -424,7 +467,6 @@ class Bot:
             LOG.info("Broker flat check %s/3 before new cycle", self._flat_checks)
             return
         self._flat_checks = 0
-        continuation = self.state.phase == "CONTINUATION_FILTER" and self.state.active
         if continuation:
             self.state.attempt_counter = max(
                 self.state.attempt_counter, self.state.diagnostic_cycle_number
@@ -586,6 +628,9 @@ class Bot:
             f"BUY SL/TP: {self.state.long.stop} / {self.state.long.take_profit}\n"
             f"SELL SL/TP: {self.state.short.stop} / {self.state.short.take_profit}"
         )
+        if continuation:
+            self.state.continuation_stage = "ACTIVE"
+            self.state.save(self.cfg.state_file)
 
     def _continue_after_second_initial_close(
         self, closed: Leg, source: str, fill: Decimal
@@ -1250,12 +1295,14 @@ class Bot:
         # Initial POST without a conclusive result must never fall through to BOTH_OPEN handling:
         # the opposite side may not have been submitted at all.
         try:
+            continuation_rounds = 1 if self.state.continuation_managed else 20
             position = self._resolve_unknown_market_position(
-                leg.direction, preexisting_ids, attempts=20
+                leg.direction, preexisting_ids, attempts=continuation_rounds
             ) if leg.pending_market_unknown_post else None
             if position is None and leg.pending_market_reference:
                 confirmation = self._wait_market_submission(
-                    leg.pending_market_reference, rounds=3
+                    leg.pending_market_reference,
+                    rounds=1 if self.state.continuation_managed else 3,
                 )
                 if confirmation.get("dealStatus") == "REJECTED":
                     self._clear_pending_market(leg)
@@ -1287,7 +1334,8 @@ class Bot:
                     )
                     return True
                 position = self._resolve_market_position(
-                    confirmation, leg.pending_market_reference, leg.direction, preexisting_ids
+                    confirmation, leg.pending_market_reference, leg.direction, preexisting_ids,
+                    attempts=continuation_rounds,
                 )
         except Exception as exc:
             leg.pending_market_reason = str(exc)
@@ -1937,6 +1985,8 @@ class Bot:
             cancelled = self.capital.delete_working_order(order_id)
         except CapitalError as exc:
             self.state.phase = "DOUBLE_SL_RECONCILING"
+            self.state.continuation_managed = True
+            self.state.continuation_stage = "RECONCILING"
             self.state.save(self.cfg.state_file)
             self.telegram.send(
                 f"⏳ Отмена trigger {order_id} пока не подтверждена: {exc}. "
@@ -1959,6 +2009,8 @@ class Bot:
             trigger_leg.trigger_id = trigger_leg.trigger_reference = ""
             return True
         self.state.phase = "DOUBLE_SL_RECONCILING"
+        self.state.continuation_managed = True
+        self.state.continuation_stage = "RECONCILING"
         self.state.save(self.cfg.state_file)
         self.telegram.send(
             f"⏳ Результат trigger {order_id} пока неизвестен. Новый вход и /start "
@@ -1989,8 +2041,10 @@ class Bot:
         self.state.paused = True
         self.state.manual = False
         self.state.phase = "DOUBLE_SL_PAUSE"
+        self.state.continuation_managed = True
+        self.state.continuation_stage = "PAUSE"
         self.state.continuation_pause_until = time.time() + 300
-        self.state.continuation_stopped_by_user = False
+        # A /stop issued at any earlier continuation stage remains authoritative.
         self.state.active_attempt_id = 0
         self.state.save(self.cfg.state_file)
         lines = "\n".join(
@@ -2027,6 +2081,7 @@ class Bot:
         self.state.armed = True
         self.state.waiting_current_candle = False
         self.state.phase = "CONTINUATION_FILTER"
+        self.state.continuation_stage = "FILTER"
         self.state.save(self.cfg.state_file)
         self.telegram.send(
             f"🔎 Продолжение цикла №{self.state.cycle_id}: сценарий {self.state.scenario}, "
@@ -2124,7 +2179,7 @@ class Bot:
 
     def _resolve_market_position(
         self, confirmation: dict, reference: str, direction: str,
-        preexisting_ids: set[str],
+        preexisting_ids: set[str], *, attempts: int = 20,
     ) -> dict:
         """Resolve Capital's actual position ID, including the affectedDeals/workingOrder split."""
         confirmation_id = str(confirmation.get("dealId", ""))
@@ -2132,12 +2187,12 @@ class Bot:
         try:
             return self.capital.wait_position(
                 expected_id, reference, direction, excluded_ids=preexisting_ids,
-                epic=self.cfg.epic,
+                epic=self.cfg.epic, attempts=attempts,
             )
         except CapitalError as position_error:
             # The position can close before /positions publishes it.  The global activity entry
             # links the real position to Capital's execution ID through workingOrderId.
-            for attempt in range(20):
+            for attempt in range(attempts):
                 try:
                     activity = self.capital.activity()
                     opened = find_trigger_open_event(activity, confirmation_id, direction)
@@ -2151,7 +2206,7 @@ class Bot:
                         }
                 except CapitalError:
                     LOG.warning("MARKET position activity is not available yet", exc_info=True)
-                if attempt + 1 < 20:
+                if attempt + 1 < attempts:
                     time.sleep(0.5)
             raise CapitalError(
                 "Принятый MARKET fallback не связан с фактической позицией: "
@@ -2384,6 +2439,7 @@ class Bot:
         scenario_nine_deals = list(dict.fromkeys(self.state.attempt_deal_ids))
         attempt_id = self.state.active_attempt_id
         self.strategy.complete_scenario_nine(long_fill, short_fill, extra_loss)
+        self._get_continuation().release()
         self.state.remember_attempt(
             "COMPLETED_SCENARIO_9", self.state.net_cycle_result * self.cfg.size,
             include_in_total=False, result_kind="STRATEGY_CALCULATED_NOT_BROKER_PNL",
