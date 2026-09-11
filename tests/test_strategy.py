@@ -200,6 +200,11 @@ class StrategyTest(unittest.TestCase):
         self.state.initial_submitted_directions = ["BUY", "SELL"]
         self.state.pending_close_direction = "SELL"
         self.state.pending_close_reference = "close-ref"
+        self.state.cycle_id = 224
+        self.state.cycle_attempt = 2
+        self.state.continuation_pause_until = 1789146300.0
+        self.state.continuation_stopped_by_user = True
+        self.state.cycle_attempt_start_losses = D("14.71")
         with tempfile.NamedTemporaryFile() as file:
             self.state.save(file.name)
             restored = CycleState.load(file.name)
@@ -213,6 +218,11 @@ class StrategyTest(unittest.TestCase):
         self.assertEqual(restored.attempt_result_total, D("-46.40"))
         self.assertEqual(restored.attempt_history[0]["attempt_id"], 212)
         self.assertEqual(restored.initial_submitted_directions, ["BUY", "SELL"])
+        self.assertEqual(restored.cycle_id, 224)
+        self.assertEqual(restored.cycle_attempt, 2)
+        self.assertEqual(restored.continuation_pause_until, 1789146300.0)
+        self.assertTrue(restored.continuation_stopped_by_user)
+        self.assertEqual(restored.cycle_attempt_start_losses, D("14.71"))
         self.assertEqual(restored.pending_close_reference, "close-ref")
 
     def test_deal_ids_survive_reopen_reset_and_state_round_trip(self):
@@ -1016,6 +1026,62 @@ class EntryRetryTest(unittest.TestCase):
         self.assertEqual(bot.state.net_cycle_result, D("0.5"))
         self.assertEqual(bot.state.attempt_result_total, D("5.0"))
         self.assertEqual(len(bot.state.attempt_history), 1)
+
+    def test_tick_reconciles_two_stops_and_nonblocking_pause_then_filter(self):
+        bot = self.make_bot()
+        object.__setattr__(bot.cfg, "size", D("10"))
+        bot.state.active_attempt_id = bot.state.attempt_counter = bot.state.cycle_id = 224
+        bot.state.cycle_attempt = 1
+        bot.state.long.deal_id = "buy-224"
+        bot.state.short.deal_id = "sell-224"
+        bot.state.long.current_entry = D("4372.74")
+        bot.state.short.current_entry = D("4371.16")
+        bot.state.realized_losses = D("10.82")
+        bot.capital.positions.return_value = []
+        events = [
+            {"dealId": "buy-224", "source": "SL", "status": "ACCEPTED",
+             "type": "POSITION", "details": {"level": 4371.22}},
+            {"dealId": "sell-224", "source": "SL", "status": "ACCEPTED",
+             "type": "POSITION", "details": {"level": 4373.53}},
+        ]
+        bot.capital.activity.side_effect = lambda deal_id="", last_period=86400: events
+        with tempfile.TemporaryDirectory() as directory, \
+                patch("trader.app.time.sleep"), patch("trader.app.time.time", return_value=1000):
+            object.__setattr__(bot.cfg, "state_file", str(Path(directory) / "state.json"))
+            object.__setattr__(bot.cfg, "diagnostic_log_file", str(Path(directory) / "log"))
+            bot._tick_cycle()
+            self.assertEqual(bot.state.phase, "DOUBLE_SL_PAUSE")
+            self.assertEqual(bot.state.continuation_pause_until, 1300)
+            self.assertEqual(bot.state.realized_losses, D("14.71"))
+            self.assertEqual(bot.state.attempt_result_total, D("-147.10"))
+            with patch("trader.app.time.time", return_value=1299):
+                bot.tick()
+            self.assertEqual(bot.state.phase, "DOUBLE_SL_PAUSE")
+            with patch("trader.app.time.time", return_value=1301):
+                bot.tick()
+            self.assertEqual(bot.state.phase, "CONTINUATION_FILTER")
+
+    def test_continuation_recovery_uses_losses_target_and_new_spread_once(self):
+        bot = self.make_bot()
+        bot.state.realized_losses = D("14.71")
+        bot.state.cycle_target_profit = D("0.40")
+        bot.state.scenario = 8
+        bot.state.cycle_attempt = 2
+        bot.strategy.begin_continuation(D("4375.20"), D("4375.00"))
+        self.assertEqual(bot.state.recovery, D("15.31"))
+        self.assertEqual(bot.state.long.original_trigger_level, D("4375.20"))
+        self.assertEqual(bot.state.short.original_trigger_level, D("4375.00"))
+        self.assertEqual(bot.state.scenario, 8)
+
+    def test_stop_blocks_expired_continuation_pause(self):
+        bot = self.make_bot()
+        bot.state.phase = "DOUBLE_SL_PAUSE"
+        bot.state.continuation_pause_until = 1
+        bot.command("/stop")
+        with patch("trader.app.time.time", return_value=1000):
+            bot.tick()
+        self.assertEqual(bot.state.phase, "DOUBLE_SL_PAUSE")
+        self.assertTrue(bot.state.continuation_stopped_by_user)
         bot.capital.open_position.assert_not_called()
 
     def test_delayed_second_initial_rejection_accounts_first_close_and_pauses(self):
@@ -2026,17 +2092,17 @@ class EntryRetryTest(unittest.TestCase):
                 bot.cfg, "diagnostic_log_file", str(Path(directory) / "diagnostics.log")
             )
             with patch("trader.app.end_diagnostic_cycle"):
-                bot._pause_after_double_stop([
+                bot._begin_double_sl_pause([
                     (bot.state.long, D("4371.22")),
                     (bot.state.short, D("4373.53")),
                 ])
                 total = bot.state.attempt_result_total
-                bot._pause_after_double_stop([
+                bot._begin_double_sl_pause([
                     (bot.state.long, D("4371.22")),
                     (bot.state.short, D("4373.53")),
                 ])
-        self.assertEqual(bot.state.phase, "PAUSED_DOUBLE_SL")
-        self.assertFalse(bot.state.active)
+        self.assertEqual(bot.state.phase, "DOUBLE_SL_PAUSE")
+        self.assertTrue(bot.state.active)
         self.assertEqual(total, D("-38.90"))
         self.assertEqual(bot.state.attempt_result_total, total)
         self.assertEqual(len(bot.state.attempt_history), 1)

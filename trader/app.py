@@ -54,12 +54,21 @@ class Bot:
         self._stream_signal = False
         self._last_cycle_rest_check = 0.0
         self.execution_policy = ExecutionPolicy()
+        if self.state.phase == "PAUSED_DOUBLE_SL":
+            # Compatible migration from the one-release safety pause. No broker mutation is
+            # performed here; startup reconciliation still runs before the timer can release.
+            self.state.active = True
+            self.state.paused = True
+            self.state.phase = "DOUBLE_SL_PAUSE"
+            self.state.continuation_pause_until = time.time() + 300
         if self.state.active:
             attempt = (
                 self.state.active_attempt_id or self.state.diagnostic_cycle_number
                 or self.state.attempt_counter + 1
             )
             self.state.active_attempt_id = self.state.diagnostic_cycle_number = attempt
+            self.state.cycle_id = self.state.cycle_id or attempt
+            self.state.cycle_attempt = self.state.cycle_attempt or 1
             self.state.attempt_counter = max(self.state.attempt_counter, attempt)
             begin_diagnostic_cycle(
                 self.cfg.diagnostic_log_file, attempt, self.state.completed_cycles
@@ -254,15 +263,23 @@ class Bot:
             )
         elif command in {"/pause", "/stop"}:
             self.state.paused = True
+            if self.state.phase in {"DOUBLE_SL_PAUSE", "CONTINUATION_FILTER"}:
+                self.state.continuation_stopped_by_user = True
             if not self.state.active:
                 self.state.armed = False
                 self.state.waiting_current_candle = False
                 self.state.phase = "PAUSED"
                 self.telegram.send("Пауза: новый цикл не откроется до команды /start.")
             else:
-                self.telegram.send(
-                    "Пауза принята: текущий цикл продолжится до TP, но следующий цикл не начнётся."
-                )
+                if self.state.phase in {"DOUBLE_SL_PAUSE", "CONTINUATION_FILTER"}:
+                    self.telegram.send(
+                        "⛔ /stop принят: автоматическое продолжение цикла после двух SL "
+                        "заблокировано. Состояние и таймер сохранены."
+                    )
+                else:
+                    self.telegram.send(
+                        "Пауза принята: текущий цикл продолжится до TP, но следующий цикл не начнётся."
+                    )
         elif command == "/resume":
             if self.state.manual:
                 raise RuntimeError("Ручной режим нельзя снять командой /resume")
@@ -325,6 +342,17 @@ class Bot:
             raise RuntimeError("Автоматика в ручном режиме; проверьте /status и /cycleinfo")
         if self.cfg.dry_run:
             raise RuntimeError("BOT_DRY_RUN=true: торговые заявки заблокированы")
+        if self.state.phase == "DOUBLE_SL_RECONCILING":
+            raise RuntimeError("Сначала должна завершиться сверка двух SL и связанных trigger")
+        if self.state.phase == "DOUBLE_SL_PAUSE":
+            remaining = max(0, int(self.state.continuation_pause_until - time.time()))
+            if remaining:
+                raise RuntimeError(f"Продолжение цикла станет доступно через {remaining} сек.")
+            self.state.continuation_stopped_by_user = False
+            self.state.paused = False
+            self.state.phase = "CONTINUATION_FILTER"
+            self.state.save(self.cfg.state_file)
+            return
         self.state.paused = False
         if self.state.active:
             self.telegram.send("Текущий цикл активен; автоматический запуск следующего цикла включён.")
@@ -340,7 +368,11 @@ class Bot:
     def tick(self) -> None:
         if self.state.pending_actual_attempt_id:
             self._refresh_actual_attempt_result()
-        if self.state.armed and not self.state.active and not self.state.paused:
+        if self.state.phase == "DOUBLE_SL_PAUSE":
+            self._tick_continuation_pause()
+        elif self.state.phase == "CONTINUATION_FILTER" and not self.state.paused:
+            self._tick_filter()
+        elif self.state.armed and not self.state.active and not self.state.paused:
             self._tick_filter()
         elif self.state.active:
             if self._should_check_cycle_rest():
@@ -392,7 +424,18 @@ class Bot:
             LOG.info("Broker flat check %s/3 before new cycle", self._flat_checks)
             return
         self._flat_checks = 0
-        if self.state.active_attempt_id:
+        continuation = self.state.phase == "CONTINUATION_FILTER" and self.state.active
+        if continuation:
+            self.state.attempt_counter = max(
+                self.state.attempt_counter, self.state.diagnostic_cycle_number
+            ) + 1
+            cycle_number = self.state.attempt_counter
+            self.state.active_attempt_id = cycle_number
+            self.state.cycle_attempt += 1
+            self.state.attempt_deal_ids.clear()
+            self.state.initial_submitted_directions.clear()
+            self.state.cycle_attempt_start_losses = self.state.realized_losses
+        elif self.state.active_attempt_id:
             cycle_number = self.state.active_attempt_id
         else:
             self.state.attempt_counter = max(
@@ -402,6 +445,10 @@ class Bot:
             self.state.attempt_deal_ids.clear()
             self.state.initial_submitted_directions.clear()
         self.state.active_attempt_id = cycle_number
+        if not continuation:
+            self.state.cycle_id = cycle_number
+            self.state.cycle_attempt = 1
+            self.state.cycle_attempt_start_losses = D("0")
         self.state.diagnostic_cycle_number = cycle_number
         self.state.save(self.cfg.state_file)
         begin_diagnostic_cycle(
@@ -412,10 +459,15 @@ class Bot:
             cycle_number, self.state.completed_cycles, filter_reason,
         )
         bid, ask = self.capital.quote(self.cfg.epic)
-        self.strategy.begin(ask, bid)
+        if continuation:
+            self.strategy.begin_continuation(ask, bid)
+        else:
+            self.strategy.begin(ask, bid)
         assert self.state.long and self.state.short
         self.telegram.send(
-            f"🚦 Начинаю сценарий 1\nФильтр: {filter_reason}\nBID: {bid}\nASK: {ask}\n"
+            f"🚦 {'Продолжение цикла №' + str(self.state.cycle_id) if continuation else 'Начинаю цикл'}\n"
+            f"Сценарий: {self.state.scenario}; попытка: {self.state.cycle_attempt}\n"
+            f"Фильтр: {filter_reason}\nBID: {bid}\nASK: {ask}\n"
             f"Предварительный spread: {ask - bid}\nРазмер каждой стороны: {self.cfg.size}\n"
             f"Предварительный SL BUY: {self.state.long.stop}\n"
             f"Предварительный SL SELL: {self.state.short.stop}"
@@ -470,14 +522,34 @@ class Bot:
                 if opened or leg.deal_reference:
                     self._manual(f"Неполный или несинхронизированный hedge {leg.direction}: {error}")
                 else:
-                    self.state.reset()
-                    self.state.armed = True
-                    self.state.phase = "FILTER"
-                    self.telegram.send(f"⚠️ Первая сторона не открыта после 4 попыток: {error}. Цикл не начат.")
+                    if continuation:
+                        self.state.long = self.state.short = None
+                        self.state.active_attempt_id = 0
+                        self.state.armed = True
+                        self.state.phase = "CONTINUATION_FILTER"
+                        self.state.save(self.cfg.state_file)
+                        self.telegram.send(
+                            f"⚠️ Продолжение цикла №{self.state.cycle_id}: первая сторона не "
+                            f"открыта ({error}). Убытки и сценарий сохранены; снова ожидаю фильтр."
+                        )
+                    else:
+                        self.state.reset()
+                        self.state.armed = True
+                        self.state.phase = "FILTER"
+                        self.telegram.send(
+                            f"⚠️ Первая сторона не открыта после 4 попыток: {error}. Цикл не начат."
+                        )
                 return
             opened.append(leg)
         assert self.state.long and self.state.short
-        self.strategy.confirm_initial_fills(self.state.long.current_entry, self.state.short.current_entry)
+        if continuation:
+            self.strategy.confirm_continuation_fills(
+                self.state.long.current_entry, self.state.short.current_entry
+            )
+        else:
+            self.strategy.confirm_initial_fills(
+                self.state.long.current_entry, self.state.short.current_entry
+            )
         # The first MARKET leg can hit its broker-side stop in the very small window between
         # opening the opposite leg and replacing the provisional distance-based protection with
         # the exact strategy levels.  That is a real scenario-1 stop, not a broken hedge.  Check
@@ -506,7 +578,9 @@ class Bot:
             return
         self.state.save(self.cfg.state_file)
         self.telegram.send(
-            f"✅ Цикл полностью открыт\nСценарий: 1\n"
+            f"✅ {'Продолжение цикла' if continuation else 'Цикл'} полностью открыто\n"
+            f"Цикл №{self.state.cycle_id}; сценарий {self.state.scenario}; "
+            f"попытка {self.state.cycle_attempt}\n"
             f"BUY entry: {self.state.long.current_entry}\nSELL entry: {self.state.short.current_entry}\n"
             f"Фактический spread: {self.state.entry_spread}\nRecovery: {self.state.recovery}\n"
             f"BUY SL/TP: {self.state.long.stop} / {self.state.long.take_profit}\n"
@@ -853,6 +927,9 @@ class Bot:
         return False
 
     def _tick_cycle(self) -> None:
+        if self.state.phase == "DOUBLE_SL_RECONCILING":
+            self._tick_double_sl_reconciling()
+            return
         if self.state.pending_close_reference:
             self._resume_pending_close()
             return
@@ -893,11 +970,10 @@ class Bot:
                     # time to synchronize.  Only an explicit TP completes the cycle here; an SL
                     # remains pending until its matching trigger fill can be linked.
                     fill = self._wait_closing_fill(survivor, "TP")
-                    if fill is None and self._wait_closing_fill(survivor, "SL") is not None:
-                        LOG.info(
-                            "SL %s confirmed while trigger-created position is still synchronizing",
-                            survivor.deal_id,
-                        )
+                    survivor_sl = self._wait_closing_fill(survivor, "SL") if fill is None else None
+                    if fill is None and survivor_sl is not None:
+                        if self._resolve_trigger_for_double_stop(stopped, positions):
+                            self._begin_double_sl_pause([(survivor, survivor_sl)])
                         return
                     if fill is not None:
                         # Continue through the normal TP completion path below.
@@ -1030,7 +1106,13 @@ class Bot:
                 ]
                 confirmed_stops = [(leg, fill) for leg, fill in sl_closes if fill is not None]
                 if len(confirmed_stops) == len(missing) == 2:
-                    self._pause_after_double_stop(confirmed_stops)
+                    for trigger_leg in missing:
+                        if (trigger_leg.trigger_id
+                                and not self._resolve_trigger_for_double_stop(
+                                    trigger_leg, positions
+                                )):
+                            return
+                    self._begin_double_sl_pause(confirmed_stops)
                     return
                 # Capital.com commonly publishes the SL activity first and the opposite TP
                 # several seconds later.  The diagnostic log showed exactly that ordering:
@@ -1842,8 +1924,50 @@ class Bot:
         if opposite and opposite.open and opposite.deal_id and opposite.deal_id not in positions:
             self._tick_cycle()
 
-    def _pause_after_double_stop(self, closes: list[tuple[Leg, Decimal]]) -> None:
-        """Persist an unambiguous flat/two-SL outcome without inventing a reopen rule."""
+    def _resolve_trigger_for_double_stop(self, trigger_leg: Leg, positions: dict[str, dict]) -> bool:
+        """Cancel a pending trigger with positive evidence, or resume an executed trigger."""
+        if not trigger_leg.trigger_id:
+            return True
+        self._detect_trigger_fill(positions)
+        if trigger_leg.open:
+            return False
+        order_id = trigger_leg.trigger_id
+        self.capital.working_orders()  # keep the snapshot in diagnostics before mutation
+        try:
+            cancelled = self.capital.delete_working_order(order_id)
+        except CapitalError as exc:
+            self.state.phase = "DOUBLE_SL_RECONCILING"
+            self.state.save(self.cfg.state_file)
+            self.telegram.send(
+                f"⏳ Отмена trigger {order_id} пока не подтверждена: {exc}. "
+                "Новый вход заблокирован; сверка продолжится."
+            )
+            return False
+        if cancelled:
+            trigger_leg.trigger_id = trigger_leg.trigger_reference = ""
+            return True
+        activity = self.capital.activity()
+        executed = find_working_order_execution(activity, order_id)
+        opened = find_trigger_open_event(activity, order_id, trigger_leg.direction)
+        if executed or opened:
+            self.telegram.send(
+                f"⏳ Trigger {order_id} исполнился при сверке двух SL; "
+                "ожидаю фактическую позицию и продолжаю текущий сценарий."
+            )
+            return False
+        if find_working_order_cancellation(activity, order_id):
+            trigger_leg.trigger_id = trigger_leg.trigger_reference = ""
+            return True
+        self.state.phase = "DOUBLE_SL_RECONCILING"
+        self.state.save(self.cfg.state_file)
+        self.telegram.send(
+            f"⏳ Результат trigger {order_id} пока неизвестен. Новый вход и /start "
+            "заблокированы до подтверждения исполнения либо отмены."
+        )
+        return False
+
+    def _begin_double_sl_pause(self, closes: list[tuple[Leg, Decimal]]) -> None:
+        """Account flat stops and start a durable non-blocking continuation pause."""
         attempt_id = self.state.active_attempt_id or self.state.diagnostic_cycle_number
         details = []
         for leg, fill in closes:
@@ -1851,33 +1975,86 @@ class Bot:
                 self.strategy.stopped(leg.direction, fill, f"stop:{leg.deal_id}:{fill}")
             points = fill - leg.current_entry if leg.direction == "BUY" else leg.current_entry - fill
             details.append((leg, fill, points * self.cfg.size))
-        money = sum((item[2] for item in details), D("0"))
+        close_money = sum((item[2] for item in details), D("0"))
+        money = -(self.state.realized_losses - self.state.cycle_attempt_start_losses) * self.cfg.size
         self.state.remember_attempt(
-            "DOUBLE_SL_PAUSED", money, scenario=self.state.scenario,
+            "DOUBLE_SL_CONTINUATION", money, scenario=self.state.scenario,
             closes=[{"direction": leg.direction, "deal_id": leg.deal_id,
                      "fill": str(fill), "result": str(result)}
                     for leg, fill, result in details],
             completed_cycle=None,
         )
-        self.state.active = False
+        self.state.active = True
         self.state.armed = False
         self.state.paused = True
         self.state.manual = False
-        self.state.phase = "PAUSED_DOUBLE_SL"
+        self.state.phase = "DOUBLE_SL_PAUSE"
+        self.state.continuation_pause_until = time.time() + 300
+        self.state.continuation_stopped_by_user = False
         self.state.active_attempt_id = 0
         self.state.save(self.cfg.state_file)
-        end_diagnostic_cycle(self.cfg.diagnostic_log_file, self.state.attempt_counter + 1,
-                             self.state.completed_cycles)
         lines = "\n".join(
-            f"{leg.direction}: вход {leg.current_entry}, SL fill {fill}, результат {result}"
+            f"{leg.direction}: вход {leg.current_entry}, установленный SL {leg.stop}, "
+            f"SL fill {fill}, результат закрытия {result}"
             for leg, fill, result in details
         )
         self.telegram.send(
-            f"⏸ Попытка №{attempt_id}: обе позиции подтверждённо закрыты по SL\n"
-            f"{lines}\nИтог попытки: {money}\nRecovery сохранён: {self.state.recovery}\n"
-            "Открытых позиций нет, а правило следующего автоматического действия не задано. "
-            "Автоматика поставлена на паузу; продолжение только после /start."
+            f"⏸ Цикл №{self.state.cycle_id}; сценарий {self.state.scenario}; "
+            f"попытка {self.state.cycle_attempt}\n{lines}\n"
+            f"Последние закрытия: {close_money}; результат попытки: {money}; "
+            f"накопленные убытки цикла: "
+            f"{self.state.realized_losses * self.cfg.size}\n"
+            "Trigger: отменён или отсутствует; связанных позиций и ордеров нет.\n"
+            f"Пауза до {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.state.continuation_pause_until))}. "
+            "Затем бот перейдёт к обычному входному фильтру этого же цикла."
         )
+
+    def _tick_continuation_pause(self) -> None:
+        if time.time() < self.state.continuation_pause_until:
+            return
+        if self.state.continuation_stopped_by_user:
+            return
+        if any(leg and leg.pending_market_kind for leg in (self.state.long, self.state.short)):
+            return
+        positions = self._cycle_positions()
+        orders = [item for item in self.capital.working_orders()
+                  if self._order_epic(item) == self.cfg.epic]
+        if positions or orders:
+            self.state.phase = "DOUBLE_SL_RECONCILING"
+            self.state.save(self.cfg.state_file)
+            return
+        self.state.paused = False
+        self.state.armed = True
+        self.state.waiting_current_candle = False
+        self.state.phase = "CONTINUATION_FILTER"
+        self.state.save(self.cfg.state_file)
+        self.telegram.send(
+            f"🔎 Продолжение цикла №{self.state.cycle_id}: сценарий {self.state.scenario}, "
+            f"следующая попытка {self.state.cycle_attempt + 1}. Пятиминутная пауза завершена; "
+            "ожидаю обычный входной фильтр."
+        )
+
+    def _tick_double_sl_reconciling(self) -> None:
+        positions = self._cycle_positions()
+        self._detect_trigger_fill(positions)
+        if self.state.phase != "DOUBLE_SL_RECONCILING":
+            return
+        open_legs = [leg for leg in (self.state.long, self.state.short) if leg and leg.open]
+        closes = []
+        for leg in open_legs:
+            if leg.deal_id in positions:
+                return
+            fill = self._closing_fill(leg, "SL")
+            if fill is None:
+                return
+            closes.append((leg, fill))
+        trigger_leg = next(
+            (leg for leg in (self.state.long, self.state.short)
+             if leg and not leg.open and leg.trigger_id), None
+        )
+        if trigger_leg and not self._resolve_trigger_for_double_stop(trigger_leg, positions):
+            return
+        self._begin_double_sl_pause(closes)
 
     def _resolve_opposite_tp_after_market(self, reopened: Leg) -> bool:
         """Close a resolved MARKET leg if the former survivor already completed by TP."""

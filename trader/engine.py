@@ -67,6 +67,34 @@ class Strategy:
             f"recovery={self.state.recovery}"
         )
 
+    def begin_continuation(self, ask: Decimal, bid: Decimal) -> None:
+        """Prepare a fresh pair without resetting the logical recovery cycle."""
+        if not self.state.active or self.state.scenario < 1:
+            raise RuntimeError("No recovery cycle is available for continuation")
+        self.state.long = Leg("BUY", ask, ask)
+        self.state.short = Leg("SELL", bid, bid)
+        self.confirm_continuation_fills(ask, bid)
+
+    def confirm_continuation_fills(self, long_fill: Decimal, short_fill: Decimal) -> None:
+        if not self.state.long or not self.state.short:
+            raise RuntimeError("Continuation legs have not been prepared")
+        self.state.long.current_entry = self.state.long.original_trigger_level = long_fill
+        self.state.short.current_entry = self.state.short.original_trigger_level = short_fill
+        spread = abs(long_fill - short_fill)
+        self.state.entry_spread = spread
+        # realized_losses is authoritative. Rebuilding from it avoids adding losses already
+        # represented by the old recovery value, while cycle_target_profit is included once.
+        self.state.recovery = self.state.realized_losses + self.state.cycle_target_profit + spread
+        for leg in (self.state.long, self.state.short):
+            leg.stop = stop_for(leg.direction, leg.current_entry, self.cfg.stop_distance)
+            self.state.remember_deal(leg, self.state.scenario)
+        self._targets_from_opposite_stops()
+        self.state.phase = "BOTH_OPEN"
+        self.state.events.append(
+            f"continuation attempt {self.state.cycle_attempt}; scenario={self.state.scenario}; "
+            f"spread={spread}; losses={self.state.realized_losses}; recovery={self.state.recovery}"
+        )
+
     def stopped(self, direction: str, fill: Decimal, event_id: str = "") -> Leg:
         leg = self._leg(direction)
         if event_id and event_id in self.state.processed_events:

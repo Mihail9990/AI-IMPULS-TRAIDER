@@ -73,6 +73,11 @@ class CycleState:
     diagnostic_cycle_number: int = 0
     attempt_counter: int = 0
     active_attempt_id: int = 0
+    cycle_id: int = 0
+    cycle_attempt: int = 0
+    continuation_pause_until: float = 0.0
+    continuation_stopped_by_user: bool = False
+    cycle_attempt_start_losses: Decimal = D("0")
     attempt_result_total: Decimal = D("0")
     attempt_history: list[dict] = field(default_factory=list)
     initial_submitted_directions: list[str] = field(default_factory=list)
@@ -152,6 +157,7 @@ class CycleState:
         payload["gross_take_profit"] = str(self.gross_take_profit)
         payload["net_cycle_result"] = str(self.net_cycle_result)
         payload["attempt_result_total"] = str(self.attempt_result_total)
+        payload["cycle_attempt_start_losses"] = str(self.cycle_attempt_start_losses)
         payload["scenario_nine_prior_losses"] = str(self.scenario_nine_prior_losses)
         payload["scenario_nine_close_gap"] = str(self.scenario_nine_close_gap)
         payload["scenario_nine_total_loss"] = str(self.scenario_nine_total_loss)
@@ -197,6 +203,7 @@ class CycleState:
         for name in (
             "entry_spread", "realized_losses", "gross_take_profit", "net_cycle_result",
             "attempt_result_total",
+            "cycle_attempt_start_losses",
             "scenario_nine_prior_losses", "scenario_nine_close_gap",
             "scenario_nine_total_loss", "scenario_nine_extra_loss",
             "cycle_target_profit", "profit_override", "pending_tp_fill",
@@ -231,6 +238,10 @@ class CycleState:
         self.initial_submitted_directions.clear()
         self.attempt_deal_ids.clear()
         self.active_attempt_id = 0
+        self.cycle_id = self.cycle_attempt = 0
+        self.continuation_pause_until = 0.0
+        self.continuation_stopped_by_user = False
+        self.cycle_attempt_start_losses = D("0")
 
 
 def stop_for(direction: str, entry: Decimal, distance: Decimal) -> Decimal:
