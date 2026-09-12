@@ -101,6 +101,13 @@ class Bot:
             controller = self.continuation = CycleContinuation(self)
         return controller
 
+    def _dispatch_owned_cycle(self) -> None:
+        """Return shared-operation follow-up to the exclusive current owner."""
+        if self.state.continuation_managed:
+            self._get_continuation().handle_active_scenario()
+        else:
+            self._tick_cycle()
+
     def _complete_cycle(self, direction: str, fill: Decimal | None) -> None:
         """Complete one cycle and move subsequent startup/gap records outside its boundary."""
         attempt_id = self.state.active_attempt_id
@@ -394,6 +401,18 @@ class Bot:
             self.state.save(self.cfg.state_file)
             self.telegram.send("🔎 Ручная пауза снята; ожидаю фильтр продолжения того же цикла.")
             return
+        if self.state.continuation_managed:
+            if self.state.continuation_stage in {"RECONCILING", "FORMING_PAIR"} and any(
+                leg and leg.pending_market_kind for leg in (self.state.long, self.state.short)
+            ):
+                raise RuntimeError("Незавершённая заявка ещё сверяется; /start не меняет её исход")
+            self.state.continuation_stopped_by_user = False
+            self.state.paused = False
+            self.state.save(self.cfg.state_file)
+            self.telegram.send(
+                f"▶️ Продолжение цикла разрешено; этап {self.state.continuation_stage}."
+            )
+            return
         self.state.paused = False
         if self.state.active:
             self.telegram.send("Текущий цикл активен; автоматический запуск следующего цикла включён.")
@@ -469,7 +488,7 @@ class Bot:
             LOG.info("Broker flat check %s/3 before new cycle", self._flat_checks)
             return
         self._flat_checks = 0
-        if continuation:
+        if continuation and not self.state.active_attempt_id:
             self.state.attempt_counter = max(
                 self.state.attempt_counter, self.state.diagnostic_cycle_number
             ) + 1
@@ -1381,7 +1400,7 @@ class Bot:
                 self.state.continuation_stage = "ACTIVE"
                 self._get_continuation().handle_active_scenario()
             else:
-                self._tick_cycle()
+                self._dispatch_owned_cycle()
             return True
         if leg.deal_id not in current:
             related_orders = [
@@ -1936,7 +1955,7 @@ class Bot:
             except (CapitalError, TypeError):
                 opposite_sl = None
             if opposite_sl is not None:
-                self._tick_cycle()
+                self._dispatch_owned_cycle()
                 return
         if actual_id not in positions:
             try:
@@ -1947,7 +1966,7 @@ class Bot:
             except (CapitalError, TypeError):
                 reopened_closed = False
             if reopened_closed:
-                self._tick_cycle()
+                self._dispatch_owned_cycle()
                 return
         try:
             if self.state.scenario == self.cfg.max_scenarios:
@@ -1983,7 +2002,7 @@ class Bot:
         # Process an opposite SL that happened while the MARKET position was being resolved and
         # protected; event keys in Strategy keep this immediate reconciliation idempotent.
         if opposite and opposite.open and opposite.deal_id and opposite.deal_id not in positions:
-            self._tick_cycle()
+            self._dispatch_owned_cycle()
 
     def _resolve_trigger_for_double_stop(self, trigger_leg: Leg, positions: dict[str, dict]) -> bool:
         """Cancel a pending trigger with positive evidence, or resume an executed trigger."""

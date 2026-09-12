@@ -1124,6 +1124,103 @@ class EntryRetryTest(unittest.TestCase):
         bot._create_trigger.assert_called_once_with(bot.state.short)
         self.assertEqual(bot.state.continuation_stage, "ACTIVE")
 
+    def _continuation_tp_bot(self):
+        bot = self.make_bot()
+        bot.state.continuation_managed = True
+        bot.state.continuation_stage = "ACTIVE"
+        bot.state.cycle_id = 254
+        bot.state.long.deal_id = "buy-winner"
+        stopped = bot.strategy.stopped("SELL", D("4011.10"), "sell-stop")
+        stopped.trigger_id = "sell-trigger"
+        bot.capital.positions.return_value = []
+        bot.capital.activity.side_effect = lambda deal_id="", last_period=86400: [{
+            "dealId": "buy-winner", "source": "TP", "type": "POSITION",
+            "status": "ACCEPTED", "details": {"level": 4012.0},
+        }]
+        bot.continuation = CycleContinuation(bot)
+        return bot
+
+    def test_continuation_tp_cancels_trigger_then_returns_to_normal_filter(self):
+        bot = self._continuation_tp_bot()
+        bot.capital.delete_working_order.return_value = True
+        with tempfile.TemporaryDirectory() as directory:
+            object.__setattr__(bot.cfg, "state_file", str(Path(directory) / "state.json"))
+            object.__setattr__(bot.cfg, "diagnostic_log_file", str(Path(directory) / "log"))
+            bot.continuation.handle_active_scenario()
+        bot.capital.delete_working_order.assert_called_once_with("sell-trigger")
+        self.assertFalse(bot.state.continuation_managed)
+        self.assertFalse(bot.state.active)
+        self.assertTrue(bot.state.armed)
+        self.assertEqual(bot.state.phase, "FILTER")
+        self.assertTrue(any("завершён по TP" in call.args[0]
+                            for call in bot.telegram.send.call_args_list))
+
+    def test_continuation_tp_waits_when_trigger_outcome_is_unknown(self):
+        bot = self._continuation_tp_bot()
+        bot.capital.delete_working_order.return_value = False
+        bot._close_trigger_that_raced_with_tp = Mock(return_value=None)
+        bot.continuation.handle_active_scenario()
+        self.assertTrue(bot.state.continuation_managed)
+        self.assertTrue(bot.state.active)
+        self.assertEqual(bot.state.pending_tp_direction, "BUY")
+        bot._complete_cycle = Mock()
+        bot.continuation.handle_active_scenario()
+        bot._complete_cycle.assert_not_called()
+
+    def test_preflight_stop_blocks_pair_until_start(self):
+        bot = self.make_bot()
+        bot.state.continuation_managed = True
+        bot.state.continuation_stage = "PREFLIGHT"
+        bot.state.continuation_stopped_by_user = True
+        bot.continuation = CycleContinuation(bot)
+        bot.reconciled = True
+        bot._start_pair_common = Mock()
+        for _ in range(5):
+            bot.continuation.tick()
+        bot._start_pair_common.assert_not_called()
+        bot.arm_cycle()
+        for _ in range(3):
+            bot.continuation.tick()
+        bot._start_pair_common.assert_called_once()
+
+    def test_forming_pair_retries_pre_submission_preparation_error(self):
+        bot = self.make_bot()
+        bot.state.continuation_managed = True
+        bot.state.continuation_stage = "FORMING_PAIR"
+        bot.state.continuation_filter_reason = "filter"
+        bot.continuation = CycleContinuation(bot)
+        bot._start_pair_common = Mock(side_effect=[CapitalError("quote timeout"), None])
+        bot.continuation.tick()
+        self.assertEqual(bot.state.continuation_stage, "FORMING_PAIR")
+        self.assertFalse(bot.state.initial_submitted_directions)
+        bot.continuation.tick()
+        self.assertEqual(bot._start_pair_common.call_count, 2)
+        for call in bot._start_pair_common.call_args_list:
+            self.assertEqual(call.kwargs, {"continuation": True, "preflight_done": True})
+
+    def test_reconciling_trigger_fill_returns_controller_to_active(self):
+        bot = self.make_bot()
+        bot.state.continuation_managed = True
+        bot.state.continuation_stage = "RECONCILING"
+        bot.state.phase = "DOUBLE_SL_RECONCILING"
+        bot.continuation = CycleContinuation(bot)
+        bot._tick_double_sl_reconciling = Mock(
+            side_effect=lambda: setattr(bot.state, "phase", "BOTH_OPEN")
+        )
+        bot.continuation.tick()
+        self.assertEqual(bot.state.continuation_stage, "ACTIVE")
+        self.assertTrue(bot.state.continuation_managed)
+
+    def test_market_fallback_follow_up_respects_continuation_owner(self):
+        bot = self.make_bot()
+        bot.state.continuation_managed = True
+        bot.continuation = CycleContinuation(bot)
+        bot.continuation.handle_active_scenario = Mock()
+        bot._tick_cycle = Mock(side_effect=AssertionError("ordinary owner called"))
+        bot._dispatch_owned_cycle()
+        bot.continuation.handle_active_scenario.assert_called_once_with()
+        bot._tick_cycle.assert_not_called()
+
     def test_continuation_recovery_uses_losses_target_and_new_spread_once(self):
         bot = self.make_bot()
         bot.state.realized_losses = D("14.71")

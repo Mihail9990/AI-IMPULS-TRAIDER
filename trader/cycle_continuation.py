@@ -11,6 +11,8 @@ import time
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from .reporting import cycle_result_text
+
 if TYPE_CHECKING:  # pragma: no cover
     from .app import Bot
 
@@ -40,6 +42,9 @@ class CycleContinuation:
         stage = self.state.continuation_stage
         if stage == "RECONCILING":
             self.bot._tick_double_sl_reconciling()
+            if self.state.active and self.state.phase != "DOUBLE_SL_RECONCILING":
+                self.state.continuation_stage = "ACTIVE"
+                self.state.save(self.bot.cfg.state_file)
         elif stage == "PAUSE":
             self.bot._tick_continuation_pause()
         elif stage == "FILTER":
@@ -57,6 +62,8 @@ class CycleContinuation:
                 self.state.continuation_stage = "ACTIVE"
                 self.state.save(self.bot.cfg.state_file)
                 self.handle_active_scenario()
+            else:
+                self._continue_forming_pair()
         elif stage == "MANUAL_PAIR_PAUSE":
             return
         elif stage == "ACTIVE":
@@ -74,6 +81,8 @@ class CycleContinuation:
         self.state.save(self.bot.cfg.state_file)
 
     def _tick_preflight(self) -> None:
+        if self.state.continuation_stopped_by_user:
+            return
         positions = self.bot._cycle_positions()
         orders = [item for item in self.bot.capital.working_orders()
                   if self.bot._order_epic(item) == self.bot.cfg.epic]
@@ -87,10 +96,25 @@ class CycleContinuation:
             return
         self.state.continuation_stage = "FORMING_PAIR"
         self.state.save(self.bot.cfg.state_file)
-        self.bot._start_pair_common(
-            self.state.continuation_filter_reason or "условие фильтра выполнено",
-            continuation=True, preflight_done=True,
-        )
+        self._continue_forming_pair()
+
+    def _continue_forming_pair(self) -> None:
+        """Retry preparation only while no MARKET submission is pending or was sent."""
+        if self.state.continuation_stopped_by_user:
+            return
+        if any(leg and leg.pending_market_kind for leg in (self.state.long, self.state.short)):
+            return
+        try:
+            self.bot._start_pair_common(
+                self.state.continuation_filter_reason or "условие фильтра выполнено",
+                continuation=True, preflight_done=True,
+            )
+        except Exception as exc:
+            # Quote/preparation failed before a POST: keep the same attempt and retry next tick.
+            self.state.continuation_stage = "FORMING_PAIR"
+            self.state.continuation_filter_reason = str(exc)
+            self.state.save(self.bot.cfg.state_file)
+            LOG.warning("Continuation pair preparation delayed before MARKET POST: %s", exc)
 
     def _pair_was_submitted(self) -> bool:
         return set(self.state.initial_submitted_directions) == {"BUY", "SELL"}
@@ -122,7 +146,7 @@ class CycleContinuation:
             self.bot._resume_pending_close()
             return
         if self.state.pending_tp_direction and self.state.pending_tp_fill is not None:
-            self.bot._finish_reached_take_profit()
+            self._finish_take_profit()
             return
         if self.bot._resume_pending_market():
             return
@@ -163,7 +187,10 @@ class CycleContinuation:
                     self.bot.strategy.stopped(
                         loser.direction, loser_fill, f"stop:{loser.deal_id}:{loser_fill}"
                     )
-            self.bot._complete_cycle(winner.direction, fill)
+            self.state.pending_tp_direction = winner.direction
+            self.state.pending_tp_fill = fill
+            self.state.save(self.bot.cfg.state_file)
+            self._finish_take_profit()
             return
         for leg, _, fill in closes:
             if leg.open:
@@ -180,6 +207,36 @@ class CycleContinuation:
                 if not self.bot._resolve_trigger_for_double_stop(trigger_leg, positions):
                     return
         self.bot._begin_double_sl_pause([(leg, fill) for leg, _, fill in closes])
+
+    def _finish_take_profit(self) -> None:
+        """Resolve every trigger race before releasing continuation ownership."""
+        direction = self.state.pending_tp_direction
+        fill = self.state.pending_tp_fill
+        if not direction or fill is None:
+            return
+        winner = self.state.long if direction == "BUY" else self.state.short
+        if winner is None:
+            return
+        try:
+            self.bot._cancel_pending_trigger_for_completion(winner)
+        except Exception as exc:
+            self.state.continuation_stage = "ACTIVE"
+            self.state.save(self.bot.cfg.state_file)
+            LOG.info("Continuation TP waits for trigger reconciliation: %s", exc)
+            return
+        self.state.pending_tp_direction = ""
+        self.state.pending_tp_fill = None
+        self.bot._complete_cycle(direction, fill)
+        self.state.armed = not self.state.paused
+        self.state.waiting_current_candle = False
+        self.state.phase = "FILTER" if self.state.armed else "PAUSED"
+        self.state.save(self.bot.cfg.state_file)
+        suffix = ("Перехожу к фильтру нового цикла со сценарием 1."
+                  if self.state.armed else "Следующий новый цикл ожидает /start.")
+        self.bot.telegram.send(
+            f"✅ Продолженный цикл завершён по TP {direction}. {suffix}\n"
+            f"{cycle_result_text(self.state, direction, fill, self.bot.cfg.size)}"
+        )
 
     def start_pause(self) -> None:
         self.state.continuation_stage = "PAUSE"
