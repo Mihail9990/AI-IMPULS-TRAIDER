@@ -1085,6 +1085,45 @@ class EntryRetryTest(unittest.TestCase):
         self.assertTrue(bot.state.continuation_stopped_by_user)
         self.assertIn(bot.state.continuation_stage, {"FORMING_PAIR", "ACTIVE"})
 
+    def test_continuation_preflight_progresses_across_ticks(self):
+        bot = self.make_bot()
+        bot.state.continuation_managed = True
+        controller = bot.continuation = CycleContinuation(bot)
+        bot.capital.positions.return_value = []
+        bot.capital.working_orders.return_value = []
+        bot._start_pair_common = Mock()
+        controller.start_pair("closed candle")
+        controller.tick()
+        controller.tick()
+        bot._start_pair_common.assert_not_called()
+        controller.tick()
+        bot._start_pair_common.assert_called_once_with(
+            "closed candle", continuation=True, preflight_done=True
+        )
+        self.assertEqual(bot.state.continuation_flat_checks, 3)
+        self.assertEqual(bot.state.continuation_stage, "FORMING_PAIR")
+
+    def test_fast_continuation_stop_uses_current_scenario_and_carried_recovery(self):
+        bot = self.make_bot()
+        bot.state.scenario = 5
+        bot.state.realized_losses = D("14.71")
+        bot.state.cycle_target_profit = D("0.40")
+        bot.state.cycle_attempt = 2
+        bot.state.continuation_managed = True
+        controller = bot.continuation = CycleContinuation(bot)
+        bot.strategy.begin_continuation(D("100.50"), D("100.00"))
+        bot.state.long.deal_id = "continued-buy"
+        bot.state.short.deal_id = "continued-sell"
+        bot._apply_protection = Mock(return_value=True)
+        bot._create_trigger = Mock()
+        controller.handle_fast_second_close(bot.state.short, "SL", D("101.05"))
+        self.assertEqual(bot.state.scenario, 5)
+        self.assertEqual(bot.state.recovery, D("15.66"))
+        self.assertEqual(bot.state.long.original_trigger_level, D("100.50"))
+        self.assertEqual(bot.state.short.original_trigger_level, D("100.00"))
+        bot._create_trigger.assert_called_once_with(bot.state.short)
+        self.assertEqual(bot.state.continuation_stage, "ACTIVE")
+
     def test_continuation_recovery_uses_losses_target_and_new_spread_once(self):
         bot = self.make_bot()
         bot.state.realized_losses = D("14.71")

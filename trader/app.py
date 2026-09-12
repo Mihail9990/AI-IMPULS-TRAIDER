@@ -449,11 +449,13 @@ class Bot:
     def _start_cycle(self, filter_reason: str = "условие фильтра выполнено") -> None:
         self._start_pair_common(filter_reason, continuation=False)
 
-    def _start_pair_common(self, filter_reason: str, *, continuation: bool) -> None:
-        positions = self._cycle_positions()
-        orders = [item for item in self.capital.working_orders()
-                  if self._order_epic(item) == self.cfg.epic]
-        if positions or orders:
+    def _start_pair_common(self, filter_reason: str, *, continuation: bool,
+                           preflight_done: bool = False) -> None:
+        positions = self._cycle_positions() if not preflight_done else {}
+        orders = ([item for item in self.capital.working_orders()
+                   if self._order_epic(item) == self.cfg.epic]
+                  if not preflight_done else [])
+        if not preflight_done and (positions or orders):
             # Capital may keep the just-closed cycle in list endpoints briefly. Starting during
             # that window can bind a new confirmation to an old same-direction position.
             LOG.warning(
@@ -462,8 +464,8 @@ class Bot:
             )
             self._flat_checks = 0
             return
-        self._flat_checks = getattr(self, "_flat_checks", 0) + 1
-        if self._flat_checks < 3:
+        self._flat_checks = 3 if preflight_done else getattr(self, "_flat_checks", 0) + 1
+        if not preflight_done and self._flat_checks < 3:
             LOG.info("Broker flat check %s/3 before new cycle", self._flat_checks)
             return
         self._flat_checks = 0
@@ -554,7 +556,9 @@ class Bot:
                 if opened and early_close and early_close[0] is leg:
                     _, source, fill = early_close
                     self._initial_entry_close = None
-                    if self._continue_after_second_initial_close(leg, source, fill):
+                    handler = (self._get_continuation().handle_fast_second_close
+                               if continuation else self._continue_after_second_initial_close)
+                    if handler(leg, source, fill):
                         return
                 if not opened and early_close and early_close[0] is leg:
                     _, source, fill = early_close
@@ -569,6 +573,7 @@ class Bot:
                         self.state.active_attempt_id = 0
                         self.state.armed = True
                         self.state.phase = "CONTINUATION_FILTER"
+                        self.state.continuation_stage = "FILTER"
                         self.state.save(self.cfg.state_file)
                         self.telegram.send(
                             f"⚠️ Продолжение цикла №{self.state.cycle_id}: первая сторона не "
@@ -585,9 +590,7 @@ class Bot:
             opened.append(leg)
         assert self.state.long and self.state.short
         if continuation:
-            self.strategy.confirm_continuation_fills(
-                self.state.long.current_entry, self.state.short.current_entry
-            )
+            self._get_continuation().confirm_pair_fills()
         else:
             self.strategy.confirm_initial_fills(
                 self.state.long.current_entry, self.state.short.current_entry
@@ -597,23 +600,23 @@ class Bot:
         # the exact strategy levels.  That is a real scenario-1 stop, not a broken hedge.  Check
         # the broker snapshot before PUT /positions/{dealId} so a legitimate close is replayed by
         # the normal cycle state machine instead of being mislabeled as a 404/manual-mode error.
-        if self._continue_after_early_initial_close():
+        if self._continue_after_early_initial_close(continuation):
             return
         try:
             # Establish and verify both exact stops first. Only positions that are still active
             # after that safety barrier receive their take profits.
             for leg in (self.state.long, self.state.short):
                 self._apply_stop_only(leg)
-                if self._continue_after_early_initial_close():
+                if self._continue_after_early_initial_close(continuation):
                     return
             for leg in (self.state.long, self.state.short):
                 self._apply_take_profit_only(leg)
-                if self._continue_after_early_initial_close():
+                if self._continue_after_early_initial_close(continuation):
                     return
         except Exception as exc:
             # A position may also close after the snapshot above but while exact protection is
             # being applied.  Reconcile that race once more before stopping automation.
-            if self._continue_after_early_initial_close():
+            if self._continue_after_early_initial_close(continuation):
                 return
             self._capture_failure_context("initial protection failed", exc)
             self._manual(f"Обе стороны открыты, но точные SL/TP не подтверждены: {exc}")
@@ -692,7 +695,7 @@ class Bot:
         )
         return True
 
-    def _continue_after_early_initial_close(self) -> bool:
+    def _continue_after_early_initial_close(self, continuation: bool = False) -> bool:
         """Replay a stop/TP that happened while the sequential hedge was being finalized."""
         positions = self._cycle_positions()
         expected = {
@@ -708,7 +711,11 @@ class Bot:
             sorted(missing), sorted(positions),
         )
         self.state.save(self.cfg.state_file)
-        self._tick_cycle()
+        if continuation:
+            self.state.continuation_stage = "ACTIVE"
+            self._get_continuation().handle_active_scenario()
+        else:
+            self._tick_cycle()
         return True
 
     def _open_initial_leg(self, leg: Leg) -> str | None:
@@ -1352,7 +1359,7 @@ class Bot:
         opposite = self.state.short if leg.direction == "BUY" else self.state.long
         both_submitted = set(self.state.initial_submitted_directions) == {"BUY", "SELL"}
         if (not both_submitted and opposite and opposite.deal_id
-                and self.state.scenario == 1):
+                and (self.state.scenario == 1 or self.state.continuation_managed)):
             # Migration from 0d9cc63: that version persisted both Leg objects/references but did
             # not yet persist the submitted-direction list.
             self.state.initial_submitted_directions = ["BUY", "SELL"]
@@ -1363,12 +1370,18 @@ class Bot:
             # synchronization. Hand the complete pair to the ordinary scenario-1 replay, which
             # accounts an opposite SL before TP and is idempotent by broker event key.
             self._clear_pending_market(leg)
-            if self.state.scenario == 1:
+            if self.state.continuation_managed:
+                self._get_continuation().confirm_pair_fills()
+            elif self.state.scenario == 1:
                 self.strategy.confirm_initial_fills(
                     self.state.long.current_entry, self.state.short.current_entry
                 )
             self.state.save(self.cfg.state_file)
-            self._tick_cycle()
+            if self.state.continuation_managed:
+                self.state.continuation_stage = "ACTIVE"
+                self._get_continuation().handle_active_scenario()
+            else:
+                self._tick_cycle()
             return True
         if leg.deal_id not in current:
             related_orders = [

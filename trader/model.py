@@ -80,6 +80,8 @@ class CycleState:
     cycle_attempt_start_losses: Decimal = D("0")
     continuation_managed: bool = False
     continuation_stage: str = ""
+    continuation_flat_checks: int = 0
+    continuation_filter_reason: str = ""
     attempt_result_total: Decimal = D("0")
     attempt_history: list[dict] = field(default_factory=list)
     initial_submitted_directions: list[str] = field(default_factory=list)
@@ -246,6 +248,8 @@ class CycleState:
         self.cycle_attempt_start_losses = D("0")
         self.continuation_managed = False
         self.continuation_stage = ""
+        self.continuation_flat_checks = 0
+        self.continuation_filter_reason = ""
 
 
 def stop_for(direction: str, entry: Decimal, distance: Decimal) -> Decimal:

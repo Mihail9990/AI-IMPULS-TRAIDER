@@ -45,20 +45,22 @@ class CycleContinuation:
         elif stage == "FILTER":
             if not self.state.paused:
                 self.bot._tick_filter(self.start_pair)
+        elif stage == "PREFLIGHT":
+            self._tick_preflight()
         elif stage == "FORMING_PAIR":
             # A persisted INITIAL submission is always resolved before any further POST. This is
             # the critical restart path for attempt 255.
             if any(leg and leg.pending_market_kind for leg in (self.state.long, self.state.short)):
                 self.bot._resume_pending_market()
                 return
-            if self.state.long and self.state.short and self.state.long.open and self.state.short.open:
+            if self._pair_was_submitted():
                 self.state.continuation_stage = "ACTIVE"
                 self.state.save(self.bot.cfg.state_file)
-                self.bot._tick_cycle()
+                self.handle_active_scenario()
         elif stage == "MANUAL_PAIR_PAUSE":
             return
         elif stage == "ACTIVE":
-            self.bot._tick_cycle()
+            self.handle_active_scenario()
         else:
             LOG.error("Unknown continuation stage %r; blocking entries", stage)
             self.state.paused = True
@@ -66,9 +68,118 @@ class CycleContinuation:
 
     def start_pair(self, filter_reason: str) -> None:
         """Own formation of a repeated pair without invoking initial-cycle state resets."""
+        self.state.continuation_stage = "PREFLIGHT"
+        self.state.continuation_flat_checks = 0
+        self.state.continuation_filter_reason = filter_reason
+        self.state.save(self.bot.cfg.state_file)
+
+    def _tick_preflight(self) -> None:
+        positions = self.bot._cycle_positions()
+        orders = [item for item in self.bot.capital.working_orders()
+                  if self.bot._order_epic(item) == self.bot.cfg.epic]
+        if positions or orders:
+            self.state.continuation_flat_checks = 0
+            self.state.save(self.bot.cfg.state_file)
+            return
+        self.state.continuation_flat_checks += 1
+        self.state.save(self.bot.cfg.state_file)
+        if self.state.continuation_flat_checks < 3:
+            return
         self.state.continuation_stage = "FORMING_PAIR"
         self.state.save(self.bot.cfg.state_file)
-        self.bot._start_pair_common(filter_reason, continuation=True)
+        self.bot._start_pair_common(
+            self.state.continuation_filter_reason or "условие фильтра выполнено",
+            continuation=True, preflight_done=True,
+        )
+
+    def _pair_was_submitted(self) -> bool:
+        return set(self.state.initial_submitted_directions) == {"BUY", "SELL"}
+
+    def confirm_pair_fills(self) -> None:
+        if not self.state.long or not self.state.short:
+            raise RuntimeError("Continuation pair legs are missing")
+        self.bot.strategy.confirm_continuation_fills(
+            self.state.long.current_entry, self.state.short.current_entry
+        )
+
+    def handle_fast_second_close(self, closed, source: str, fill: Decimal) -> bool:
+        """Replay a fast close using the current scenario, never scenario-1 validation."""
+        self.confirm_pair_fills()
+        closed.open = True
+        stopped = self.bot.strategy.stopped(
+            closed.direction, fill, f"stop:{closed.deal_id}:{fill}"
+        )
+        survivor = self.state.short if closed.direction == "BUY" else self.state.long
+        if survivor and survivor.open and self.bot._apply_protection(survivor):
+            self.bot._create_trigger(stopped)
+        self.state.continuation_stage = "ACTIVE"
+        self.state.save(self.bot.cfg.state_file)
+        return True
+
+    def handle_active_scenario(self) -> None:
+        """Continuation-owned scenario dispatcher for the current scenario (1 through 9)."""
+        if self.state.pending_close_reference:
+            self.bot._resume_pending_close()
+            return
+        if self.state.pending_tp_direction and self.state.pending_tp_fill is not None:
+            self.bot._finish_reached_take_profit()
+            return
+        if self.bot._resume_pending_market():
+            return
+        positions = self.bot._cycle_positions()
+        self.bot._detect_trigger_fill(positions)
+        if self.state.scenario >= self.bot.cfg.max_scenarios:
+            self.bot._enter_manual_nine()
+            return
+        open_legs = [leg for leg in (self.state.long, self.state.short) if leg and leg.open]
+        missing = [leg for leg in open_legs if leg.deal_id not in positions]
+        if not missing:
+            for leg in open_legs:
+                if not self.bot._protection_matches(positions[leg.deal_id], leg):
+                    if not self.bot._apply_protection(leg):
+                        return
+            self.bot._ensure_expected_trigger()
+            return
+        positions = self.bot._retry_missing_positions(attempts=1, delay=0)
+        missing = [leg for leg in open_legs if leg.deal_id not in positions]
+        if not missing:
+            return
+        activity = self.bot.capital.activity()
+        closes = []
+        for leg in missing:
+            tp = self.bot._closing_fill_any_index(leg, "TP", activity)
+            sl = None if tp is not None else self.bot._closing_fill_any_index(leg, "SL", activity)
+            if tp is None and sl is None:
+                return
+            closes.append((leg, "TP" if tp is not None else "SL", tp or sl))
+        winners = [item for item in closes if item[1] == "TP"]
+        if winners:
+            winner, _, fill = winners[0]
+            if any(leg.deal_id in positions for leg in open_legs if leg is not winner):
+                # TP geometry implies the opposite SL, but visibility is not closure evidence.
+                return
+            for loser, source, loser_fill in closes:
+                if loser is not winner and source == "SL" and loser.open:
+                    self.bot.strategy.stopped(
+                        loser.direction, loser_fill, f"stop:{loser.deal_id}:{loser_fill}"
+                    )
+            self.bot._complete_cycle(winner.direction, fill)
+            return
+        for leg, _, fill in closes:
+            if leg.open:
+                self.bot.strategy.stopped(leg.direction, fill, f"stop:{leg.deal_id}:{fill}")
+        remaining = [leg for leg in (self.state.long, self.state.short) if leg and leg.open]
+        if remaining:
+            survivor = remaining[0]
+            stopped = self.state.short if survivor.direction == "BUY" else self.state.long
+            if survivor.deal_id in positions and self.bot._apply_protection(survivor):
+                self.bot._create_trigger(stopped)
+            return
+        for trigger_leg in (self.state.long, self.state.short):
+            if trigger_leg and trigger_leg.trigger_id:
+                if not self.bot._resolve_trigger_for_double_stop(trigger_leg, positions):
+                    return
+        self.bot._begin_double_sl_pause([(leg, fill) for leg, _, fill in closes])
 
     def start_pause(self) -> None:
         self.state.continuation_stage = "PAUSE"
