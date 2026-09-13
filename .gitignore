@@ -1,0 +1,9 @@
+.env
+bot_state.json
+demo_captures/
+bot_config.json
+__pycache__/
+.pytest_cache/
+*.pyc
+bot_diagnostics.log*
+bot_diagnostics*.log*
