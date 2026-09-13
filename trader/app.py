@@ -23,7 +23,7 @@ from .events import (
     normalize_events,
 )
 from .execution import ExecutionPolicy, is_crossed_level_rejection, trigger_level_passed
-from .model import CycleState, Leg, stop_for
+from .model import CycleState, Leg, stop_for, target_for
 from .reconcile import RemoteSnapshot
 from .reporting import cycle_result_text, pnl_text, scenario_nine_result_text, status_text
 from .streaming import PriceWatch, QuoteStream
@@ -1304,14 +1304,10 @@ class Bot:
             return False
         preexisting_ids = set(leg.pending_market_preexisting_ids)
         if leg.pending_market_kind == "FALLBACK":
-            opposite = self.state.short if leg.direction == "BUY" else self.state.long
-            if not opposite or opposite.stop is None:
-                self._manual("Нельзя продолжить pending MARKET без противоположной стороны")
-                return True
             projected_recovery = self.state.recovery + self.cfg.stop_distance
-            projected_target = (
-                opposite.stop + projected_recovery
-                if leg.direction == "BUY" else opposite.stop - projected_recovery
+            projected_target = target_for(
+                leg.direction, leg.original_trigger_level,
+                self.cfg.stop_distance, projected_recovery,
             )
             self._open_passed_trigger_at_market(
                 leg, projected_target, leg.pending_market_reason or "pending MARKET reconciliation"
@@ -1740,13 +1736,9 @@ class Bot:
         last_error = "trigger отклонён"
         projected_stop = stop_for(leg.direction, leg.original_trigger_level, self.cfg.stop_distance)
         projected_recovery = self.state.recovery + self.cfg.stop_distance
-        opposite = self.state.short if leg.direction == "BUY" else self.state.long
-        if not opposite or opposite.stop is None:
-            raise RuntimeError("Нельзя рассчитать защиту trigger без противоположного SL")
-        projected_target = (
-            opposite.stop + projected_recovery
-            if leg.direction == "BUY"
-            else opposite.stop - projected_recovery
+        projected_target = target_for(
+            leg.direction, leg.original_trigger_level,
+            self.cfg.stop_distance, projected_recovery,
         )
         if leg.pending_market_kind == "FALLBACK":
             self._open_passed_trigger_at_market(
@@ -2277,6 +2269,11 @@ class Bot:
             return
         try:
             self._recover_active_cycle(positions, orders)
+            if (self.state.active and not self.state.manual
+                    and self.state.scenario < self.cfg.max_scenarios
+                    and self.state.long and self.state.short):
+                # Migration of active state saved with the former opposite-stop TP formula.
+                self.strategy.refresh_targets()
             self.reconciled = True
             self.state.save(self.cfg.state_file)
             self.telegram.send(f"✅ Состояние автоматически восстановлено. {self.status()}")
@@ -2771,13 +2768,9 @@ class Bot:
             if leg.trigger_id:
                 self.capital.delete_working_order(leg.trigger_id)
             projected_stop = stop_for(leg.direction, level, self.cfg.stop_distance)
-            opposite = self.state.short if leg.direction == "BUY" else self.state.long
-            if not opposite or opposite.stop is None:
-                raise RuntimeError("Нельзя рассчитать защиту trigger без противоположного SL")
             projected_recovery = self.state.recovery + self.cfg.stop_distance
-            projected_target = (
-                opposite.stop + projected_recovery
-                if leg.direction == "BUY" else opposite.stop - projected_recovery
+            projected_target = target_for(
+                leg.direction, level, self.cfg.stop_distance, projected_recovery,
             )
             reference = self.capital.working_stop(
                 self.cfg.epic, leg.direction, self.cfg.size, level,

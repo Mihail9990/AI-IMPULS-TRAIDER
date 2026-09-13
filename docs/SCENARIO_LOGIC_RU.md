@@ -25,11 +25,13 @@ MAX_SCENARIOS = 9
 SL_LONG  = CURRENT_ENTRY_LONG  - STOP_DISTANCE
 SL_SHORT = CURRENT_ENTRY_SHORT + STOP_DISTANCE
 
-TP_LONG  = CURRENT_SL_SHORT + RECOVERY
-TP_SHORT = CURRENT_SL_LONG  - RECOVERY
+TP_LONG  = CURRENT_ENTRY_LONG  + STOP_DISTANCE + RECOVERY
+TP_SHORT = CURRENT_ENTRY_SHORT - STOP_DISTANCE - RECOVERY
 ```
 
-TP находится за SL противоположной позиции. Первоначальный спред и все виды
+TP каждой позиции зависит только от её собственного подтверждённого `current_entry`,
+`STOP_DISTANCE` и текущего накопленного `RECOVERY`; изменение SL противоположной стороны
+не сдвигает TP. Первоначальный спред и все виды
 проскальзывания являются абсолютными расстояниями:
 
 ```text

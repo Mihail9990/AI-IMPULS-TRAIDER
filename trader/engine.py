@@ -7,6 +7,7 @@ from .model import (
     CycleState,
     Leg,
     stop_for,
+    target_for,
     stop_slippage,
     trigger_slippage,
 )
@@ -61,7 +62,7 @@ class Strategy:
             leg.original_trigger_level = leg.current_entry = fill
             leg.stop = stop_for(leg.direction, fill, self.cfg.stop_distance)
             self.state.remember_deal(leg, 1)
-        self._targets_from_opposite_stops()
+        self._targets_from_entries()
         self.state.events.append(
             f"scenario 1 fills confirmed; raw_gap={raw_gap}; spread={spread}; "
             f"recovery={self.state.recovery}"
@@ -88,7 +89,7 @@ class Strategy:
         for leg in (self.state.long, self.state.short):
             leg.stop = stop_for(leg.direction, leg.current_entry, self.cfg.stop_distance)
             self.state.remember_deal(leg, self.state.scenario)
-        self._targets_from_opposite_stops()
+        self._targets_from_entries()
         self.state.phase = "BOTH_OPEN"
         self.state.events.append(
             f"continuation attempt {self.state.cycle_attempt}; scenario={self.state.scenario}; "
@@ -111,7 +112,10 @@ class Strategy:
         self.state.remember_close(leg.deal_id, "SL", fill)
         self.state.recovery += slippage
         survivor = self._leg("SELL" if direction == "BUY" else "BUY")
-        survivor.take_profit = self._survivor_target(survivor.direction)
+        survivor.take_profit = target_for(
+            survivor.direction, survivor.current_entry,
+            self.cfg.stop_distance, self.state.recovery,
+        )
         self.state.phase = "LONG_ONLY" if survivor.direction == "BUY" else "SHORT_ONLY"
         if event_id:
             self.state.processed_events.append(event_id)
@@ -135,7 +139,7 @@ class Strategy:
         leg.trigger_id = leg.trigger_reference = ""
         leg.stop = stop_for(direction, fill, self.cfg.stop_distance)
         self.state.remember_deal(leg, self.state.scenario)
-        self._targets_from_opposite_stops()
+        self._targets_from_entries()
         self.state.phase = "BOTH_OPEN"
         if event_id:
             self.state.processed_events.append(event_id)
@@ -194,19 +198,18 @@ class Strategy:
         if self.state.profit_override_remaining == 0:
             self.state.profit_override = None
 
-    def _targets_from_opposite_stops(self) -> None:
+    def _targets_from_entries(self) -> None:
         if not self.state.long or not self.state.short:
             raise RuntimeError("Both legs are required")
-        if self.state.long.stop is None or self.state.short.stop is None:
-            raise RuntimeError("Both stops are required")
-        self.state.long.take_profit = self.state.short.stop + self.state.recovery
-        self.state.short.take_profit = self.state.long.stop - self.state.recovery
+        for leg in (self.state.long, self.state.short):
+            leg.take_profit = target_for(
+                leg.direction, leg.current_entry,
+                self.cfg.stop_distance, self.state.recovery,
+            )
 
-    def _survivor_target(self, direction: str) -> Decimal:
-        opposite = self._leg("SELL" if direction == "BUY" else "BUY")
-        if opposite.stop is None:
-            raise RuntimeError("Stopped leg has no stop anchor")
-        return opposite.stop + self.state.recovery if direction == "BUY" else opposite.stop - self.state.recovery
+    def refresh_targets(self) -> None:
+        """Recalculate automatic TP levels without changing Recovery or scenario state."""
+        self._targets_from_entries()
 
     def _leg(self, direction: str) -> Leg:
         leg = self.state.long if direction == "BUY" else self.state.short

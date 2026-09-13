@@ -256,6 +256,12 @@ def stop_for(direction: str, entry: Decimal, distance: Decimal) -> Decimal:
     return entry - distance if direction == "BUY" else entry + distance
 
 
+def target_for(direction: str, entry: Decimal, distance: Decimal, recovery: Decimal) -> Decimal:
+    """Return strategic TP from this position's own confirmed/projected entry."""
+    total = distance + recovery
+    return entry + total if direction == "BUY" else entry - total
+
+
 def stop_slippage(direction: str, expected: Decimal, actual: Decimal) -> Decimal:
     """Return the unsigned deviation between planned and actual stop execution."""
     del direction  # Direction does not change the configured absolute-distance rule.

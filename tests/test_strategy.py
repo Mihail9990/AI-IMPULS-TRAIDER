@@ -24,7 +24,7 @@ from trader.events import (
     normalize_events,
 )
 from trader.execution import ExecutionPolicy, is_crossed_level_rejection, trigger_level_passed
-from trader.model import CycleState, Leg, stop_slippage, trigger_slippage
+from trader.model import CycleState, Leg, stop_slippage, target_for, trigger_slippage
 from trader.reconcile import RemoteSnapshot
 from trader.reporting import cycle_result_text, pnl_text
 from trader.streaming import PriceWatch, QuoteStream
@@ -37,12 +37,12 @@ class StrategyTest(unittest.TestCase):
         self.strategy = Strategy(Settings(), self.state)
         self.strategy.begin(D("4010.30"), D("4010.00"))
 
-    def test_first_targets_are_beyond_opposite_stops(self):
+    def test_first_targets_use_each_leg_actual_entry(self):
         self.assertEqual(self.state.recovery, D("0.60"))
         self.assertEqual(self.state.long.stop, D("4009.30"))
         self.assertEqual(self.state.short.stop, D("4011.00"))
-        self.assertEqual(self.state.long.take_profit, D("4011.60"))
-        self.assertEqual(self.state.short.take_profit, D("4008.70"))
+        self.assertEqual(self.state.long.take_profit, D("4011.90"))
+        self.assertEqual(self.state.short.take_profit, D("4008.40"))
 
     def test_trigger_open_is_found_by_working_order_in_global_activity(self):
         activity = [{
@@ -90,7 +90,7 @@ class StrategyTest(unittest.TestCase):
         self.assertEqual(self.state.entry_spread, D("0.35"))
         self.assertEqual(self.state.recovery, D("0.65"))
         self.assertEqual(self.state.long.original_trigger_level, D("4010.35"))
-        self.assertEqual(self.state.long.take_profit, D("4011.65"))
+        self.assertEqual(self.state.long.take_profit, D("4012.00"))
 
     def test_favorable_sequential_fill_gap_is_absolute_spread(self):
         self.strategy.confirm_initial_fills(D("4658.48"), D("4658.72"))
@@ -98,14 +98,14 @@ class StrategyTest(unittest.TestCase):
         self.assertEqual(self.state.recovery, D("0.54"))
         self.assertEqual(self.state.long.stop, D("4657.48"))
         self.assertEqual(self.state.short.stop, D("4659.72"))
-        self.assertEqual(self.state.long.take_profit, D("4660.26"))
-        self.assertEqual(self.state.short.take_profit, D("4656.94"))
+        self.assertEqual(self.state.long.take_profit, D("4660.02"))
+        self.assertEqual(self.state.short.take_profit, D("4657.18"))
 
     def test_absolute_stop_slippage_is_added_in_both_directions(self):
         self.strategy.stopped("SELL", D("4011.10"), "stop-1")
         self.assertEqual(self.state.recovery, D("0.70"))
         self.assertEqual(self.state.realized_losses, D("1.10"))
-        self.assertEqual(self.state.long.take_profit, D("4011.70"))
+        self.assertEqual(self.state.long.take_profit, D("4012.00"))
 
         second = CycleState()
         strategy = Strategy(Settings(), second)
@@ -138,8 +138,52 @@ class StrategyTest(unittest.TestCase):
         self.assertEqual(self.state.short.original_trigger_level, D("4010.00"))
         self.assertEqual(self.state.short.current_entry, D("4009.90"))
         self.assertEqual(self.state.short.stop, D("4010.90"))
-        self.assertEqual(self.state.long.take_profit, D("4012.70"))
-        self.assertEqual(self.state.short.take_profit, D("4007.50"))
+        self.assertEqual(self.state.long.take_profit, D("4013.10"))
+        self.assertEqual(self.state.short.take_profit, D("4007.10"))
+
+    def test_target_helper_is_symmetric_and_independent_of_opposite_stop(self):
+        self.assertEqual(target_for("BUY", D("4011.05"), D("1"), D("0.65")), D("4012.70"))
+        self.assertEqual(target_for("SELL", D("4010.70"), D("1"), D("0.65")), D("4009.05"))
+        before = self.state.long.take_profit
+        self.state.short.stop = D("9999")
+        self.strategy._targets_from_entries()
+        self.assertEqual(self.state.long.take_profit, before)
+
+    def test_recovery_table_scenarios_one_through_nine(self):
+        state = CycleState()
+        strategy = Strategy(Settings(stop_distance=D("1"), target_profit=D("0.30")), state)
+        strategy.begin(D("4011.05"), D("4010.70"))
+        self.assertEqual(state.recovery, D("0.65"))
+        expected_after_stop = [D("0.75"), D("1.95"), D("3.15"), D("4.35"),
+                               D("5.55"), D("6.75"), D("7.95"), D("9.15")]
+        direction = "SELL"
+        for scenario, expected in enumerate(expected_after_stop, 1):
+            leg = state.short if direction == "SELL" else state.long
+            actual_stop = leg.stop + (D("0.10") if direction == "SELL" else D("-0.10"))
+            strategy.stopped(direction, actual_stop, f"stop-{scenario}")
+            self.assertEqual(state.scenario, scenario)
+            self.assertEqual(state.recovery, expected)
+            if scenario == 8:
+                break
+            fill = leg.original_trigger_level + (D("-0.10") if direction == "SELL" else D("0.10"))
+            strategy.reopened(direction, fill, f"deal-{scenario + 1}", f"reopen-{scenario + 1}")
+            self.assertEqual(state.recovery, expected + D("1.10"))
+            direction = "BUY" if direction == "SELL" else "SELL"
+        leg = state.short if direction == "SELL" else state.long
+        fill = leg.original_trigger_level + (D("-0.10") if direction == "SELL" else D("0.10"))
+        strategy.reopened(direction, fill, "deal-9", "reopen-9")
+        self.assertEqual(state.scenario, 9)
+        self.assertEqual(state.recovery, D("10.25"))
+        self.assertEqual(state.phase, "SCENARIO_9_CLOSING")
+
+    def test_refresh_targets_migrates_old_tp_without_changing_recovery(self):
+        recovery = self.state.recovery
+        self.state.long.take_profit = D("999")
+        self.state.short.take_profit = D("-999")
+        self.strategy.refresh_targets()
+        self.assertEqual(self.state.recovery, recovery)
+        self.assertEqual(self.state.long.take_profit, D("4011.90"))
+        self.assertEqual(self.state.short.take_profit, D("4008.40"))
 
     def test_scenario_nine_enters_automatic_closing_phase(self):
         self.state.scenario = 8
@@ -1231,7 +1275,23 @@ class EntryRetryTest(unittest.TestCase):
         self.assertEqual(bot.state.recovery, D("15.31"))
         self.assertEqual(bot.state.long.original_trigger_level, D("4375.20"))
         self.assertEqual(bot.state.short.original_trigger_level, D("4375.00"))
+        self.assertEqual(bot.state.long.take_profit, D("4391.51"))
+        self.assertEqual(bot.state.short.take_profit, D("4358.69"))
         self.assertEqual(bot.state.scenario, 8)
+
+    def test_projected_trigger_target_uses_trigger_entry_not_opposite_stop(self):
+        bot = self.make_bot()
+        stopped = bot.strategy.stopped("SELL", D("4011.10"), "sell-stop")
+        bot.capital.working_stop.return_value = "trigger-ref"
+        bot.capital.wait_confirmation.return_value = {
+            "dealStatus": "ACCEPTED", "dealId": "trigger-id",
+        }
+        before = bot.state.recovery
+        bot._create_trigger(stopped)
+        bot.capital.working_stop.assert_called_once_with(
+            "GOLD", "SELL", D("0.1"), D("4010.00"), D("4011.00"), D("4007.30")
+        )
+        self.assertEqual(bot.state.recovery, before)
 
     def test_stop_blocks_expired_continuation_pause(self):
         bot = self.make_bot()
@@ -1542,7 +1602,7 @@ class EntryRetryTest(unittest.TestCase):
         self.assertEqual(bot.state.entry_spread, D("0.11"))
         self.assertEqual(bot.state.recovery, D("0.43"))
         self.assertEqual(bot.state.realized_losses, D("1.02"))
-        self.assertEqual(bot.state.long.take_profit, D("4634.49"))
+        self.assertEqual(bot.state.long.take_profit, D("4634.60"))
         self.assertEqual(bot.state.short.trigger_id, "trigger-1")
         bot.capital.update_position.assert_called_once()
         bot.capital.working_stop.assert_called_once()
@@ -2718,7 +2778,7 @@ class BrokerInfrastructureTest(unittest.TestCase):
         self.assertEqual(bot.state.long.trigger_id, "manual-order")
         self.assertIn("manual-order", bot.state.cycle_trigger_ids)
         bot.capital.working_stop.assert_called_once_with(
-            "GOLD", "BUY", D("0.1"), D("4020.50"), D("4019.50"), D("4012.60")
+            "GOLD", "BUY", D("0.1"), D("4020.50"), D("4019.50"), D("4023.10")
         )
 
     def test_manual_trigger_is_rejected_after_completed_cycle(self):
