@@ -2363,6 +2363,13 @@ class Bot:
         9 is no longer manual: protection is removed and both legs are closed as concurrently as
         the REST API permits.
         """
+        if not self.state.active:
+            LOG.info(
+                "Scenario 9 completion already finalized; duplicate entry ignored "
+                "completed_cycles=%s attempt=%s",
+                self.state.completed_cycles, self.state.active_attempt_id,
+            )
+            return
         self.state.phase = "SCENARIO_9_CLOSING"
         self.state.manual = False
         prior_losses = self.state.realized_losses

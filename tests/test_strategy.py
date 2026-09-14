@@ -1211,6 +1211,65 @@ class EntryRetryTest(unittest.TestCase):
         bot.continuation.handle_active_scenario()
         bot._complete_cycle.assert_not_called()
 
+    def test_nested_pending_market_scenario_nine_completion_is_not_repeated(self):
+        """Reproduce attempt 255: nested fallback completion must stop the outer dispatcher."""
+        bot = self.make_bot()
+        bot.state.continuation_managed = True
+        bot.state.continuation_stage = "ACTIVE"
+        bot.state.scenario = 9
+        bot.continuation = CycleContinuation(bot)
+        completions = []
+
+        def resolve_and_complete():
+            # The shared pending-MARKET resolver may dispatch synchronously to the owner.  Model
+            # the observable result of that real inner path instead of replacing the outer stage.
+            completions.append(bot.state.active_attempt_id)
+            bot.state.active = False
+            bot.continuation.release()
+            return False
+
+        bot._resume_pending_market = Mock(side_effect=resolve_and_complete)
+        bot._enter_manual_nine = Mock()
+
+        bot.continuation.handle_active_scenario()
+
+        self.assertEqual(len(completions), 1)
+        bot._enter_manual_nine.assert_not_called()
+        bot.capital.positions.assert_not_called()
+
+    def test_scenario_nine_completion_is_idempotent_after_cycle_is_inactive(self):
+        bot = self.make_bot()
+        bot.state.scenario = 9
+        bot.state.active = False
+        completed = bot.state.completed_cycles
+
+        bot._enter_manual_nine()
+
+        self.assertEqual(bot.state.completed_cycles, completed)
+        bot.capital.working_orders.assert_not_called()
+        bot.capital.close_position.assert_not_called()
+
+    def test_releasing_continuation_clears_only_transient_owner_metadata(self):
+        bot = self.make_bot()
+        bot.state.continuation_managed = True
+        bot.state.continuation_stage = "ACTIVE"
+        bot.state.continuation_pause_until = 12345.0
+        bot.state.continuation_flat_checks = 2
+        bot.state.continuation_filter_reason = "old filter"
+        bot.state.continuation_stopped_by_user = True
+        bot.state.paused = True
+
+        bot._get_continuation().release()
+
+        self.assertFalse(bot.state.continuation_managed)
+        self.assertEqual(bot.state.continuation_stage, "")
+        self.assertEqual(bot.state.continuation_pause_until, 0.0)
+        self.assertEqual(bot.state.continuation_flat_checks, 0)
+        self.assertEqual(bot.state.continuation_filter_reason, "")
+        self.assertFalse(bot.state.continuation_stopped_by_user)
+        # /stop is represented by the common pause and must survive owner release.
+        self.assertTrue(bot.state.paused)
+
     def test_preflight_stop_blocks_pair_until_start(self):
         bot = self.make_bot()
         bot.state.continuation_managed = True

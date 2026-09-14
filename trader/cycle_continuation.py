@@ -36,6 +36,13 @@ class CycleContinuation:
     def release(self) -> None:
         self.state.continuation_managed = False
         self.state.continuation_stage = ""
+        # These fields describe only an in-cycle continuation.  Leaving an expired pause behind
+        # makes normal cycles look continuation-owned in /status after the owner has released the
+        # completed cycle (and made the September 14 incident harder to diagnose).
+        self.state.continuation_pause_until = 0.0
+        self.state.continuation_flat_checks = 0
+        self.state.continuation_filter_reason = ""
+        self.state.continuation_stopped_by_user = False
 
     def tick(self) -> None:
         """Advance exactly one continuation state; normal Bot.tick must not run in parallel."""
@@ -150,8 +157,16 @@ class CycleContinuation:
             return
         if self.bot._resume_pending_market():
             return
+        # Resolving a pending MARKET can synchronously dispatch back to this continuation owner.
+        # In particular, a recovered 8 -> 9 trigger fill may complete scenario 9 in that nested
+        # dispatch.  Do not let the outer frame enter scenario-9 completion a second time after
+        # ownership and active state have already been released.
+        if not self.state.continuation_managed or not self.state.active:
+            return
         positions = self.bot._cycle_positions()
         self.bot._detect_trigger_fill(positions)
+        if not self.state.continuation_managed or not self.state.active:
+            return
         if self.state.scenario >= self.bot.cfg.max_scenarios:
             self.bot._enter_manual_nine()
             return
