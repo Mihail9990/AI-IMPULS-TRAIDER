@@ -273,10 +273,13 @@ class CycleContinuation:
                 Decimal("0"), fill - leg.current_entry
             )
             self.state.realized_losses += loss
+            self.state.realized_loss_money += loss * leg.size
             self.state.processed_events.append(event_id)
             self.state.remember_deal(leg, self.state.scenario)
             self.state.remember_close(leg.deal_id, source, fill)
-        result = -(self.state.realized_losses - self.state.cycle_attempt_start_losses) * self.bot.cfg.size
+        result = -(
+            self.state.realized_loss_money - self.state.cycle_attempt_start_loss_money
+        )
         self.state.remember_attempt(
             "CONTINUATION_PAIR_NOT_FORMED", result, scenario=self.state.scenario,
             direction=leg.direction, deal_id=leg.deal_id, entry=leg.current_entry,

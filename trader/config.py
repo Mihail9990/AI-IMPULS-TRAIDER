@@ -30,6 +30,19 @@ def _bool(value) -> bool:
     raise ValueError(f"Invalid boolean value: {value!r}")
 
 
+def _decimal_list(value) -> tuple[Decimal, ...]:
+    if value in (None, "", []):
+        return ()
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Scenario settings must be JSON arrays") from exc
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("Scenario settings must be JSON arrays")
+    return tuple(Decimal(str(item)) for item in value)
+
+
 @dataclass(frozen=True)
 class Settings:
     api_key: str = ""
@@ -52,10 +65,21 @@ class Settings:
     dry_run: bool = True
     state_file: str = "bot_state.json"
     diagnostic_log_file: str = "bot_diagnostics.log"
+    scenario_sizes: tuple[Decimal, ...] = ()
+    scenario_stop_distances: tuple[Decimal, ...] = ()
+
+    def size_for(self, scenario: int) -> Decimal:
+        return self.scenario_sizes[scenario - 1] if self.scenario_sizes else self.size
+
+    def stop_for(self, scenario: int) -> Decimal:
+        return (self.scenario_stop_distances[scenario - 1]
+                if self.scenario_stop_distances else self.stop_distance)
 
     @classmethod
     def from_env(cls) -> "Settings":
         values = _load_file()
+        raw_sizes = _value(values, "SCENARIO_POSITION_SIZES", None)
+        raw_stops = _value(values, "SCENARIO_STOP_DISTANCES", None)
         value = cls(
             api_key=str(_value(values, "CAPITAL_API_KEY", "")),
             identifier=str(_value(values, "CAPITAL_IDENTIFIER", "")),
@@ -83,6 +107,8 @@ class Settings:
             diagnostic_log_file=str(
                 _value(values, "DIAGNOSTIC_LOG_FILE", "bot_diagnostics.log")
             ),
+            scenario_sizes=_decimal_list(raw_sizes),
+            scenario_stop_distances=_decimal_list(raw_stops),
         )
         value.validate()
         return value
@@ -98,6 +124,19 @@ class Settings:
             raise ValueError("ENTRY_CANDLE_MINUTES must be one of 1, 2, 3, 4, 5")
         if self.max_scenarios != 9:
             raise ValueError("This strategy requires exactly 9 scenarios")
+        if bool(self.scenario_sizes) != bool(self.scenario_stop_distances):
+            raise ValueError("SCENARIO_POSITION_SIZES and SCENARIO_STOP_DISTANCES must be set together")
+        if self.scenario_sizes:
+            if len(self.scenario_sizes) != 9 or len(self.scenario_stop_distances) != 9:
+                raise ValueError("Scenario size and SL lists must contain exactly 9 values")
+            if any(value <= 0 for value in (*self.scenario_sizes, *self.scenario_stop_distances)):
+                raise ValueError("Every scenario size and SL distance must be positive")
+            distinct = []
+            for value in self.scenario_sizes:
+                if not distinct or value != distinct[-1]:
+                    distinct.append(value)
+            if len(distinct) > 2 or (len(distinct) == 2 and distinct[1] != distinct[0] * 2):
+                raise ValueError("Scenario sizes may stay constant or increase once by exactly x2")
         if self.poll_seconds < 0.25:
             raise ValueError("POLL_SECONDS cannot be lower than 0.25")
         if self.websocket_stale_seconds <= 0:

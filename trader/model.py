@@ -28,6 +28,15 @@ class Leg:
     pending_market_preexisting_ids: list[str] = field(default_factory=list)
     stop: Decimal | None = None
     take_profit: Decimal | None = None
+    size: Decimal = D("0")
+    stop_distance: Decimal = D("0")
+    recovery: Decimal = D("0")
+    temporary_stop_compensation: Decimal = D("0")
+    temporary_spread_compensation: Decimal = D("0")
+
+    @property
+    def effective_recovery(self) -> Decimal:
+        return self.recovery + self.temporary_stop_compensation + self.temporary_spread_compensation
 
     def json(self) -> dict:
         return {
@@ -47,8 +56,10 @@ class CycleState:
     recovery: Decimal = D("0")
     entry_spread: Decimal = D("0")
     realized_losses: Decimal = D("0")
+    realized_loss_money: Decimal = D("0")
     gross_take_profit: Decimal = D("0")
     net_cycle_result: Decimal = D("0")
+    net_cycle_money: Decimal = D("0")
     scenario_nine_prior_losses: Decimal = D("0")
     scenario_nine_close_gap: Decimal = D("0")
     scenario_nine_total_loss: Decimal = D("0")
@@ -78,6 +89,7 @@ class CycleState:
     continuation_pause_until: float = 0.0
     continuation_stopped_by_user: bool = False
     cycle_attempt_start_losses: Decimal = D("0")
+    cycle_attempt_start_loss_money: Decimal = D("0")
     continuation_managed: bool = False
     continuation_stage: str = ""
     continuation_flat_checks: int = 0
@@ -110,6 +122,7 @@ class CycleState:
             "scenario": self.scenario if scenario is None else scenario,
             "attempt_id": self.active_attempt_id or self.diagnostic_cycle_number,
             "trigger_id": leg.trigger_id,
+            "size": str(leg.size),
             "close_source": "",
             "close_level": None,
         }
@@ -158,10 +171,13 @@ class CycleState:
         payload["recovery"] = str(self.recovery)
         payload["entry_spread"] = str(self.entry_spread)
         payload["realized_losses"] = str(self.realized_losses)
+        payload["realized_loss_money"] = str(self.realized_loss_money)
         payload["gross_take_profit"] = str(self.gross_take_profit)
         payload["net_cycle_result"] = str(self.net_cycle_result)
+        payload["net_cycle_money"] = str(self.net_cycle_money)
         payload["attempt_result_total"] = str(self.attempt_result_total)
         payload["cycle_attempt_start_losses"] = str(self.cycle_attempt_start_losses)
+        payload["cycle_attempt_start_loss_money"] = str(self.cycle_attempt_start_loss_money)
         payload["scenario_nine_prior_losses"] = str(self.scenario_nine_prior_losses)
         payload["scenario_nine_close_gap"] = str(self.scenario_nine_close_gap)
         payload["scenario_nine_total_loss"] = str(self.scenario_nine_total_loss)
@@ -199,15 +215,19 @@ class CycleState:
                 if legacy_entry is not None:
                     leg.setdefault("original_trigger_level", legacy_entry)
                     leg.setdefault("current_entry", legacy_entry)
-                for key in ("original_trigger_level", "current_entry", "stop", "take_profit"):
+                for key in ("original_trigger_level", "current_entry", "stop", "take_profit",
+                            "size", "stop_distance", "recovery", "temporary_stop_compensation",
+                            "temporary_spread_compensation"):
                     if leg.get(key) is not None:
                         leg[key] = D(str(leg[key]))
                 raw[name] = Leg(**leg)
         raw["recovery"] = D(str(raw.get("recovery", "0")))
         for name in (
-            "entry_spread", "realized_losses", "gross_take_profit", "net_cycle_result",
+            "entry_spread", "realized_losses", "realized_loss_money", "gross_take_profit", "net_cycle_result",
+            "net_cycle_money",
             "attempt_result_total",
             "cycle_attempt_start_losses",
+            "cycle_attempt_start_loss_money",
             "scenario_nine_prior_losses", "scenario_nine_close_gap",
             "scenario_nine_total_loss", "scenario_nine_extra_loss",
             "cycle_target_profit", "profit_override", "pending_tp_fill",
@@ -227,7 +247,8 @@ class CycleState:
         self.paused = self.manual = False
         self.scenario = 0
         self.recovery = self.entry_spread = D("0")
-        self.realized_losses = self.gross_take_profit = self.net_cycle_result = D("0")
+        self.realized_losses = self.realized_loss_money = D("0")
+        self.gross_take_profit = self.net_cycle_result = self.net_cycle_money = D("0")
         self.scenario_nine_prior_losses = self.scenario_nine_close_gap = D("0")
         self.scenario_nine_total_loss = self.scenario_nine_extra_loss = D("0")
         self.scenario_nine_triggers_verified = False
@@ -246,6 +267,7 @@ class CycleState:
         self.continuation_pause_until = 0.0
         self.continuation_stopped_by_user = False
         self.cycle_attempt_start_losses = D("0")
+        self.cycle_attempt_start_loss_money = D("0")
         self.continuation_managed = False
         self.continuation_stage = ""
         self.continuation_flat_checks = 0

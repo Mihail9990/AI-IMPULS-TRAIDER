@@ -6,6 +6,12 @@ from .model import CycleState
 
 
 def status_text(state: CycleState) -> str:
+    legs = ", ".join(
+        f"{leg.direction}(size={leg.size}, sl_distance={leg.stop_distance}, "
+        f"recovery={leg.recovery}, temporary="
+        f"{leg.temporary_stop_compensation + leg.temporary_spread_compensation})"
+        for leg in (state.long, state.short) if leg
+    ) or "-"
     return (
         f"active={state.active}, armed={state.armed}, phase={state.phase}, "
         f"scenario={state.scenario}, recovery={state.recovery}, "
@@ -19,7 +25,8 @@ def status_text(state: CycleState) -> str:
         f"completed_cycles={state.completed_cycles}, all_attempts_result={state.attempt_result_total}, "
         f"attempt_statistics={'УТОЧНЯЕТСЯ' if state.pending_actual_attempt_id else 'ПОЛНАЯ'}, "
         f"cycle_target={state.cycle_target_profit}, "
-        f"profit200={state.profit_override}, remaining={state.profit_override_remaining}"
+        f"profit200={state.profit_override}, remaining={state.profit_override_remaining}, "
+        f"legs={legs}"
     )
 
 
@@ -59,16 +66,18 @@ def pnl_text(state: CycleState, positions: list[dict], transactions: list[dict])
 
 def cycle_result_text(state: CycleState, direction: str, fill: Decimal, size: Decimal) -> str:
     """Explain the completed cycle without depending on broker history latency."""
-    gross_money = state.gross_take_profit * size
-    losses_money = state.realized_losses * size
-    net_money = state.net_cycle_result * size
+    winner = state.long if direction == "BUY" else state.short
+    winner_size = winner.size if winner and winner.size else size
+    gross_money = state.gross_take_profit * winner_size
+    losses_money = state.realized_loss_money or state.realized_losses * size
+    net_money = state.net_cycle_money or gross_money - losses_money
     return (
         f"🏁 Итог завершённого цикла\n"
         f"TP сторона: {direction}\nФактическое закрытие: {fill}\n"
         f"Валовая прибыль TP: {state.gross_take_profit} пункта\n"
         f"Общие убытки закрытых сторон: {state.realized_losses} пункта\n"
         f"Итог цикла: {state.net_cycle_result} пункта\n"
-        f"Размер каждой позиции: {size}\n"
+        f"Размер TP позиции: {winner_size}\n"
         f"Расчёт по размеру: прибыль {gross_money}; убытки {losses_money}; итог {net_money}\n"
         "Точная сумма в валюте счёта берётся из Capital.com командой /pnl."
     )

@@ -27,8 +27,10 @@ class Strategy:
         self.state.manual = self.state.paused = False
         self.state.scenario = 1
         self.state.realized_losses = Decimal("0")
+        self.state.realized_loss_money = Decimal("0")
         self.state.gross_take_profit = Decimal("0")
         self.state.net_cycle_result = Decimal("0")
+        self.state.net_cycle_money = Decimal("0")
         self.state.scenario_nine_prior_losses = Decimal("0")
         self.state.scenario_nine_close_gap = Decimal("0")
         self.state.scenario_nine_total_loss = Decimal("0")
@@ -43,8 +45,9 @@ class Strategy:
             else self.cfg.target_profit
         )
         self.state.phase = "BOTH_OPEN"
-        self.state.long = Leg("BUY", ask, ask)
-        self.state.short = Leg("SELL", bid, bid)
+        size, distance = self.cfg.size_for(1), self.cfg.stop_for(1)
+        self.state.long = Leg("BUY", ask, ask, size=size, stop_distance=distance)
+        self.state.short = Leg("SELL", bid, bid, size=size, stop_distance=distance)
         self.confirm_initial_fills(ask, bid)
 
     def confirm_initial_fills(self, long_fill: Decimal, short_fill: Decimal) -> None:
@@ -60,7 +63,8 @@ class Strategy:
         self.state.recovery = spread + target_profit
         for leg, fill in ((self.state.long, long_fill), (self.state.short, short_fill)):
             leg.original_trigger_level = leg.current_entry = fill
-            leg.stop = stop_for(leg.direction, fill, self.cfg.stop_distance)
+            leg.recovery = self.state.recovery
+            leg.stop = stop_for(leg.direction, fill, leg.stop_distance)
             self.state.remember_deal(leg, 1)
         self._targets_from_entries()
         self.state.events.append(
@@ -72,8 +76,9 @@ class Strategy:
         """Prepare a fresh pair without resetting the logical recovery cycle."""
         if not self.state.active or self.state.scenario < 1:
             raise RuntimeError("No recovery cycle is available for continuation")
-        self.state.long = Leg("BUY", ask, ask)
-        self.state.short = Leg("SELL", bid, bid)
+        size, distance = self.cfg.size_for(self.state.scenario), self.cfg.stop_for(self.state.scenario)
+        self.state.long = Leg("BUY", ask, ask, size=size, stop_distance=distance)
+        self.state.short = Leg("SELL", bid, bid, size=size, stop_distance=distance)
         self.confirm_continuation_fills(ask, bid)
 
     def confirm_continuation_fills(self, long_fill: Decimal, short_fill: Decimal) -> None:
@@ -85,9 +90,14 @@ class Strategy:
         self.state.entry_spread = spread
         # realized_losses is authoritative. Rebuilding from it avoids adding losses already
         # represented by the old recovery value, while cycle_target_profit is included once.
-        self.state.recovery = self.state.realized_losses + self.state.cycle_target_profit + spread
+        money = self.state.realized_loss_money
+        if not money and self.state.realized_losses:
+            money = self.state.realized_losses * self.cfg.size
+        self.state.recovery = money / self.state.long.size + self.state.cycle_target_profit + spread
         for leg in (self.state.long, self.state.short):
-            leg.stop = stop_for(leg.direction, leg.current_entry, self.cfg.stop_distance)
+            leg.recovery = self.state.recovery
+            leg.temporary_stop_compensation = leg.temporary_spread_compensation = Decimal("0")
+            leg.stop = stop_for(leg.direction, leg.current_entry, leg.stop_distance)
             self.state.remember_deal(leg, self.state.scenario)
         self._targets_from_entries()
         self.state.phase = "BOTH_OPEN"
@@ -107,14 +117,17 @@ class Strategy:
             Decimal("0"), fill - leg.current_entry
         )
         self.state.realized_losses += loss
+        self.state.realized_loss_money += loss * leg.size
         leg.open = False
         self.state.remember_deal(leg)
         self.state.remember_close(leg.deal_id, "SL", fill)
-        self.state.recovery += slippage
         survivor = self._leg("SELL" if direction == "BUY" else "BUY")
+        leg.recovery += slippage
+        survivor.recovery += slippage * leg.size / survivor.size
+        self.state.recovery = survivor.effective_recovery
         survivor.take_profit = target_for(
             survivor.direction, survivor.current_entry,
-            self.cfg.stop_distance, self.state.recovery,
+            survivor.stop_distance, survivor.effective_recovery,
         )
         self.state.phase = "LONG_ONLY" if survivor.direction == "BUY" else "SHORT_ONLY"
         if event_id:
@@ -131,13 +144,35 @@ class Strategy:
         if event_id and event_id in self.state.processed_events:
             return
         slippage = trigger_slippage(direction, leg.original_trigger_level, fill)
+        next_scenario = self.state.scenario + 1
+        new_size, new_distance = self.cfg.size_for(next_scenario), self.cfg.stop_for(next_scenario)
+        other = self._leg("SELL" if direction == "BUY" else "BUY")
+        if new_size == leg.size * 2:
+            second_increase = other.size == new_size
+            leg.temporary_stop_compensation = leg.temporary_spread_compensation = Decimal("0")
+            if second_increase:
+                leg.recovery = leg.recovery / 2 + new_distance + slippage
+                other.recovery += new_distance + slippage
+                other.temporary_stop_compensation = other.temporary_spread_compensation = Decimal("0")
+            else:
+                leg.recovery = (leg.recovery + new_distance) / 2 + slippage
+                other.recovery += new_distance + slippage * new_size / other.size
+                other.temporary_stop_compensation = new_distance
+                other.temporary_spread_compensation = self.state.entry_spread
+        elif new_size == leg.size:
+            increment = new_distance + slippage
+            leg.recovery += increment
+            other.recovery += increment * new_size / other.size
+        else:
+            raise RuntimeError(f"Unsupported position size transition {leg.size} -> {new_size}")
         self.state.scenario += 1
-        self.state.recovery += self.cfg.stop_distance + slippage
+        self.state.recovery = leg.recovery
+        leg.size, leg.stop_distance = new_size, new_distance
         leg.current_entry = fill
         leg.deal_id = deal_id
         leg.open = True
         leg.trigger_id = leg.trigger_reference = ""
-        leg.stop = stop_for(direction, fill, self.cfg.stop_distance)
+        leg.stop = stop_for(direction, fill, leg.stop_distance)
         self.state.remember_deal(leg, self.state.scenario)
         self._targets_from_entries()
         self.state.phase = "BOTH_OPEN"
@@ -159,6 +194,9 @@ class Strategy:
             gross = close - leg.current_entry if direction == "BUY" else leg.current_entry - close
             self.state.gross_take_profit = max(Decimal("0"), gross)
             self.state.net_cycle_result = self.state.gross_take_profit - self.state.realized_losses
+            self.state.net_cycle_money = (
+                self.state.gross_take_profit * leg.size - self.state.realized_loss_money
+            )
         self.state.events.append(f"cycle completed by {direction} take profit")
         self.state.completed_cycles += 1
         self._consume_profit_override()
@@ -202,17 +240,45 @@ class Strategy:
         if not self.state.long or not self.state.short:
             raise RuntimeError("Both legs are required")
         for leg in (self.state.long, self.state.short):
+            if not leg.size:
+                leg.size = self.cfg.size_for(max(1, self.state.scenario))
+            if not leg.stop_distance:
+                leg.stop_distance = self.cfg.stop_for(max(1, self.state.scenario))
+            if not leg.recovery:
+                leg.recovery = self.state.recovery
             leg.take_profit = target_for(
                 leg.direction, leg.current_entry,
-                self.cfg.stop_distance, self.state.recovery,
+                leg.stop_distance, leg.effective_recovery,
             )
 
     def refresh_targets(self) -> None:
         """Recalculate automatic TP levels without changing Recovery or scenario state."""
         self._targets_from_entries()
 
+    def projected_reopen(self, direction: str) -> tuple[Decimal, Decimal, Decimal]:
+        """Return size, SL distance and Recovery embedded in the next scenario's order."""
+        leg = self._leg(direction)
+        other = self._leg("SELL" if direction == "BUY" else "BUY")
+        scenario = self.state.scenario + 1
+        size, distance = self.cfg.size_for(scenario), self.cfg.stop_for(scenario)
+        if size == leg.size * 2:
+            recovery = leg.recovery / 2 + distance if other.size == size else (
+                leg.recovery + distance
+            ) / 2
+        elif size == leg.size:
+            recovery = leg.recovery + distance
+        else:
+            raise RuntimeError(f"Unsupported position size transition {leg.size} -> {size}")
+        return size, distance, recovery
+
     def _leg(self, direction: str) -> Leg:
         leg = self.state.long if direction == "BUY" else self.state.short
         if leg is None:
             raise RuntimeError("Cycle has no such leg")
+        if not leg.size:
+            leg.size = self.cfg.size_for(max(1, self.state.scenario))
+        if not leg.stop_distance:
+            leg.stop_distance = self.cfg.stop_for(max(1, self.state.scenario))
+        if not leg.recovery:
+            leg.recovery = self.state.recovery
         return leg

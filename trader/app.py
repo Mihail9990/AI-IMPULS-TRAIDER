@@ -114,7 +114,7 @@ class Bot:
         self.strategy.complete(direction, fill)
         self._get_continuation().release()
         self.state.remember_attempt(
-            "COMPLETED_CYCLE", self.state.net_cycle_result * self.cfg.size,
+            "COMPLETED_CYCLE", self.state.net_cycle_money,
             scenario=self.state.scenario, completed_cycle=self.state.completed_cycles,
         )
         LOG.info(
@@ -137,7 +137,8 @@ class Bot:
             return
         entry = leg.current_entry
         points = fill - entry if leg.direction == "BUY" else entry - fill
-        money = points * self.cfg.size
+        size = leg.size if self.cfg.scenario_sizes else self.cfg.size
+        money = points * size
         attempt_id = self.state.active_attempt_id or self.state.diagnostic_cycle_number
         self.state.remember_deal(leg, scenario=1)
         self.state.remember_close(leg.deal_id, source, fill)
@@ -166,7 +167,7 @@ class Bot:
             f"⏸ Начальная торговая попытка №{attempt_id} завершена без пары\n"
             f"Сторона: {leg.direction}\nПричина закрытия: {source}\n"
             f"Фактический вход: {entry}\nФактическое закрытие: {fill}\n"
-            f"Результат попытки: {points} пункта / {money} при размере {self.cfg.size}\n"
+            f"Результат попытки: {points} пункта / {money} при размере {size}\n"
             f"Противоположная заявка отправлялась: {'ДА' if opposite_sent else 'НЕТ'}\n"
             f"Общий результат сохранённых попыток: {total}\n"
             "Открытых связанных позиций и ордеров не осталось. Автоматика на паузе; "
@@ -498,6 +499,7 @@ class Bot:
             self.state.attempt_deal_ids.clear()
             self.state.initial_submitted_directions.clear()
             self.state.cycle_attempt_start_losses = self.state.realized_losses
+            self.state.cycle_attempt_start_loss_money = self.state.realized_loss_money
         elif self.state.active_attempt_id:
             cycle_number = self.state.active_attempt_id
         else:
@@ -512,6 +514,7 @@ class Bot:
             self.state.cycle_id = cycle_number
             self.state.cycle_attempt = 1
             self.state.cycle_attempt_start_losses = D("0")
+            self.state.cycle_attempt_start_loss_money = D("0")
         self.state.diagnostic_cycle_number = cycle_number
         self.state.save(self.cfg.state_file)
         begin_diagnostic_cycle(
@@ -531,7 +534,7 @@ class Bot:
             f"🚦 {'Продолжение цикла №' + str(self.state.cycle_id) if continuation else 'Начинаю цикл'}\n"
             f"Сценарий: {self.state.scenario}; попытка: {self.state.cycle_attempt}\n"
             f"Фильтр: {filter_reason}\nBID: {bid}\nASK: {ask}\n"
-            f"Предварительный spread: {ask - bid}\nРазмер каждой стороны: {self.cfg.size}\n"
+            f"Предварительный spread: {ask - bid}\nРазмер каждой стороны: {self.state.long.size}\n"
             f"Предварительный SL BUY: {self.state.long.stop}\n"
             f"Предварительный SL SELL: {self.state.short.stop}"
         )
@@ -753,8 +756,8 @@ class Bot:
                 # pre-existing id so wait_position cannot bind the new leg to a stale position
                 # merely because it has the same direction.
                 reference = self.capital.open_position(
-                    self.cfg.epic, leg.direction, self.cfg.size,
-                    stop_distance=self.cfg.stop_distance,
+                    self.cfg.epic, leg.direction, leg.size,
+                    stop_distance=leg.stop_distance,
                 )
             except Exception as exc:
                 # Capital generates dealReference in the response. If that response is lost there
@@ -780,7 +783,7 @@ class Bot:
                     if fill is None:
                         return "MARKET-позиция найдена без фактической цены входа"
                     leg.current_entry = leg.original_trigger_level = D(str(fill))
-                    leg.stop = stop_for(leg.direction, leg.current_entry, self.cfg.stop_distance)
+                    leg.stop = stop_for(leg.direction, leg.current_entry, leg.stop_distance)
                     self._clear_pending_market(leg)
                     self.telegram.send(
                         f"⚠️ Ответ начального MARKET POST потерян, но позиция подтверждена "
@@ -820,7 +823,7 @@ class Bot:
                     leg.deal_reference = reference
                     leg.deal_id = str(position["dealId"])
                     leg.current_entry = leg.original_trigger_level = D(str(position["level"]))
-                    leg.stop = stop_for(leg.direction, leg.current_entry, self.cfg.stop_distance)
+                    leg.stop = stop_for(leg.direction, leg.current_entry, leg.stop_distance)
                     self._clear_pending_market(leg)
                     return None
                 leg.pending_market_reason = "initial confirmation unavailable"
@@ -840,7 +843,7 @@ class Bot:
             if confirmation.get("level") is not None:
                 leg.current_entry = D(str(confirmation["level"]))
                 leg.original_trigger_level = leg.current_entry
-                leg.stop = stop_for(leg.direction, leg.current_entry, self.cfg.stop_distance)
+                leg.stop = stop_for(leg.direction, leg.current_entry, leg.stop_distance)
             try:
                 position = self.capital.wait_position(
                     leg.deal_id, reference, leg.direction, excluded_ids=preexisting_ids,
@@ -1073,6 +1076,9 @@ class Bot:
                             )
                             return
                         self.state.realized_losses += race_loss
+                        self.state.realized_loss_money += (
+                            race_loss * self.cfg.size_for(min(9, self.state.scenario + 1))
+                        )
                         LOG.info(
                             "Working order %s already absent; activity has no accepted trigger "
                             "position, treating cancellation as idempotent",
@@ -1304,10 +1310,10 @@ class Bot:
             return False
         preexisting_ids = set(leg.pending_market_preexisting_ids)
         if leg.pending_market_kind == "FALLBACK":
-            projected_recovery = self.state.recovery + self.cfg.stop_distance
+            _, projected_distance, projected_recovery = self.strategy.projected_reopen(leg.direction)
             projected_target = target_for(
                 leg.direction, leg.original_trigger_level,
-                self.cfg.stop_distance, projected_recovery,
+                projected_distance, projected_recovery,
             )
             self._open_passed_trigger_at_market(
                 leg, projected_target, leg.pending_market_reason or "pending MARKET reconciliation"
@@ -1369,7 +1375,7 @@ class Bot:
         leg.deal_id = str(position["dealId"])
         if position.get("level") is not None:
             leg.current_entry = leg.original_trigger_level = D(str(position["level"]))
-            leg.stop = stop_for(leg.direction, leg.current_entry, self.cfg.stop_distance)
+            leg.stop = stop_for(leg.direction, leg.current_entry, leg.stop_distance)
         current = self._cycle_positions()
         opposite = self.state.short if leg.direction == "BUY" else self.state.long
         both_submitted = set(self.state.initial_submitted_directions) == {"BUY", "SELL"}
@@ -1642,6 +1648,9 @@ class Bot:
                 self.state.save(self.cfg.state_file)
                 return True
             self.state.realized_losses += race_loss
+            self.state.realized_loss_money += (
+                race_loss * self.cfg.size_for(min(9, self.state.scenario + 1))
+            )
             stopped.trigger_id = stopped.trigger_reference = ""
             self._complete_cycle(survivor.direction, survivor_tp.level)
             self.state.armed = not self.state.paused
@@ -1734,11 +1743,13 @@ class Bot:
 
     def _create_trigger(self, leg: Leg) -> None:
         last_error = "trigger отклонён"
-        projected_stop = stop_for(leg.direction, leg.original_trigger_level, self.cfg.stop_distance)
-        projected_recovery = self.state.recovery + self.cfg.stop_distance
+        projected_size, projected_distance, projected_recovery = self.strategy.projected_reopen(
+            leg.direction
+        )
+        projected_stop = stop_for(leg.direction, leg.original_trigger_level, projected_distance)
         projected_target = target_for(
             leg.direction, leg.original_trigger_level,
-            self.cfg.stop_distance, projected_recovery,
+            projected_distance, projected_recovery,
         )
         if leg.pending_market_kind == "FALLBACK":
             self._open_passed_trigger_at_market(
@@ -1754,7 +1765,7 @@ class Bot:
                 return
             try:
                 reference = self.capital.working_stop(
-                    self.cfg.epic, leg.direction, self.cfg.size, leg.original_trigger_level,
+                    self.cfg.epic, leg.direction, projected_size, leg.original_trigger_level,
                     projected_stop, projected_target
                 )
                 result = self.capital.wait_confirmation(reference)
@@ -1831,11 +1842,14 @@ class Bot:
                     unknown_post=True,
                 )
                 try:
+                    projected_size, projected_distance, _ = self.strategy.projected_reopen(
+                        leg.direction
+                    )
                     projected_stop = stop_for(
-                        leg.direction, leg.original_trigger_level, self.cfg.stop_distance
+                        leg.direction, leg.original_trigger_level, projected_distance
                     )
                     reference = self.capital.open_position(
-                        self.cfg.epic, leg.direction, self.cfg.size,
+                        self.cfg.epic, leg.direction, projected_size,
                         projected_stop, projected_target,
                     )
                     leg.pending_market_reference = reference
@@ -2050,7 +2064,8 @@ class Bot:
             if leg.open:
                 self.strategy.stopped(leg.direction, fill, f"stop:{leg.deal_id}:{fill}")
             points = fill - leg.current_entry if leg.direction == "BUY" else leg.current_entry - fill
-            details.append((leg, fill, points * self.cfg.size))
+            size = leg.size if self.cfg.scenario_sizes else self.cfg.size
+            details.append((leg, fill, points * size))
         close_money = sum((item[2] for item in details), D("0"))
         money = -(self.state.realized_losses - self.state.cycle_attempt_start_losses) * self.cfg.size
         self.state.remember_attempt(
@@ -2166,6 +2181,7 @@ class Bot:
             D("0"), close - reopened.current_entry
         )
         self.state.realized_losses += loss
+        self.state.realized_loss_money += loss * reopened.size
         reopened.open = False
         self.state.remember_close(reopened.deal_id, "TP_MARKET_RACE", close)
         self._complete_cycle(opposite.direction, tp_fill)
@@ -2477,7 +2493,7 @@ class Bot:
         self.strategy.complete_scenario_nine(long_fill, short_fill, extra_loss)
         self._get_continuation().release()
         self.state.remember_attempt(
-            "COMPLETED_SCENARIO_9", self.state.net_cycle_result * self.cfg.size,
+            "COMPLETED_SCENARIO_9", self.state.net_cycle_result,
             include_in_total=False, result_kind="STRATEGY_CALCULATED_NOT_BROKER_PNL",
             completed_cycle=self.state.completed_cycles,
         )
@@ -2546,7 +2562,8 @@ class Bot:
                 continue
             entry, close = D(str(item["entry"])), D(str(item["close_level"]))
             points = close - entry if item["direction"] == "BUY" else entry - close
-            total += points * self.cfg.size
+            size = D(str(item.get("size", self.cfg.size))) if self.cfg.scenario_sizes else self.cfg.size
+            total += points * size
         attempt = next(
             (item for item in self.state.attempt_history if item.get("attempt_id") == attempt_id),
             None,
@@ -2675,6 +2692,11 @@ class Bot:
                 self.state.scenario_nine_extra_loss = total_loss
                 closed_ids.add(opened.deal_id)
                 resolved_trigger_ids.add(trigger_id)
+                raced_leg = Leg(
+                    direction, opened.level, opened.level, deal_id=opened.deal_id,
+                    open=False, size=self.cfg.size_for(9), stop_distance=self.cfg.stop_for(9),
+                )
+                self.state.remember_deal(raced_leg, 9)
                 self.state.remember_close(
                     opened.deal_id, "SCENARIO_9_TRIGGER_RACE", close_event.level
                 )
@@ -2703,6 +2725,11 @@ class Bot:
                 self.state.scenario_nine_extra_loss = total_loss
                 closed_ids.add(deal_id)
                 resolved_trigger_ids.add(str(position.get("workingOrderId", "")))
+                raced_leg = Leg(
+                    direction, entry, entry, deal_id=deal_id, open=False,
+                    size=self.cfg.size_for(9), stop_distance=self.cfg.stop_for(9),
+                )
+                self.state.remember_deal(raced_leg, 9)
                 self.state.remember_close(deal_id, "SCENARIO_9_TRIGGER_RACE", close)
                 self.telegram.send(
                     "⚡ Сценарий 9: trigger исполнился во время отмены и закрыт MARKET\n"
@@ -2774,13 +2801,15 @@ class Bot:
             level = D(args[1])
             if leg.trigger_id:
                 self.capital.delete_working_order(leg.trigger_id)
-            projected_stop = stop_for(leg.direction, level, self.cfg.stop_distance)
-            projected_recovery = self.state.recovery + self.cfg.stop_distance
+            projected_size, projected_distance, projected_recovery = self.strategy.projected_reopen(
+                leg.direction
+            )
+            projected_stop = stop_for(leg.direction, level, projected_distance)
             projected_target = target_for(
-                leg.direction, level, self.cfg.stop_distance, projected_recovery,
+                leg.direction, level, projected_distance, projected_recovery,
             )
             reference = self.capital.working_stop(
-                self.cfg.epic, leg.direction, self.cfg.size, level,
+                self.cfg.epic, leg.direction, projected_size, level,
                 projected_stop, projected_target,
             )
             result = self.capital.wait_confirmation(reference)
@@ -3090,6 +3119,9 @@ class Bot:
                     f"workingOrderId={trigger_id}"
                 )
             self.state.realized_losses += race_loss
+            self.state.realized_loss_money += (
+                race_loss * self.cfg.size_for(min(9, self.state.scenario + 1))
+            )
         pending.trigger_id = pending.trigger_reference = ""
         self.state.save(self.cfg.state_file)
 
@@ -3203,6 +3235,7 @@ class Bot:
         return result
 
     def _find_order(self, leg: Leg) -> dict | None:
+        expected_size, _, _ = self.strategy.projected_reopen(leg.direction)
         matches = []
         for item in self.capital.working_orders():
             data = self._order_data(item)
@@ -3213,7 +3246,7 @@ class Bot:
             if (self._order_epic(item) == self.cfg.epic
                     and data.get("direction") == leg.direction
                     and D(str(level)) == leg.original_trigger_level
-                    and D(str(size)) == self.cfg.size):
+                    and D(str(size)) == expected_size):
                 matches.append(data)
         if len(matches) > 1:
             raise CapitalError(
