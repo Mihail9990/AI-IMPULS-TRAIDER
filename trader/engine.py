@@ -97,6 +97,7 @@ class Strategy:
         for leg in (self.state.long, self.state.short):
             leg.recovery = self.state.recovery
             leg.temporary_stop_compensation = leg.temporary_spread_compensation = Decimal("0")
+            leg.temporary_slippage_compensation = Decimal("0")
             leg.stop = stop_for(leg.direction, leg.current_entry, leg.stop_distance)
             self.state.remember_deal(leg, self.state.scenario)
         self._targets_from_entries()
@@ -123,7 +124,14 @@ class Strategy:
         self.state.remember_close(leg.deal_id, "SL", fill)
         survivor = self._leg("SELL" if direction == "BUY" else "BUY")
         leg.recovery += slippage
-        survivor.recovery += slippage * leg.size / survivor.size
+        survivor.recovery += slippage
+        if leg.size > survivor.size:
+            survivor.temporary_slippage_compensation += (
+                slippage * (leg.size / survivor.size - Decimal("1"))
+            )
+        elif leg.size < survivor.size:
+            # The smaller leg's slippage is converted to the larger side's scale.
+            survivor.recovery -= slippage * (Decimal("1") - leg.size / survivor.size)
         self.state.recovery = survivor.effective_recovery
         survivor.take_profit = target_for(
             survivor.direction, survivor.current_entry,
@@ -150,19 +158,31 @@ class Strategy:
         if new_size == leg.size * 2:
             second_increase = other.size == new_size
             leg.temporary_stop_compensation = leg.temporary_spread_compensation = Decimal("0")
+            leg.temporary_slippage_compensation = Decimal("0")
             if second_increase:
                 leg.recovery = leg.recovery / 2 + new_distance + slippage
-                other.recovery += new_distance + slippage
+                # The newly increased leg is the authoritative calculation. Both sides now have
+                # equal volume, so synchronize their base Recovery and remove temporary additions.
+                other.recovery = leg.recovery
                 other.temporary_stop_compensation = other.temporary_spread_compensation = Decimal("0")
+                other.temporary_slippage_compensation = Decimal("0")
             else:
                 leg.recovery = (leg.recovery + new_distance) / 2 + slippage
-                other.recovery += new_distance + slippage * new_size / other.size
+                other.recovery += new_distance + slippage
                 other.temporary_stop_compensation = new_distance
                 other.temporary_spread_compensation = self.state.entry_spread
+                other.temporary_slippage_compensation += (
+                    slippage * (new_size / other.size - Decimal("1"))
+                )
         elif new_size == leg.size:
             increment = new_distance + slippage
             leg.recovery += increment
-            other.recovery += increment * new_size / other.size
+            other.recovery += increment
+            if new_size > other.size:
+                other.temporary_stop_compensation += new_distance
+                other.temporary_slippage_compensation += (
+                    slippage * (new_size / other.size - Decimal("1"))
+                )
         else:
             raise RuntimeError(f"Unsupported position size transition {leg.size} -> {new_size}")
         self.state.scenario += 1

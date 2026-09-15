@@ -300,7 +300,7 @@ class StrategyTest(unittest.TestCase):
 
 class ScenarioParameterStrategyTest(unittest.TestCase):
     SIZES = tuple(map(D, ("10", "10", "10", "10", "20", "20", "20", "20", "20")))
-    STOPS = tuple(map(D, ("1", "1", "3", "4", "5", "4", "4", "4", "4")))
+    STOPS = tuple(map(D, ("1", "1", "3", "4", "4", "4", "4", "4", "4")))
 
     def make_strategy(self, sizes=None):
         state = CycleState()
@@ -330,25 +330,25 @@ class ScenarioParameterStrategyTest(unittest.TestCase):
 
         self.reopen_exact(strategy, state, "SELL")
         self.assertEqual((state.short.size, state.short.stop_distance, state.short.recovery),
-                         (D("20"), D("5"), D("6.90")))
-        self.assertEqual(state.short.stop, D("4015.00"))
-        self.assertEqual(state.short.take_profit, D("3998.10"))
+                         (D("20"), D("4"), D("6.40")))
+        self.assertEqual(state.short.stop, D("4014.00"))
+        self.assertEqual(state.short.take_profit, D("3999.60"))
         self.assertEqual(state.long.size, D("10"))
-        self.assertEqual(state.long.recovery, D("13.80"))
-        self.assertEqual(state.long.effective_recovery, D("19.30"))
-        self.assertEqual(state.long.take_profit, D("4033.80"))
+        self.assertEqual(state.long.recovery, D("12.80"))
+        self.assertEqual(state.long.effective_recovery, D("17.30"))
+        self.assertEqual(state.long.take_profit, D("4031.80"))
 
         self.reopen_exact(strategy, state, "BUY")
-        self.assertEqual(state.long.recovery, D("10.90"))
-        self.assertEqual(state.short.recovery, D("10.90"))
-        self.assertEqual(state.long.effective_recovery, D("10.90"))
-        self.assertEqual(state.short.take_profit, D("3994.10"))
+        self.assertEqual(state.long.recovery, D("10.40"))
+        self.assertEqual(state.short.recovery, D("10.40"))
+        self.assertEqual(state.long.effective_recovery, D("10.40"))
+        self.assertEqual(state.short.take_profit, D("3995.60"))
         self.reopen_exact(strategy, state, "SELL")
-        self.assertEqual(state.short.recovery, D("14.90"))
+        self.assertEqual(state.short.recovery, D("14.40"))
         self.reopen_exact(strategy, state, "BUY")
-        self.assertEqual(state.long.recovery, D("18.90"))
+        self.assertEqual(state.long.recovery, D("18.40"))
         self.reopen_exact(strategy, state, "SELL")
-        self.assertEqual(state.short.recovery, D("22.90"))
+        self.assertEqual(state.short.recovery, D("22.40"))
         self.assertEqual(state.scenario, 9)
         self.assertEqual(state.phase, "SCENARIO_9_CLOSING")
 
@@ -360,12 +360,13 @@ class ScenarioParameterStrategyTest(unittest.TestCase):
         strategy.stopped("SELL", D("4013.10"), "sell-old-slippage")
         self.assertEqual(state.short.recovery, D("8.90"))
         strategy.reopened("SELL", D("4009.90"), "sell-5", "sell-trigger-slippage")
-        self.assertEqual(state.short.recovery, D("7.05"))
-        self.assertEqual(state.short.stop, D("4014.90"))
-        self.assertEqual(state.short.take_profit, D("3997.85"))
+        self.assertEqual(state.short.recovery, D("6.55"))
+        self.assertEqual(state.short.stop, D("4013.90"))
+        self.assertEqual(state.short.take_profit, D("3999.35"))
         # x2 position slippage is transferred twice to the still-small BUY.
-        self.assertEqual(state.long.recovery, D("14.10"))
-        self.assertEqual(state.long.effective_recovery, D("19.60"))
+        self.assertEqual(state.long.recovery, D("13.00"))
+        self.assertEqual(state.long.temporary_slippage_compensation, D("0.10"))
+        self.assertEqual(state.long.effective_recovery, D("17.60"))
 
     def test_first_buy_increase_is_mirror_of_sell_increase(self):
         strategy, state = self.make_strategy()
@@ -375,11 +376,44 @@ class ScenarioParameterStrategyTest(unittest.TestCase):
         strategy.stopped("BUY", state.long.stop - D("0.10"), "buy-old-slippage")
         strategy.reopened("BUY", D("4010.60"), "buy-5", "buy-trigger-slippage")
         self.assertEqual(state.long.size, D("20"))
-        self.assertEqual(state.long.recovery, D("7.05"))
-        self.assertEqual(state.long.stop, D("4005.60"))
-        self.assertEqual(state.long.take_profit, D("4022.65"))
-        self.assertEqual(state.short.recovery, D("14.10"))
-        self.assertEqual(state.short.effective_recovery, D("19.60"))
+        self.assertEqual(state.long.recovery, D("6.55"))
+        self.assertEqual(state.long.stop, D("4006.60"))
+        self.assertEqual(state.long.take_profit, D("4021.15"))
+        self.assertEqual(state.short.recovery, D("13.00"))
+        self.assertEqual(state.short.temporary_slippage_compensation, D("0.10"))
+        self.assertEqual(state.short.effective_recovery, D("17.60"))
+
+    def test_second_increase_removes_only_temporary_parts_and_synchronizes_recovery(self):
+        strategy, state = self.make_strategy()
+        self.reopen_exact(strategy, state, "BUY")
+        self.reopen_exact(strategy, state, "SELL")
+        self.reopen_exact(strategy, state, "BUY")
+        strategy.stopped("SELL", D("4013.10"), "old-sell-slippage")
+        strategy.reopened("SELL", D("4009.90"), "sell-5", "first-large-fill")
+        self.assertEqual(state.long.recovery, D("13.00"))
+        self.assertEqual(state.long.temporary_recovery, D("4.60"))
+
+        strategy.stopped("BUY", state.long.stop - D("0.20"), "small-buy-slippage")
+        self.assertEqual(state.long.recovery, D("13.20"))
+        self.assertEqual(state.long.temporary_recovery, D("4.60"))
+        self.assertEqual(state.short.recovery, D("6.65"))
+        projected = strategy.projected_reopen("BUY")
+        self.assertEqual(projected, (D("20"), D("4"), D("10.60")))
+        # Merely projecting the working order must not mutate the open SELL.
+        self.assertEqual(state.short.recovery, D("6.65"))
+
+        with tempfile.NamedTemporaryFile() as file:
+            state.save(file.name)
+            restored = CycleState.load(file.name)
+        restored_strategy = Strategy(strategy.cfg, restored)
+        restored_strategy.reopened("BUY", D("4010.80"), "buy-6", "second-large-fill")
+        self.assertEqual(restored.long.recovery, D("10.90"))
+        self.assertEqual(restored.short.recovery, D("10.90"))
+        self.assertEqual(restored.long.temporary_recovery, D("0"))
+        self.assertEqual(restored.short.temporary_recovery, D("0"))
+        before = (restored.scenario, restored.long.recovery, restored.short.recovery)
+        restored_strategy.reopened("BUY", D("4010.80"), "buy-6", "second-large-fill")
+        self.assertEqual((restored.scenario, restored.long.recovery, restored.short.recovery), before)
 
     def test_same_large_side_can_reopen_twice_without_another_division(self):
         strategy, state = self.make_strategy()
@@ -387,10 +421,11 @@ class ScenarioParameterStrategyTest(unittest.TestCase):
             self.reopen_exact(strategy, state, direction)
         self.reopen_exact(strategy, state, "SELL")
         self.assertEqual(state.short.size, D("20"))
-        self.assertEqual(state.short.recovery, D("10.90"))
+        self.assertEqual(state.short.recovery, D("10.40"))
         self.assertEqual(state.long.size, D("10"))
-        self.assertEqual(state.long.recovery, D("21.80"))
-        self.assertEqual(state.long.effective_recovery, D("27.30"))
+        self.assertEqual(state.long.recovery, D("16.80"))
+        self.assertEqual(state.long.temporary_stop_compensation, D("8"))
+        self.assertEqual(state.long.effective_recovery, D("25.30"))
 
     def test_increase_may_begin_at_scenario_three_or_seven(self):
         for start in (3, 7):
@@ -414,9 +449,10 @@ class ScenarioParameterStrategyTest(unittest.TestCase):
             state.save(file.name)
             restored = CycleState.load(file.name)
         self.assertEqual(restored.short.size, D("20"))
-        self.assertEqual(restored.short.recovery, D("6.90"))
-        self.assertEqual(restored.long.temporary_stop_compensation, D("5"))
+        self.assertEqual(restored.short.recovery, D("6.40"))
+        self.assertEqual(restored.long.temporary_stop_compensation, D("4"))
         self.assertEqual(restored.long.temporary_spread_compensation, D("0.50"))
+        self.assertEqual(restored.long.temporary_slippage_compensation, D("0"))
 
     def test_continuation_rebuilds_equal_pair_from_money_without_temporary_parts(self):
         strategy, state = self.make_strategy()
@@ -1330,6 +1366,48 @@ class EntryRetryTest(unittest.TestCase):
         self.assertTrue(bot.state.continuation_managed)
         self.assertTrue(bot.state.continuation_stopped_by_user)
         self.assertIn(bot.state.continuation_stage, {"FORMING_PAIR", "ACTIVE"})
+
+    def test_continuation_active_dispatch_uses_second_increase_recovery(self):
+        bot = self.make_bot()
+        bot.cfg = Settings(
+            dry_run=False, api_key="key", identifier="id", password="password",
+            scenario_sizes=(D("10"),) * 4 + (D("20"),) * 5,
+            scenario_stop_distances=(D("1"), D("1"), D("3")) + (D("4"),) * 6,
+        )
+        bot.state = CycleState()
+        bot.strategy = Strategy(bot.cfg, bot.state)
+        bot.strategy.begin(D("4010.50"), D("4010.00"))
+        for direction in ("BUY", "SELL", "BUY"):
+            leg = bot.state.long if direction == "BUY" else bot.state.short
+            bot.strategy.stopped(direction, leg.stop, f"stop-{bot.state.scenario}-{direction}")
+            bot.strategy.reopened(direction, leg.original_trigger_level,
+                                  f"deal-{bot.state.scenario + 1}-{direction}")
+        bot.strategy.stopped("SELL", bot.state.short.stop, "stop-sell-4")
+        bot.strategy.reopened("SELL", bot.state.short.original_trigger_level,
+                              "sell-5", "fill-sell-5")
+        bot.strategy.stopped("BUY", bot.state.long.stop, "stop-buy-5")
+        bot.state.long.trigger_id = "buy-trigger-6"
+        bot.state.short.deal_id = "sell-5"
+        bot.state.continuation_managed = True
+        bot.state.continuation_stage = "ACTIVE"
+        bot.continuation = CycleContinuation(bot)
+        bot._apply_protection = Mock(return_value=True)
+        bot._ensure_expected_trigger = Mock()
+        bot.capital.positions.return_value = [
+            {"position": {"dealId": "sell-5", "direction": "SELL", "level": 4010,
+                          "size": 20}, "market": {"epic": "GOLD"}},
+            {"position": {"dealId": "buy-6", "direction": "BUY", "level": 4010.50,
+                          "size": 20, "workingOrderId": "buy-trigger-6"},
+             "market": {"epic": "GOLD"}},
+        ]
+
+        bot.continuation.handle_active_scenario()
+
+        self.assertEqual(bot.state.scenario, 6)
+        self.assertEqual(bot.state.long.recovery, D("10.40"))
+        self.assertEqual(bot.state.short.recovery, D("10.40"))
+        self.assertEqual(bot.state.long.temporary_recovery, D("0"))
+        self.assertEqual(bot.state.short.temporary_recovery, D("0"))
 
     def test_continuation_preflight_progresses_across_ticks(self):
         bot = self.make_bot()

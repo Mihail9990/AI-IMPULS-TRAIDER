@@ -9,7 +9,7 @@ def status_text(state: CycleState) -> str:
     legs = ", ".join(
         f"{leg.direction}(size={leg.size}, sl_distance={leg.stop_distance}, "
         f"recovery={leg.recovery}, temporary="
-        f"{leg.temporary_stop_compensation + leg.temporary_spread_compensation})"
+        f"{leg.temporary_recovery})"
         for leg in (state.long, state.short) if leg
     ) or "-"
     return (

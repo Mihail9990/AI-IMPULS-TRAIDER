@@ -33,10 +33,17 @@ class Leg:
     recovery: Decimal = D("0")
     temporary_stop_compensation: Decimal = D("0")
     temporary_spread_compensation: Decimal = D("0")
+    temporary_slippage_compensation: Decimal = D("0")
 
     @property
     def effective_recovery(self) -> Decimal:
-        return self.recovery + self.temporary_stop_compensation + self.temporary_spread_compensation
+        return (self.recovery + self.temporary_stop_compensation
+                + self.temporary_spread_compensation + self.temporary_slippage_compensation)
+
+    @property
+    def temporary_recovery(self) -> Decimal:
+        return (self.temporary_stop_compensation + self.temporary_spread_compensation
+                + self.temporary_slippage_compensation)
 
     def json(self) -> dict:
         return {
@@ -217,7 +224,7 @@ class CycleState:
                     leg.setdefault("current_entry", legacy_entry)
                 for key in ("original_trigger_level", "current_entry", "stop", "take_profit",
                             "size", "stop_distance", "recovery", "temporary_stop_compensation",
-                            "temporary_spread_compensation"):
+                            "temporary_spread_compensation", "temporary_slippage_compensation"):
                     if leg.get(key) is not None:
                         leg[key] = D(str(leg[key]))
                 raw[name] = Leg(**leg)
