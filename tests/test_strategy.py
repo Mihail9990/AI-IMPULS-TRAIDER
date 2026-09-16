@@ -26,7 +26,7 @@ from trader.events import (
 from trader.execution import ExecutionPolicy, is_crossed_level_rejection, trigger_level_passed
 from trader.model import CycleState, Leg, stop_slippage, target_for, trigger_slippage
 from trader.reconcile import RemoteSnapshot
-from trader.reporting import cycle_result_text, pnl_text
+from trader.reporting import cycle_result_text, leg_details, pnl_text, recovery_change_text, recovery_snapshot
 from trader.streaming import PriceWatch, QuoteStream
 from trader.telegram import Telegram
 
@@ -43,6 +43,24 @@ class StrategyTest(unittest.TestCase):
         self.assertEqual(self.state.short.stop, D("4011.00"))
         self.assertEqual(self.state.long.take_profit, D("4011.90"))
         self.assertEqual(self.state.short.take_profit, D("4008.40"))
+
+    def test_detailed_report_uses_persisted_recovery_components(self):
+        before = recovery_snapshot(self.state)
+        self.state.long.recovery = D("12.80")
+        self.state.long.temporary_stop_compensation = D("4")
+        self.state.long.temporary_spread_compensation = D("0.50")
+        self.state.long.temporary_slippage_compensation = D("0.10")
+        self.state.long.size = D("10")
+        self.state.long.stop_distance = D("4")
+        self.state.long.stop = D("4006.50")
+        self.state.long.take_profit = D("4031.90")
+        text = recovery_change_text(
+            self.state, before, event="проверка временной компенсации", direction="BUY"
+        )
+        self.assertIn("SL=4 + spread=0.50 + slippage=0.10 = 4.60", text)
+        self.assertIn("эффективный Recovery=12.80 + 4.60 = 17.40", text)
+        details = leg_details(self.state.long, broker_stop=D("4006.50"))
+        self.assertIn("брокер подтвердил SL/TP=4006.50 / не подтверждено", details)
 
     def test_trigger_open_is_found_by_working_order_in_global_activity(self):
         activity = [{
@@ -491,6 +509,35 @@ class EntryRetryTest(unittest.TestCase):
         bot._flat_checks = 0
         bot.strategy.begin(D("4010.30"), D("4010.00"))
         return bot
+
+    def test_double_initial_stop_report_is_separate_and_idempotent(self):
+        bot = self.make_bot()
+        bot.state.cycle_id = 270
+        bot.state.cycle_attempt = 1
+        bot.state.attempt_result_total = D("17.25")
+        buy, sell = bot.state.long, bot.state.short
+        buy.size, buy.current_entry, buy.stop, buy.deal_id = D("10"), D("4286.07"), D("4285.07"), "buy"
+        sell.size, sell.current_entry, sell.stop, sell.deal_id = D("10"), D("4285.12"), D("4286.12"), "sell"
+
+        bot._report_initial_pair_closures(sell, "SL", D("4286.14"), buy, ("SL", D("4285.04")))
+        text = bot.telegram.send.call_args.args[0]
+        self.assertIn("Цикл №270; попытка 1", text)
+        self.assertIn("-10.20", text)
+        self.assertIn("-10.30", text)
+        self.assertIn("-20.50", text)
+        self.assertIn("НЕ добавлен", text)
+        self.assertEqual(bot.state.attempt_result_total, D("17.25"))
+        bot._report_initial_pair_closures(sell, "SL", D("4286.14"), buy, ("SL", D("4285.04")))
+        self.assertEqual(bot.telegram.send.call_count, 1)
+
+    def test_initial_stop_report_does_not_treat_absence_as_close(self):
+        bot = self.make_bot()
+        buy, sell = bot.state.long, bot.state.short
+        buy.deal_id, sell.deal_id = "buy", "sell"
+        bot._report_initial_pair_closures(buy, "SL", D("4009.30"), sell, None)
+        text = bot.telegram.send.call_args.args[0]
+        self.assertIn("не доказательство закрытия", text)
+        self.assertIn("итог пары пока не объявлен", text)
 
     def test_initial_leg_gets_three_retries(self):
         bot = self.make_bot()
@@ -2868,6 +2915,15 @@ class CapitalClientTest(unittest.TestCase):
 
 
 class BrokerInfrastructureTest(unittest.TestCase):
+    def test_long_report_is_split_into_ordered_numbered_messages(self):
+        telegram = Telegram("token", "123")
+        with patch.object(telegram, "send", return_value=True) as send:
+            self.assertTrue(telegram.send_report("A\n" * 30, limit=20))
+        parts = [call.args[0] for call in send.call_args_list]
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(parts[0].startswith("Часть 1/"))
+        self.assertTrue(parts[-1].startswith(f"Часть {len(parts)}/{len(parts)}"))
+
     def test_close_wait_retries_deal_and_global_activity(self):
         bot = Bot.__new__(Bot)
         bot.state = CycleState()

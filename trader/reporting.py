@@ -2,7 +2,90 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from .model import CycleState
+from .model import CycleState, Leg
+
+
+def cycle_heading(state: CycleState, event: str, *, next_scenario: int | None = None) -> str:
+    transition = f" → следующий сценарий {next_scenario}" if next_scenario is not None else ""
+    return (
+        f"Цикл №{state.cycle_id or state.diagnostic_cycle_number or '-'}; "
+        f"попытка {state.cycle_attempt or '-'}; сценарий {state.scenario}{transition}\n"
+        f"Событие: {event}"
+    )
+
+
+def recovery_snapshot(state: CycleState) -> dict[str, dict[str, Decimal | str | bool | None]]:
+    result = {}
+    for leg in (state.long, state.short):
+        if leg:
+            result[leg.direction] = {
+                "open": leg.open, "size": leg.size, "entry": leg.current_entry,
+                "trigger": leg.original_trigger_level, "distance": leg.stop_distance,
+                "base": leg.recovery, "temp_stop": leg.temporary_stop_compensation,
+                "temp_spread": leg.temporary_spread_compensation,
+                "temp_slippage": leg.temporary_slippage_compensation,
+                "effective": leg.effective_recovery, "stop": leg.stop,
+                "target": leg.take_profit, "trigger_id": leg.trigger_id,
+            }
+    return result
+
+
+def leg_details(leg: Leg, *, broker_stop=None, broker_target=None) -> str:
+    if leg.open:
+        status = "ОТКРЫТА (подтверждённый dealId)" if leg.deal_id else "ГОТОВИТСЯ/УТОЧНЯЕТСЯ"
+    elif leg.trigger_id:
+        status = f"ЗАКРЫТА; Trigger ожидает исполнения ({leg.trigger_id})"
+    else:
+        status = "ЗАКРЫТА; следующий Trigger ещё не подтверждён"
+    return (
+        f"{leg.direction}: {status}\n"
+        f"  объём={leg.size}; current_entry={leg.current_entry}; "
+        f"original_trigger={leg.original_trigger_level}\n"
+        f"  SL distance={leg.stop_distance}; основной Recovery={leg.recovery}\n"
+        f"  temporary: SL={leg.temporary_stop_compensation} + spread="
+        f"{leg.temporary_spread_compensation} + slippage={leg.temporary_slippage_compensation} "
+        f"= {leg.temporary_recovery}\n"
+        f"  эффективный Recovery для TP={leg.effective_recovery}\n"
+        f"  расчётные SL/TP={leg.stop} / {leg.take_profit}\n"
+        f"  брокер подтвердил SL/TP="
+        f"{broker_stop if broker_stop is not None else 'не подтверждено'} / "
+        f"{broker_target if broker_target is not None else 'не подтверждено'}"
+    )
+
+
+def recovery_change_text(
+    state: CycleState, before: dict, *, event: str, direction: str,
+    stop_slippage: Decimal | None = None, trigger_slippage: Decimal | None = None,
+) -> str:
+    lines = [cycle_heading(state, event), "", "Изменение Recovery (ценовые расстояния, не P&L):"]
+    for leg in (state.long, state.short):
+        if not leg:
+            continue
+        old = before.get(leg.direction, {})
+        lines.extend([
+            f"{leg.direction}:",
+            f"  основной до={old.get('base', 'не подтверждено')}",
+        ])
+        if leg.direction == direction and stop_slippage is not None:
+            lines.append(f"  SL slippage=|плановый SL − fill|={stop_slippage}")
+        if leg.direction == direction and trigger_slippage is not None:
+            old_size = old.get("size", leg.size)
+            if old_size != leg.size:
+                lines.append(
+                    f"  объём {old_size} → {leg.size}; накопление пересчитано с коэффициентом "
+                    f"{leg.size / old_size}"
+                )
+            lines.append(f"  Trigger slippage=|original trigger − fill|={trigger_slippage}")
+        lines.extend([
+            f"  основной после={leg.recovery}",
+            f"  temporary после: SL={leg.temporary_stop_compensation} + spread="
+            f"{leg.temporary_spread_compensation} + slippage="
+            f"{leg.temporary_slippage_compensation} = {leg.temporary_recovery}",
+            f"  эффективный Recovery={leg.recovery} + {leg.temporary_recovery} "
+            f"= {leg.effective_recovery}",
+            f"  расчётные SL/TP={leg.stop} / {leg.take_profit}",
+        ])
+    return "\n".join(lines)
 
 
 def status_text(state: CycleState) -> str:

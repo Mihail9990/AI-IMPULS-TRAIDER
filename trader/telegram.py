@@ -119,6 +119,23 @@ class Telegram:
         self._enqueue(_Delivery("message", text, action))
         return True
 
+    def send_report(self, text: str, *, limit: int = 3500) -> bool:
+        """Queue a long report as ordered, numbered messages without blocking trading."""
+        if len(text) <= limit:
+            return self.send(text)
+        chunks, remaining = [], text
+        while remaining:
+            cut = min(limit, len(remaining))
+            if cut < len(remaining):
+                newline = remaining.rfind("\n", 0, cut)
+                if newline > limit // 2:
+                    cut = newline + 1
+            chunks.append(remaining[:cut].rstrip())
+            remaining = remaining[cut:].lstrip("\n")
+        total = len(chunks)
+        return all(self.send(f"Часть {index}/{total}\n{chunk}")
+                   for index, chunk in enumerate(chunks, 1))
+
     def send_document(self, path: str, *, compress: bool = False) -> bool:
         file = Path(path)
         LOG.info("TELEGRAM QUEUE DOCUMENT path=%s size=%s", file, file.stat().st_size)
