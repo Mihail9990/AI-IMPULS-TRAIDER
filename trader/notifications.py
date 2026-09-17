@@ -18,6 +18,7 @@ from .events import find_close_event
 
 
 LOG = logging.getLogger(__name__)
+SEARCH_TIME_VERSION = 2
 
 
 def migrate_notification_jobs(jobs: list[dict], *, now: float | None = None) -> bool:
@@ -30,18 +31,35 @@ def migrate_notification_jobs(jobs: list[dict], *, now: float | None = None) -> 
     current = time.time() if now is None else now
     changed = False
 
-    def timestamp(value) -> float | None:
+    def timestamp(value, *, broker_utc: bool = False) -> float | None:
         if isinstance(value, (int, float)):
             return float(value)
         if not value:
             return None
         try:
-            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         except (TypeError, ValueError):
             return None
+        if parsed.tzinfo is None:
+            # Capital.com's dateUTC/createdDateUTC are UTC by contract even when their value has
+            # no suffix.  A generic naive timestamp has no trustworthy origin: do not let the
+            # phone's local timezone silently redefine the historical instant.
+            if not broker_utc:
+                return None
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
 
     for job in jobs:
-        if job.get("search_from_epoch") is not None and job.get("search_to_epoch") is not None:
+        has_bounds = (
+            job.get("search_from_epoch") is not None
+            and job.get("search_to_epoch") is not None
+        )
+        source = str(job.get("search_range_source", ""))
+        version = int(job.get("search_time_version", 0) or 0)
+        # Explicit ranges and frozen fallback ranges were not derived by parsing a broker time,
+        # so they must not be shifted.  Version-1 attempt_snapshot ranges are reparsed from their
+        # original immutable snapshot below.
+        if has_bounds and (source != "attempt_snapshot" or version >= SEARCH_TIME_VERSION):
             continue
         candidates = [
             timestamp(job.get(name))
@@ -50,8 +68,11 @@ def migrate_notification_jobs(jobs: list[dict], *, now: float | None = None) -> 
         for snapshot_name in ("closed", "waiting"):
             snapshot = job.get(snapshot_name, {})
             if isinstance(snapshot, dict):
-                candidates.extend(timestamp(snapshot.get(name)) for name in (
-                    "dateUTC", "createdDateUTC", "timestamp", "event_epoch",
+                candidates.extend((
+                    timestamp(snapshot.get("dateUTC"), broker_utc=True),
+                    timestamp(snapshot.get("createdDateUTC"), broker_utc=True),
+                    timestamp(snapshot.get("timestamp")),
+                    timestamp(snapshot.get("event_epoch")),
                 ))
         known = [value for value in candidates if value is not None]
         if known:
@@ -59,12 +80,20 @@ def migrate_notification_jobs(jobs: list[dict], *, now: float | None = None) -> 
             job["search_to_epoch"] = max(known) + 3600
             job["search_range_source"] = "attempt_snapshot"
             job["history_range_uncertain"] = False
+            job["search_time_version"] = SEARCH_TIME_VERSION
+        elif has_bounds and source == "attempt_snapshot":
+            # An old derived range cannot be corrected safely without its source timestamp.
+            # Preserve it for operator visibility but explicitly revoke the claim of certainty.
+            job["search_range_source"] = "attempt_snapshot_unverified"
+            job["history_range_uncertain"] = True
+            job["search_time_version"] = SEARCH_TIME_VERSION
         else:
             job["search_from_epoch"] = current - 86400
             job["search_to_epoch"] = current
             job["search_range_source"] = "legacy_fallback_last_24h"
             job["history_range_uncertain"] = True
             job["range_migrated_at"] = current
+            job["search_time_version"] = SEARCH_TIME_VERSION
         changed = True
     return changed
 

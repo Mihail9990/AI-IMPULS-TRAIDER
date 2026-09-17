@@ -3820,6 +3820,108 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
         self.assertEqual(job["search_range_source"], "attempt_snapshot")
         self.assertFalse(job["history_range_uncertain"])
 
+    def test_broker_utc_timestamps_are_timezone_independent(self):
+        expected = datetime(2026, 9, 10, 8, 30, tzinfo=timezone.utc).timestamp()
+        representations = (
+            ("dateUTC", "2026-09-10T08:30:00"),
+            ("createdDateUTC", "2026-09-10T08:30:00"),
+            ("dateUTC", "2026-09-10T08:30:00Z"),
+            ("dateUTC", "2026-09-10T13:30:00+05:00"),
+        )
+        original_tz = os.environ.get("TZ")
+        try:
+            for process_tz in ("UTC", "Etc/GMT-5"):
+                os.environ["TZ"] = process_tz
+                time.tzset()
+                for field, value in representations:
+                    job = {"waiting": {"deal_id": "old"}, "closed": {field: value}}
+                    self.assertTrue(migrate_notification_jobs([job], now=expected + 86400))
+                    self.assertEqual(job["search_from_epoch"], expected - 3600)
+                    self.assertEqual(job["search_to_epoch"], expected + 3600)
+        finally:
+            if original_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = original_tz
+            time.tzset()
+
+    def test_numeric_epoch_is_timezone_independent_but_generic_naive_time_is_uncertain(self):
+        expected = datetime(2026, 9, 10, 8, 30, tzinfo=timezone.utc).timestamp()
+        original_tz = os.environ.get("TZ")
+        try:
+            os.environ["TZ"] = "Etc/GMT-5"
+            time.tzset()
+            numeric = {"waiting": {"deal_id": "old"}, "event_epoch": expected}
+            self.assertTrue(migrate_notification_jobs([numeric], now=expected + 86400))
+            self.assertEqual(numeric["search_from_epoch"], expected - 3600)
+            generic = {
+                "waiting": {"deal_id": "old", "timestamp": "2026-09-10T08:30:00"}
+            }
+            migration_time = expected + 7 * 86400
+            self.assertTrue(migrate_notification_jobs([generic], now=migration_time))
+            self.assertEqual(generic["search_range_source"], "legacy_fallback_last_24h")
+            self.assertTrue(generic["history_range_uncertain"])
+            self.assertEqual(generic["search_from_epoch"], migration_time - 86400)
+        finally:
+            if original_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = original_tz
+            time.tzset()
+
+    def test_repair_old_local_timezone_migration_and_find_close_after_restart(self):
+        event_epoch = datetime(2026, 9, 10, 8, 30, tzinfo=timezone.utc).timestamp()
+        wrong_start = datetime(2026, 9, 10, 2, 30, tzinfo=timezone.utc).timestamp()
+        wrong_end = datetime(2026, 9, 10, 4, 30, tzinfo=timezone.utc).timestamp()
+        original = {
+            "key": "old-migrated", "cycle_id": 270,
+            "waiting": {"deal_id": "buy-270", "size": "10"},
+            "closed": {"deal_id": "sell-270", "dateUTC": "2026-09-10T08:30:00"},
+            "search_from_epoch": wrong_start, "search_to_epoch": wrong_end,
+            "search_range_source": "attempt_snapshot", "history_range_uncertain": False,
+        }
+        state = CycleState(pending_notification_jobs=[original])
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "state.json")
+            state.save(path)
+            loaded = CycleState.load(path)
+            self.assertTrue(migrate_notification_jobs(loaded.pending_notification_jobs))
+            loaded.save(path)
+            restored = CycleState.load(path)
+        repaired = restored.pending_notification_jobs[0]
+        self.assertEqual(repaired["search_from_epoch"], event_epoch - 3600)
+        self.assertEqual(repaired["search_to_epoch"], event_epoch + 3600)
+        self.assertEqual(repaired["search_time_version"], 2)
+        self.assertEqual(repaired["cycle_id"], 270)
+        self.assertEqual(repaired["waiting"]["deal_id"], "buy-270")
+        self.assertFalse(migrate_notification_jobs([repaired]))
+
+        class FilteringClient:
+            def activity(self, deal_id="", **kwargs):
+                start = datetime.fromisoformat(kwargs["from_date"]).replace(tzinfo=timezone.utc).timestamp()
+                end = datetime.fromisoformat(kwargs["to_date"]).replace(tzinfo=timezone.utc).timestamp()
+                if deal_id == "buy-270" and start <= event_epoch <= end:
+                    return [{"dealId": "buy-270", "source": "SL", "status": "ACCEPTED",
+                             "level": 98, "dateUTC": "2026-09-10T08:30:00"}]
+                return []
+
+        with patch("trader.notifications.time.time", return_value=event_epoch + 86400):
+            self.assertEqual(
+                NotificationHistoryWorker._resolve(FilteringClient(), repaired),
+                {"source": "SL", "fill": "98"},
+            )
+
+    def test_unverifiable_old_attempt_snapshot_range_is_marked_uncertain_not_shifted(self):
+        job = {
+            "waiting": {"deal_id": "old"}, "search_from_epoch": 1000,
+            "search_to_epoch": 2000, "search_range_source": "attempt_snapshot",
+        }
+        self.assertTrue(migrate_notification_jobs([job], now=9999))
+        self.assertEqual((job["search_from_epoch"], job["search_to_epoch"]), (1000, 2000))
+        self.assertEqual(job["search_range_source"], "attempt_snapshot_unverified")
+        self.assertTrue(job["history_range_uncertain"])
+        self.assertFalse(migrate_notification_jobs([job], now=19999))
+
     def test_uncertain_range_stays_pending_and_late_publication_is_found(self):
         now = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc).timestamp()
         events = []
