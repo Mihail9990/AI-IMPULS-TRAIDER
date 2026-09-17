@@ -33,8 +33,8 @@ def recovery_snapshot(state: CycleState) -> dict[str, dict[str, Decimal | str | 
 
 
 def leg_details(
-    leg: Leg, *, broker_stop=None, broker_target=None, confirmation: str = "не отправлено",
-    readback: str = "не выполнено",
+    leg: Leg, *, broker_stop=None, broker_target=None, confirmation: str | None = None,
+    readback: str | None = None,
 ) -> str:
     if broker_stop is None:
         broker_stop = leg.confirmed_stop
@@ -46,16 +46,33 @@ def leg_details(
         status = f"ЗАКРЫТА; Trigger ожидает исполнения ({leg.trigger_id})"
     else:
         status = "ЗАКРЫТА; следующий Trigger ещё не подтверждён"
+    confirmation = confirmation if confirmation is not None else (
+        leg.protection_confirmation or "не отправлено"
+    )
+    readback = readback if readback is not None else (
+        leg.protection_readback or "не выполнено"
+    )
+    sent_stop, sent_tp = leg.protection_sent_stop, leg.protection_sent_take_profit
+    accepted_stop, accepted_tp = leg.confirmation_stop, leg.confirmation_take_profit
+    read_stop, read_tp = broker_stop, broker_target
+    read_label = (
+        "фактически прочитанные SL/TP"
+        if str(readback).upper() == "ПОДТВЕРЖДЕНО" else
+        "последние сохранённые read-back SL/TP (источник/ревизия не подтверждают новый расчёт)"
+    )
     if leg.open:
         levels = (
             f"  расчётные SL/TP={leg.stop} / {leg.take_profit}\n"
-            f"  запрос защиты: confirmation={confirmation}\n"
-            f"  повторное чтение /positions={readback}; SL/TP="
-            f"{broker_stop if broker_stop is not None else 'не подтверждено'} / "
-            f"{broker_target if broker_target is not None else 'не подтверждено'}\n"
-            f"  брокер подтвердил SL/TP="
-            f"{broker_stop if broker_stop is not None else 'не подтверждено'} / "
-            f"{broker_target if broker_target is not None else 'не подтверждено'}\n"
+            f"  отправленные SL/TP={sent_stop if sent_stop is not None else 'не отправлено'} / "
+            f"{sent_tp if sent_tp is not None else 'не отправлено'}\n"
+            f"  confirmation={confirmation}; принятые SL/TP="
+            f"{accepted_stop if accepted_stop is not None else 'не подтверждено'} / "
+            f"{accepted_tp if accepted_tp is not None else 'не подтверждено'}\n"
+            f"  повторное чтение /positions={readback}; {read_label}="
+            f"{read_stop if read_stop is not None else 'не подтверждено'} / "
+            f"{read_tp if read_tp is not None else 'не подтверждено'}\n"
+            f"  принадлежность: dealId={leg.deal_id or 'не подтверждён'}; "
+            "старое подтверждение не подтверждает вновь рассчитанный уровень\n"
             f"  формула TP: {leg.current_entry} "
             f"{'+' if leg.direction == 'BUY' else '−'} {leg.stop_distance} "
             f"{'+' if leg.direction == 'BUY' else '−'} {leg.effective_recovery} "
@@ -264,6 +281,7 @@ def cycle_result_text(state: CycleState, direction: str, fill: Decimal, size: De
     losses_money = state.realized_loss_money or state.realized_losses * size
     net_money = state.net_cycle_money or gross_money - losses_money
     deals = []
+    calculated_losses = D("0")
     selected = [item for item in state.deal_history
                 if item.get("deal_id") in state.attempt_deal_ids and item.get("close_level") is not None]
     for item in selected:
@@ -271,6 +289,8 @@ def cycle_result_text(state: CycleState, direction: str, fill: Decimal, size: De
         close = _decimal(item.get("close_level"))
         deal_size = _decimal(item.get("size"))
         result = ((close - entry) if item.get("direction") == "BUY" else (entry - close)) * deal_size
+        if result < 0:
+            calculated_losses += -result
         formula = (f"({close} − {entry}) × {deal_size}" if item.get("direction") == "BUY" else
                    f"({entry} − {close}) × {deal_size}")
         deals.append(
@@ -278,6 +298,9 @@ def cycle_result_text(state: CycleState, direction: str, fill: Decimal, size: De
             f"entry={entry}; close={close}; причина={item.get('close_source') or '?'}; "
             f"результат={formula}={result}"
         )
+    if selected:
+        losses_money = calculated_losses
+        net_money = gross_money - losses_money
     detail = "\n".join(deals) or "• Детализация сделок ещё уточняется по broker history."
     return (
         f"🏁 Итог завершённого цикла\n"

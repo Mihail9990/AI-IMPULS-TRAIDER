@@ -60,8 +60,8 @@ class StrategyTest(unittest.TestCase):
         )
         self.assertIn("SL=4 + spread=0.50 + slippage=0.10 = 4.60", text)
         self.assertIn("эффективный Recovery=12.80 + 4.60 = 17.40", text)
-        details = leg_details(self.state.long, broker_stop=D("4006.50"))
-        self.assertIn("брокер подтвердил SL/TP=4006.50 / не подтверждено", details)
+        details = leg_details(self.state.long, broker_stop=D("4006.50"), readback="ПОДТВЕРЖДЕНО")
+        self.assertIn("фактически прочитанные SL/TP=4006.50 / не подтверждено", details)
 
     def test_trigger_open_is_found_by_working_order_in_global_activity(self):
         activity = [{
@@ -502,6 +502,14 @@ class EntryRetryTest(unittest.TestCase):
         bot.cfg = Settings(dry_run=False, api_key="key", identifier="id", password="password")
         bot.capital = Mock()
         bot.capital.positions.return_value = []
+        def position(deal_id):
+            leg = next((candidate for candidate in (bot.state.long, bot.state.short)
+                        if candidate and candidate.deal_id == deal_id), None)
+            if leg:
+                return {"position": {"dealId": deal_id, "stopLevel": leg.stop,
+                                     "profitLevel": leg.take_profit}}
+            return {"position": {}}
+        bot.capital.position.side_effect = position
         bot.capital.working_orders.return_value = []
         bot.telegram = Mock()
         bot.state = CycleState()
@@ -2721,7 +2729,7 @@ class DiagnosticHistoryTest(unittest.TestCase):
             "test", __import__("logging").INFO, __file__, 1, text, (), None
         ))
 
-    def test_window_keeps_twenty_completed_cycles_plus_current(self):
+    def test_more_than_twenty_cycles_are_not_pruned_without_delivery(self):
         with tempfile.TemporaryDirectory() as directory:
             handler = CycleFileHandler(str(Path(directory) / "bot_diagnostics.log"))
             for cycle in range(1, 23):
@@ -2731,11 +2739,11 @@ class DiagnosticHistoryTest(unittest.TestCase):
             handler.begin_cycle(23, 22)
             names = [item["name"] for item in handler._index["segments"]]
             handler.close()
-        self.assertFalse(any("cycle-000000002.log" in name for name in names))
+        self.assertTrue(any("cycle-000000002.log" in name for name in names))
         self.assertTrue(any("cycle-000000003.log" in name for name in names))
         self.assertTrue(any("cycle-000000023.log" in name for name in names))
 
-    def test_long_cycle_is_not_truncated_and_snapshot_can_split_in_two(self):
+    def test_long_cycle_is_not_truncated_and_snapshot_can_use_many_parts(self):
         with tempfile.TemporaryDirectory() as directory:
             handler = CycleFileHandler(str(Path(directory) / "bot_diagnostics.log"))
             handler.begin_cycle(7)
@@ -2746,7 +2754,7 @@ class DiagnosticHistoryTest(unittest.TestCase):
             handler.close()
             for path in parts:
                 Path(path).unlink(missing_ok=True)
-        self.assertEqual(len(parts), 2)
+        self.assertGreater(len(parts), 2)
         self.assertIn(payload.encode(), content)
 
     def test_restart_inside_cycle_retains_prior_segment_and_cycle_number(self):
@@ -2765,6 +2773,88 @@ class DiagnosticHistoryTest(unittest.TestCase):
             Path(parts[0]).unlink(missing_ok=True)
         self.assertLess(content.index("before restart"), content.index("after restart"))
         self.assertGreaterEqual(content.count("ТОРГОВАЯ ПОПЫТКА 11"), 2)
+
+    def test_runs_without_sendlog_and_stop_marker_are_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "bot_diagnostics.log")
+            first = CycleFileHandler(path)
+            self._write(first, "run one without sendlog")
+            first.close()
+            second = CycleFileHandler(path)
+            self._write(second, "/stop in same process")
+            parts = second.snapshot(max_part_bytes=10000)
+            content = b"".join(Path(p).read_bytes() for p in parts).decode()
+            second.close()
+        self.assertIn("run one without sendlog", content)
+        self.assertIn("/stop in same process", content)
+        self.assertIn("ЗАПУСК ПРОЦЕССА №1", content)
+        self.assertIn("ЗАПУСК ПРОЦЕССА №2", content)
+
+    def test_repeat_sendlog_contains_full_current_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            handler = CycleFileHandler(str(Path(directory) / "bot_diagnostics.log"))
+            self._write(handler, "begin current")
+            first = handler.snapshot(max_part_bytes=10000)
+            first_id = handler.pending_snapshots()[-1]["id"]
+            for part in handler.pending_snapshots()[-1]["parts"]:
+                handler.acknowledge(first_id, part["number"], "delivered")
+            self._write(handler, "tail current")
+            second = handler.snapshot(max_part_bytes=10000)
+            content = b"".join(Path(p).read_bytes() for p in second).decode()
+            handler.close()
+        self.assertIn("begin current", content)
+        self.assertIn("tail current", content)
+
+    def test_partial_failure_keeps_sources_and_delivered_parts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            handler = CycleFileHandler(str(Path(directory) / "bot_diagnostics.log"))
+            self._write(handler, "important diagnostics" * 30)
+            handler.snapshot(max_part_bytes=200)
+            snapshot = handler.pending_snapshots()[-1]
+            handler.acknowledge(snapshot["id"], 1, "delivered")
+            handler.acknowledge(snapshot["id"], 2, "failed")
+            persisted = json.loads(handler.index_path.read_text())
+            source_exists = all((handler.history_dir / r["name"]).exists()
+                                for r in snapshot["ranges"])
+            handler.close()
+        saved = next(item for item in persisted["snapshots"] if item["id"] == snapshot["id"])
+        self.assertEqual(saved["parts"][0]["status"], "delivered")
+        self.assertEqual(saved["parts"][1]["status"], "failed")
+        self.assertTrue(source_exists)
+
+    def test_acknowledged_boundary_preserves_tail_on_next_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "bot_diagnostics.log")
+            first = CycleFileHandler(path)
+            self._write(first, "sent boundary")
+            first.snapshot(max_part_bytes=10000)
+            snap = first.pending_snapshots()[-1]
+            for part in snap["parts"]:
+                first.acknowledge(snap["id"], part["number"], "delivered")
+            self._write(first, "unsent tail")
+            first.close()
+            second = CycleFileHandler(path)
+            self._write(second, "new run")
+            parts = second.snapshot(max_part_bytes=10000)
+            content = b"".join(Path(p).read_bytes() for p in parts).decode()
+            second.close()
+        self.assertNotIn("sent boundary", content)
+        self.assertIn("unsent tail", content)
+        self.assertIn("new run", content)
+
+    def test_legacy_log_migrates_as_unsent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            legacy = Path(directory) / "bot_diagnostics.log"
+            legacy.write_text("legacy unsent diagnostics", encoding="utf-8")
+            handler = CycleFileHandler(str(legacy))
+            parts = handler.snapshot(max_part_bytes=10000)
+            content = b"".join(Path(p).read_bytes() for p in parts).decode()
+            legacy_items = [item for item in handler._index["segments"]
+                            if item.get("run_id") == "legacy"]
+            handler.close()
+        self.assertIn("legacy unsent diagnostics", content)
+        self.assertTrue(legacy_items)
+        self.assertEqual(legacy_items[0]["delivered_bytes"], 0)
 
 
 class CapitalClientTest(unittest.TestCase):
@@ -3474,11 +3564,17 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
         strategy.stopped("BUY", D("4297.91"), "buy-sl")
         self.assertEqual(state.short.recovery, D("3.025"))
         self.assertEqual(state.long.effective_recovery, D("9.59"))
+        before_second = recovery_snapshot(state)
         strategy.reopened("BUY", D("4300"), "buy-4")
         self.assertEqual(state.long.recovery, D("7.01"))
         self.assertEqual(state.short.recovery, D("7.01"))
         self.assertEqual(state.long.temporary_recovery, D("0"))
         self.assertEqual(state.short.temporary_recovery, D("0"))
+        second_text = recovery_change_text(
+            state, before_second, event="№273 второе увеличение", direction="BUY",
+            trigger_slippage=D("0"),
+        )
+        self.assertIn("(9.59 − 3.57) / 2 + 4 + 0 = 7.01", second_text)
 
     def test_cycle_274_repeated_large_side_then_alignment(self):
         state = CycleState(active=True, scenario=3, entry_spread=D("0.60"))
@@ -3504,15 +3600,21 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
         strategy.stopped("BUY", D("4297.97"), "buy-sl")
         self.assertEqual(state.long.recovery, D("10.10"))
         self.assertEqual(state.long.effective_recovery, D("17.77"))
+        before_alignment = recovery_snapshot(state)
         strategy.reopened("BUY", D("4300.20"), "buy-5")
         self.assertEqual(state.long.recovery, D("9.25"))
         self.assertEqual(state.short.recovery, D("9.25"))
         self.assertEqual(state.long.temporary_recovery, D("0"))
+        alignment = recovery_change_text(
+            state, before_alignment, event="№274 выравнивание", direction="BUY",
+            trigger_slippage=D("0.20"),
+        )
+        self.assertIn("(17.77 − 7.67) / 2 + 4 + 0.20 = 9.25", alignment)
 
     def test_protection_details_use_individual_recovery_and_sources(self):
         leg = Leg(
-            "BUY", D("4284.14"), D("4284.14"), deal_id="buy-273", size=D("10"),
-            stop_distance=D("2"), recovery=D("5.93"), stop=D("4282.14"),
+            "BUY", D("4285.14"), D("4285.14"), deal_id="buy-273", size=D("10"),
+            stop_distance=D("1"), recovery=D("5.93"), stop=D("4284.14"),
             take_profit=D("4295.64"), temporary_stop_compensation=D("3"),
             temporary_spread_compensation=D("0.54"),
             temporary_slippage_compensation=D("0.03"),
@@ -3524,9 +3626,108 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
         self.assertIn("основной Recovery=5.93", text)
         self.assertIn("SL=3 + spread=0.54 + slippage=0.03 = 3.57", text)
         self.assertIn("эффективный Recovery для TP=9.50", text)
-        self.assertIn("4284.14 + 2 + 9.50 = 4295.64", text)
+        self.assertIn("4285.14 + 1 + 9.50 = 4295.64", text)
         self.assertIn("confirmation", text.lower())
         self.assertIn("повторное чтение /positions=ПОДТВЕРЖДЕНО", text)
+
+    def test_malformed_positions_never_confirms_expected_protection(self):
+        bot = EntryRetryTest().make_bot()
+        bot.capital.position.side_effect = None
+        bot.capital.position.return_value = {
+            "position": {"dealId": "buy", "stopLevel": "unparseable", "profitLevel": "999"}
+        }
+        with patch("trader.app.time.sleep"):
+            actual = bot._wait_position_protection("buy", D("99"), D("102"), attempts=2)
+        self.assertEqual(actual, (None, None))
+
+    def test_failed_readback_retries_get_without_second_put(self):
+        bot = EntryRetryTest().make_bot()
+        leg = bot.state.long
+        leg.deal_id, leg.stop, leg.take_profit = "buy", D("99"), D("102")
+        bot.capital.update_position.return_value = "put-ref"
+        bot.capital.wait_confirmation.return_value = {"dealStatus": "ACCEPTED"}
+        bot.capital.position.side_effect = None
+        bot.capital.position.return_value = {
+            "position": {"dealId": "buy", "stopLevel": "bad", "profitLevel": "102"}}
+        with tempfile.TemporaryDirectory() as directory, patch("trader.app.time.sleep"):
+            object.__setattr__(bot.cfg, "state_file", str(Path(directory) / "state.json"))
+            self.assertFalse(bot._apply_protection(leg))
+            self.assertFalse(bot._apply_protection(leg))
+        bot.capital.update_position.assert_called_once_with("buy", D("99"), D("102"))
+        self.assertIn("НЕ ПОДТВЕРЖДЕНО", leg.protection_readback)
+
+    def test_confirmation_and_readback_are_distinct_revisions(self):
+        leg = Leg("BUY", D("100"), D("100"), deal_id="buy", stop=D("99"),
+                  take_profit=D("103"), confirmed_stop=D("99"),
+                  confirmed_take_profit=D("102"), protection_sent_stop=D("99"),
+                  protection_sent_take_profit=D("103"), confirmation_stop=D("99"),
+                  confirmation_take_profit=D("103"), protection_confirmation="ACCEPTED",
+                  protection_readback="ожидается")
+        text = leg_details(leg)
+        self.assertIn("расчётные SL/TP=99 / 103", text)
+        self.assertIn("принятые SL/TP=99 / 103", text)
+        self.assertIn("последние сохранённые read-back SL/TP", text)
+        self.assertIn("повторное чтение /positions=ожидается", text)
+
+    def test_nonclose_deal_history_falls_back_to_global_and_uses_old_range(self):
+        client = Mock()
+        client.activity.side_effect = [
+            [{"dealId": "buy-old", "source": "USER", "status": "ACCEPTED",
+              "type": "POSITION", "level": 100}],
+            [{"dealId": "buy-old", "source": "TP", "status": "ACCEPTED",
+              "type": "POSITION", "level": 105}],
+        ]
+        result = NotificationHistoryWorker._resolve(client, {
+            "waiting": {"deal_id": "buy-old"}, "search_from_epoch": time.time() - 3 * 86400,
+        })
+        self.assertEqual(result, {"source": "TP", "fill": "105"})
+        self.assertGreaterEqual(client.activity.call_args_list[0].kwargs["last_period"], 3 * 86400)
+
+    def test_late_tp_report_uses_historical_tp_and_current_state(self):
+        bot = EntryRetryTest().make_bot()
+        bot.state.phase, bot.state.active, bot.state.manual = "BOTH_OPEN", True, False
+        first = {"direction": "SELL", "deal_id": "s", "entry": "100", "size": "10",
+                 "stop": "101", "take_profit": "98", "source": "SL", "fill": "101"}
+        second = {"direction": "BUY", "deal_id": "b", "entry": "100", "size": "10",
+                  "stop": "99", "take_profit": "102", "source": "TP", "fill": "102.1"}
+        text = bot._initial_pair_report_text(first, second, final=True, meta={
+            "cycle_id": 270, "cycle_attempt": 1,
+            "original_decision": "MANUAL: исходная пара не сформирована",
+        })
+        self.assertIn("исторический TP=102", text)
+        self.assertIn("slippage=0.1", text)
+        self.assertIn("причина=TP", text)
+        self.assertIn("текущее состояние бота: phase=BOTH_OPEN, active=True, manual=False", text)
+
+    def test_cycle_completion_and_report_are_one_state_commit(self):
+        bot = EntryRetryTest().make_bot()
+        bot.state.active_attempt_id = 73
+        bot.state.long.deal_id = "winner"
+        with tempfile.TemporaryDirectory() as directory:
+            object.__setattr__(bot.cfg, "state_file", str(Path(directory) / "state.json"))
+            bot._complete_cycle("BUY", D("4012"))
+            restored = CycleState.load(bot.cfg.state_file)
+        self.assertFalse(restored.active)
+        self.assertEqual(restored.completed_cycles, 1)
+        self.assertTrue(any(item["key"].startswith("cycle-complete:73")
+                            for item in restored.report_outbox))
+
+    def test_delivery_ack_is_saved_immediately(self):
+        bot = Bot.__new__(Bot)
+        bot.telegram = Telegram("token", "chat")
+        bot.notification_worker = None
+        bot._queued_report_parts = {("1:r", 1)}
+        bot._queued_log_parts = set()
+        bot.state = CycleState(report_outbox=[{"id": "1:r", "key": "r", "parts": [
+            {"number": 1, "text": "done", "status": "pending"}]}])
+        with tempfile.TemporaryDirectory() as directory:
+            bot.cfg = Settings(state_file=str(Path(directory) / "state.json"),
+                               diagnostic_log_file=str(Path(directory) / "diag.log"))
+            bot.telegram._delivery_acks.append(
+                {"report_id": "1:r", "part": 1, "status": "delivered"})
+            bot._tick_notifications()
+            restored = CycleState.load(bot.cfg.state_file)
+        self.assertEqual(restored.report_outbox, [])
 
     def test_closed_leg_levels_are_labelled_historical(self):
         leg = Leg("SELL", D("100"), D("99"), deal_id="closed", open=False,
@@ -3540,12 +3741,18 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
         state = CycleState(gross_take_profit=D("25.71"), realized_losses=D("0"),
                            realized_loss_money=D("424.70"), net_cycle_money=D("89.50"))
         state.long = Leg("BUY", D("4300"), D("4300"), size=D("20"))
-        state.attempt_deal_ids = ["winner", "loss"]
+        state.attempt_deal_ids = ["winner"] + [f"loss-{i}" for i in range(8)]
         state.deal_history = [
             {"deal_id": "winner", "direction": "BUY", "entry": "4295.15",
              "close_level": "4320.86", "close_source": "TP", "size": "20"},
-            {"deal_id": "loss", "direction": "SELL", "entry": "4300",
-             "close_level": "4301.06", "close_source": "SL", "size": "10"},
+        ] + [
+            {"deal_id": f"loss-{index}", "direction": "SELL", "entry": "4300",
+             "close_level": str(D("4300") + loss / size), "close_source": "SL",
+             "size": str(size)}
+            for index, (loss, size) in enumerate(zip(
+                map(D, ("10.60", "10.00", "60.00", "20.30", "81.40", "80.40", "81.20", "80.80")),
+                map(D, ("10", "10", "20", "10", "20", "20", "20", "20")),
+            ))
         ]
         state.last_trigger_resolution = "workingOrderId=trigger: DELETE confirmation ACCEPTED."
         text = cycle_result_text(state, "BUY", D("4320.86"), D("10"))
@@ -3554,6 +3761,22 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
         self.assertIn("(4320.86 − 4295.15) × 20=514.20", text)
         self.assertIn("убытки 424.70; итог 89.50", text)
         self.assertIn("workingOrderId=trigger", text)
+        self.assertEqual(text.count("причина=SL"), 8)
+
+    def test_cycle_273_result_is_summed_from_every_deal(self):
+        state = CycleState(gross_take_profit=D("22.10"))
+        state.long = Leg("BUY", D("100"), D("100"), size=D("10"))
+        state.attempt_deal_ids = ["winner", "loss-a", "loss-b"]
+        state.deal_history = [
+            {"deal_id": "winner", "direction": "BUY", "entry": "100",
+             "close_level": "122.10", "close_source": "TP", "size": "10"},
+            {"deal_id": "loss-a", "direction": "SELL", "entry": "100",
+             "close_level": "105", "close_source": "SL", "size": "10"},
+            {"deal_id": "loss-b", "direction": "BUY", "entry": "100",
+             "close_level": "94.83", "close_source": "SL", "size": "10"},
+        ]
+        text = cycle_result_text(state, "BUY", D("122.10"), D("10"))
+        self.assertIn("прибыль 221.00; убытки 101.70; итог 119.30", text)
 
     def test_history_worker_resolves_late_close_without_trading_mutation(self):
         client = Mock()
@@ -3576,6 +3799,7 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
             "id": "1:report", "key": "report", "parts": [
                 {"number": 1, "text": "one", "status": "delivered"},
                 {"number": 2, "text": "two", "status": "pending"},
+                {"number": 3, "text": "retry next process", "status": "failed"},
             ],
         }]
         with tempfile.TemporaryDirectory() as directory:
@@ -3585,6 +3809,7 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
         self.assertEqual(loaded.pending_notification_jobs[0]["key"], "initial")
         self.assertEqual(loaded.report_outbox[0]["parts"][0]["status"], "delivered")
         self.assertEqual(loaded.report_outbox[0]["parts"][1]["status"], "pending")
+        self.assertEqual(loaded.report_outbox[0]["parts"][2]["status"], "pending")
 
     def test_late_manual_result_uses_saved_snapshot_after_legs_change(self):
         bot = EntryRetryTest().make_bot()

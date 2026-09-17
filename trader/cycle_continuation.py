@@ -11,7 +11,7 @@ import time
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from .reporting import cycle_result_text
+from .reporting import cycle_result_text, recovery_change_text, recovery_snapshot
 
 if TYPE_CHECKING:  # pragma: no cover
     from .app import Bot
@@ -137,9 +137,17 @@ class CycleContinuation:
         """Replay a fast close using the current scenario, never scenario-1 validation."""
         self.confirm_pair_fills()
         closed.open = True
+        before = recovery_snapshot(self.state)
         stopped = self.bot.strategy.stopped(
             closed.direction, fill, f"stop:{closed.deal_id}:{fill}"
         )
+        self.bot._send_report(recovery_change_text(
+            self.state, before,
+            event=(f"continuation: быстрое закрытие {closed.direction} dealId={closed.deal_id}; "
+                   f"причина={source}; fill={fill}"),
+            direction=closed.direction,
+            stop_slippage=abs(fill - closed.stop) if closed.stop is not None else None,
+        ))
         survivor = self.state.short if closed.direction == "BUY" else self.state.long
         if survivor and survivor.open and self.bot._apply_protection(survivor):
             self.bot._create_trigger(stopped)
@@ -209,7 +217,15 @@ class CycleContinuation:
             return
         for leg, _, fill in closes:
             if leg.open:
+                before = recovery_snapshot(self.state)
                 self.bot.strategy.stopped(leg.direction, fill, f"stop:{leg.deal_id}:{fill}")
+                self.bot._send_report(recovery_change_text(
+                    self.state, before,
+                    event=(f"continuation: SL {leg.direction} dealId={leg.deal_id}; "
+                           f"fill={fill}; подтверждено history/activity"),
+                    direction=leg.direction,
+                    stop_slippage=abs(fill - leg.stop) if leg.stop is not None else None,
+                ))
         remaining = [leg for leg in (self.state.long, self.state.short) if leg and leg.open]
         if remaining:
             survivor = remaining[0]
@@ -292,7 +308,7 @@ class CycleContinuation:
         self.state.phase = "CONTINUATION_MANUAL_PAIR_PAUSE"
         self.state.continuation_stage = "MANUAL_PAIR_PAUSE"
         self.state.save(self.bot.cfg.state_file)
-        self.bot.telegram.send(
+        self.bot._send_report(
             f"⏸ Продолжение цикла №{self.state.cycle_id}: пара не сформирована.\n"
             f"{leg.direction} {leg.deal_id}: вход {leg.current_entry}, {source} {fill}.\n"
             f"Результат попытки: {result}; накопленные потери цикла: "

@@ -10,9 +10,11 @@ from .capital import CapitalClient, CapitalError
 from .config import Settings
 from .cycle_continuation import CycleContinuation
 from .diagnostics import (
+    acknowledge_diagnostic_snapshot,
     begin_diagnostic_cycle,
     configure_diagnostics,
     end_diagnostic_cycle,
+    pending_diagnostic_snapshots,
     snapshot_diagnostics,
 )
 from .engine import Strategy
@@ -63,6 +65,7 @@ class Bot:
         self.continuation = CycleContinuation(self)
         self.notification_worker = NotificationHistoryWorker(cfg)
         self._queued_report_parts: set[tuple[str, int]] = set()
+        self._queued_log_parts: set[tuple[str, int]] = set()
         if (not self.state.continuation_managed and self.state.active
                 and self.state.cycle_attempt > 1):
             self.state.continuation_managed = True
@@ -114,24 +117,34 @@ class Bot:
         # asynchronous Telegram transport, while compatible transports receive the same text.
         if isinstance(self.telegram, Telegram) and self.telegram.enabled:
             identity = key or hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
-            existing = next(
-                (item for item in self.state.report_outbox if item.get("key") == identity), None
-            )
+            existing = self._store_report(text, identity)
             if existing is not None:
                 self._queue_pending_reports()
                 return
-            report_id = f"{self.state.next_report_id}:{identity}"
-            self.state.next_report_id += 1
-            parts = split_report(text)
-            self.state.report_outbox.append({
-                "id": report_id, "key": identity,
-                "parts": [{"number": index, "text": value, "status": "pending"}
-                          for index, value in enumerate(parts, 1)],
-            })
             self.state.save(self.cfg.state_file)
             self._queue_pending_reports()
         else:
             self.telegram.send(text)
+
+    def _store_report(self, text: str, identity: str) -> dict | None:
+        """Put a report in state without saving, for atomic trading-event commits.
+
+        ``None`` means a new report was stored; an existing report is returned for idempotency.
+        The main thread remains the only owner of CycleState and its file.
+        """
+        existing = next(
+            (item for item in self.state.report_outbox if item.get("key") == identity), None
+        )
+        if existing is not None:
+            return existing
+        report_id = f"{self.state.next_report_id}:{identity}"
+        self.state.next_report_id += 1
+        self.state.report_outbox.append({
+            "id": report_id, "key": identity,
+            "parts": [{"number": index, "text": value, "status": "pending"}
+                      for index, value in enumerate(split_report(text), 1)],
+        })
+        return None
 
     def _queue_pending_reports(self) -> None:
         if not isinstance(self.telegram, Telegram) or not self.telegram.enabled:
@@ -148,6 +161,7 @@ class Bot:
                     self._queued_report_parts.add(marker)
 
     def _tick_notifications(self) -> None:
+        changed = False
         worker = getattr(self, "notification_worker", None)
         if worker is not None:
             for completed in worker.results():
@@ -175,10 +189,33 @@ class Bot:
                     for part in report.get("parts", []):
                         if int(part.get("number", 0)) == marker[1]:
                             part["status"] = ack["status"]
+                            changed = True
             self.state.report_outbox[:] = [
                 report for report in self.state.report_outbox
                 if not all(part.get("status") == "delivered" for part in report.get("parts", []))
             ]
+            for ack in self.telegram.document_acks():
+                marker = (str(ack["snapshot_id"]), int(ack["part"]))
+                self._queued_log_parts.discard(marker)
+                acknowledge_diagnostic_snapshot(
+                    self.cfg.diagnostic_log_file, marker[0], marker[1], str(ack["status"])
+                )
+            for snapshot in pending_diagnostic_snapshots(self.cfg.diagnostic_log_file):
+                total = len(snapshot.get("parts", []))
+                already_queued = self.telegram.queued_document_parts()
+                for part in snapshot.get("parts", []):
+                    marker = (str(snapshot["id"]), int(part["number"]))
+                    if (part.get("status") != "pending" or marker in self._queued_log_parts
+                            or marker in already_queued):
+                        continue
+                    if self.telegram.send_document_part(
+                        str(part["path"]), marker[0], marker[1], total
+                    ):
+                        self._queued_log_parts.add(marker)
+        if changed:
+            # Delivery acknowledgement is durable immediately; it must not wait for a broker
+            # tick or any later state mutation.
+            self.state.save(self.cfg.state_file)
         self._queue_pending_reports()
 
     def _dispatch_owned_cycle(self) -> None:
@@ -202,6 +239,16 @@ class Bot:
             attempt_id, direction, fill, self.state.net_cycle_result,
         )
         self.state.active_attempt_id = 0
+        if fill is not None:
+            next_mode = (
+                "PAUSED: пользовательский /stop запрещает новый цикл до /start."
+                if self.state.paused else "FILTER: после завершения будет разрешён фильтр нового цикла."
+            )
+            text = cycle_result_text(self.state, direction, fill, self.cfg.size) + (
+                f"\nДальнейший режим: {next_mode}"
+            )
+            self._store_report(text, f"cycle-complete:{attempt_id}:{direction}:{fill}")
+        # Completion counters and a recoverable final report are committed by one atomic replace.
         self.state.save(self.cfg.state_file)
         end_diagnostic_cycle(
             self.cfg.diagnostic_log_file, self.state.attempt_counter + 1,
@@ -243,7 +290,7 @@ class Bot:
             self.cfg.diagnostic_log_file, self.state.attempt_counter + 1,
             self.state.completed_cycles,
         )
-        self.telegram.send(
+        self._send_report(
             f"⏸ Начальная торговая попытка №{attempt_id} завершена без пары\n"
             f"Сторона: {leg.direction}\nПричина закрытия: {source}\n"
             f"Фактический вход: {entry}\nФактическое закрытие: {fill}\n"
@@ -257,6 +304,8 @@ class Bot:
     def run(self) -> None:
         self.telegram.start()
         self.notification_worker.start()
+        # Durable Telegram reports are independent of Capital.com startup reconciliation.
+        self._tick_notifications()
         self.telegram.install_commands()
         self.telegram.send(
             f"🤖 Бот запущен\nРежим: {'DEMO' if self.cfg.demo else 'REAL'}\n"
@@ -267,6 +316,8 @@ class Bot:
         )
         while True:
             try:
+                # Outbox/history/log delivery is independent of Capital.com availability.
+                self._tick_notifications()
                 # Reconcile before processing queued Telegram commands. A /start message may
                 # already be waiting when Pydroid launches the process.
                 if not self.reconciled:
@@ -612,7 +663,7 @@ class Bot:
         else:
             self.strategy.begin(ask, bid)
         assert self.state.long and self.state.short
-        self.telegram.send(
+        self._send_report(
             f"🚦 {'Продолжение цикла №' + str(self.state.cycle_id) if continuation else 'Начинаю цикл'}\n"
             f"Сценарий: {self.state.scenario}; попытка: {self.state.cycle_attempt}\n"
             f"Фильтр: {filter_reason}\nBID: {bid}\nASK: {ask}\n"
@@ -679,7 +730,7 @@ class Bot:
                         self.state.phase = "CONTINUATION_FILTER"
                         self.state.continuation_stage = "FILTER"
                         self.state.save(self.cfg.state_file)
-                        self.telegram.send(
+                        self._send_report(
                             f"⚠️ Продолжение цикла №{self.state.cycle_id}: первая сторона не "
                             f"открыта ({error}). Убытки и сценарий сохранены; снова ожидаю фильтр."
                         )
@@ -687,7 +738,7 @@ class Bot:
                         self.state.reset()
                         self.state.armed = True
                         self.state.phase = "FILTER"
-                        self.telegram.send(
+                        self._send_report(
                             f"⚠️ Первая сторона не открыта после 4 попыток: {error}. Цикл не начат."
                         )
                 return
@@ -815,23 +866,23 @@ class Bot:
             key = f"initial-pair-close-pending:{closed.deal_id}:{fill}"
             if key in self.state.processed_events:
                 return
-            self.state.processed_events.append(key)
-            self.state.save(self.cfg.state_file)
             self._send_report(self._initial_pair_report_text(
                 self._leg_report_snapshot(closed, source, fill),
                 self._leg_report_snapshot(other), final=False,
             ), key=key)
+            self.state.processed_events.append(key)
+            self.state.save(self.cfg.state_file)
             return
         other_source, other_fill = other_close
         key = f"initial-pair-double-close:{closed.deal_id}:{fill}:{other.deal_id}:{other_fill}"
         if key in self.state.processed_events:
             return
-        self.state.processed_events.append(key)
-        self.state.save(self.cfg.state_file)
         self._send_report(self._initial_pair_report_text(
             self._leg_report_snapshot(closed, source, fill),
             self._leg_report_snapshot(other, other_source, other_fill), final=True,
         ), key=key)
+        self.state.processed_events.append(key)
+        self.state.save(self.cfg.state_file)
 
     @staticmethod
     def _leg_report_snapshot(
@@ -839,8 +890,12 @@ class Bot:
     ) -> dict:
         return {
             "direction": leg.direction, "deal_id": leg.deal_id,
+            "deal_reference": leg.deal_reference,
+            "working_order_id": leg.trigger_id,
+            "trigger_reference": leg.trigger_reference,
             "entry": str(leg.current_entry), "size": str(leg.size),
             "stop": str(leg.stop) if leg.stop is not None else None,
+            "take_profit": str(leg.take_profit) if leg.take_profit is not None else None,
             "source": source, "fill": str(fill) if fill is not None else None,
         }
 
@@ -854,6 +909,9 @@ class Bot:
                 "cycle_attempt": self.state.cycle_attempt, "scenario": self.state.scenario,
                 "closed": self._leg_report_snapshot(closed, source, fill),
                 "waiting": self._leg_report_snapshot(waiting),
+                "created_at": time.time(), "search_from_epoch": time.time() - 3600,
+                "search_to_epoch": time.time() + 86400,
+                "original_decision": "MANUAL: начальная пара не была подтверждена",
             })
         self.state.save(self.cfg.state_file)
         self._send_report(
@@ -889,10 +947,12 @@ class Bot:
             formula = (f"({close} − {entry}) × {size}" if item["direction"] == "BUY" else
                        f"({entry} − {close}) × {size}")
             stop = D(item["stop"]) if item.get("stop") is not None else None
-            slip = abs(stop - close) if stop is not None else "не подтверждено"
+            target = D(item["take_profit"]) if item.get("take_profit") is not None else None
+            reference = stop if item["source"] == "SL" else target if item["source"] == "TP" else None
+            slip = abs(reference - close) if reference is not None else "не определено: исторический уровень неизвестен"
             return (
                 f"{item['direction']} dealId={item['deal_id']}: объём={size}; entry={entry}; "
-                f"исторический SL/TP={stop}; причина={item['source']}; fill={close}; "
+                f"исторический SL={stop}; исторический TP={target}; причина={item['source']}; fill={close}; "
                 f"slippage={slip}; результат={formula}={value}", value,
             )
         first_line, first_value = line(first)
@@ -903,8 +963,9 @@ class Bot:
             f"{first_line}\n{second_line}\n"
             f"Итог двух позиций={first_value} + {second_value} = {first_value + second_value}.\n"
             "Этот информационный итог НЕ добавлен в attempt_result_total и Recovery.\n"
-            "Полная initial-пара не сформирована; маршрутизация остаётся MANUAL. "
-            "Следующее действие: проверить брокера и явно восстановить автоматику."
+            f"Решение в момент события: {meta.get('original_decision', 'MANUAL: initial-пара не сформирована')}. "
+            f"Это отложенный отчёт старой попытки; текущее состояние бота: phase={self.state.phase}, "
+            f"active={self.state.active}, manual={self.state.manual}. Оно могло измениться после события."
         )
 
     def _continue_after_early_initial_close(self, continuation: bool = False) -> bool:
@@ -1265,7 +1326,7 @@ class Bot:
                         race_loss = self._close_trigger_that_raced_with_tp(stopped)
                         if race_loss is None:
                             self.state.save(self.cfg.state_file)
-                            self.telegram.send(
+                            self._send_report(
                                 "⏳ TP подтверждён, но результат отмены trigger ещё неизвестен\n"
                                 f"workingOrderId: {stopped.trigger_id}\n"
                                 "Цикл и следующий вход заблокированы; сверка продолжится автоматически."
@@ -1485,13 +1546,17 @@ class Bot:
         slippage = abs(lost.stop - fill) if lost.stop is not None else D("0")
         loss_points = (lost.current_entry - fill if lost.direction == "BUY"
                        else fill - lost.current_entry)
+        result_formula = (
+            f"({fill} − {lost.current_entry}) × {lost.size}"
+            if lost.direction == "BUY" else
+            f"({lost.current_entry} − {fill}) × {lost.size}"
+        )
         self._send_report(
             f"🛑 {cycle_heading(self.state, 'SL подтверждён брокерской history/activity')}\n"
             f"Закрыта {lost.direction}: объём={lost.size}; entry={lost.current_entry}; "
             f"подтверждённый SL={lost.stop}; фактический fill={fill}.\n"
             f"SL slippage=|{lost.stop} − {fill}|={slippage}.\n"
-            f"Результат позиции=({fill} − {lost.current_entry}) с учётом направления × "
-            f"{lost.size} = {-max(D('0'), loss_points) * lost.size}.\n"
+            f"Результат позиции={result_formula} = {-max(D('0'), loss_points) * lost.size}.\n"
             f"Сценарий остаётся {self.state.scenario}; SL сам сценарий не увеличивает.\n\n"
             f"{recovery_change_text(self.state, recovery_before, event='пересчёт после SL', direction=lost.direction, stop_slippage=slippage)}\n\n"
             f"Состояние surviving-стороны:\n{leg_details(survivor)}\n\n"
@@ -2113,7 +2178,7 @@ class Bot:
             try:
                 result = self._wait_market_submission(reference, rounds=3)
             except Exception as exc:
-                self.telegram.send(
+                self._send_report(
                     "⏳ MARKET fallback ожидает окончательный confirmation\n"
                     f"Сторона: {leg.direction}\nReference: {reference}\n"
                     "Повторный MARKET POST заблокирован; следующий tick продолжит только сверку.\n"
@@ -2147,7 +2212,7 @@ class Bot:
             except CapitalError as exc:
                 # ACCEPTED without a level is still an accepted order. Keep its reference durable
                 # and continue resolving it on later ticks instead of submitting another MARKET.
-                self.telegram.send(
+                self._send_report(
                     "⏳ MARKET принят, фактическая позиция/цена ещё синхронизируется\n"
                     f"Сторона: {leg.direction}\nReference: {reference}\n"
                     f"Confirmation dealId: {confirmation_id or '-'}\nОшибка сверки: {exc}"
@@ -2260,7 +2325,7 @@ class Bot:
             self.state.continuation_managed = True
             self.state.continuation_stage = "RECONCILING"
             self.state.save(self.cfg.state_file)
-            self.telegram.send(
+            self._send_report(
                 f"⏳ Отмена trigger {order_id} пока не подтверждена: {exc}. "
                 "Новый вход заблокирован; сверка продолжится."
             )
@@ -2272,7 +2337,7 @@ class Bot:
         executed = find_working_order_execution(activity, order_id)
         opened = find_trigger_open_event(activity, order_id, trigger_leg.direction)
         if executed or opened:
-            self.telegram.send(
+            self._send_report(
                 f"⏳ Trigger {order_id} исполнился при сверке двух SL; "
                 "ожидаю фактическую позицию и продолжаю текущий сценарий."
             )
@@ -2356,7 +2421,7 @@ class Bot:
         self.state.phase = "CONTINUATION_FILTER"
         self.state.continuation_stage = "FILTER"
         self.state.save(self.cfg.state_file)
-        self.telegram.send(
+        self._send_report(
             f"🔎 Продолжение цикла №{self.state.cycle_id}: сценарий {self.state.scenario}, "
             f"следующая попытка {self.state.cycle_attempt + 1}. Пятиминутная пауза завершена; "
             "ожидаю обычный входной фильтр."
@@ -2502,7 +2567,7 @@ class Bot:
             # ordinary unknown-position startup checks can misclassify their new position.
             self.reconciled = True
             self.state.save(self.cfg.state_file)
-            self.telegram.send("⏳ Восстановлена незавершённая MARKET-сверка; новые заявки запрещены.")
+            self._send_report("⏳ Восстановлена незавершённая MARKET-сверка; новые заявки запрещены.")
             return
         if not self.state.active:
             unknown = list(positions.values()) or [self._order_data(item) for item in orders if self._order_epic(item) == self.cfg.epic]
@@ -2526,7 +2591,7 @@ class Bot:
                 self.strategy.refresh_targets()
             self.reconciled = True
             self.state.save(self.cfg.state_file)
-            self.telegram.send(f"✅ Состояние автоматически восстановлено. {self.status()}")
+            self._send_report(f"✅ Состояние автоматически восстановлено. {self.status()}")
         except Exception as exc:
             self._manual(f"Невозможно однозначно восстановить цикл: {exc}")
             self.reconciled = True
@@ -2745,12 +2810,17 @@ class Bot:
             attempt_id, self.state.net_cycle_result,
         )
         self.state.active_attempt_id = 0
+        scenario_report = scenario_nine_result_text(self.state, long_fill, short_fill) + (
+            "\nДальнейший режим: PAUSED до /start из-за /stop."
+            if self.state.paused else "\nДальнейший режим: FILTER нового цикла."
+        )
+        self._store_report(scenario_report, f"scenario-9-complete:{attempt_id}")
         self.state.save(self.cfg.state_file)
         end_diagnostic_cycle(
             self.cfg.diagnostic_log_file, self.state.attempt_counter + 1,
             self.state.completed_cycles,
         )
-        self._send_report(scenario_nine_result_text(self.state, long_fill, short_fill))
+        self._send_report(scenario_report, key=f"scenario-9-complete:{attempt_id}")
 
     def _refresh_actual_attempt_result(self) -> bool:
         """Finalize scenario-9 statistics only from complete per-deal entry/close evidence."""
@@ -2839,7 +2909,7 @@ class Bot:
                 if consecutive_empty >= 3:
                     self.state.scenario_nine_triggers_verified = True
                     self.state.save(self.cfg.state_file)
-                    self.telegram.send(
+                    self._send_report(
                         "✅ Сценарий 9: trigger-ордера отменены\n"
                         "Capital.com три последовательных раза подтвердил: "
                         "working orders текущего цикла = 0."
@@ -2934,7 +3004,7 @@ class Bot:
                 self.state.remember_close(
                     opened.deal_id, "SCENARIO_9_TRIGGER_RACE", close_event.level
                 )
-                self.telegram.send(
+                self._send_report(
                     "⚡ Сценарий 9: полный trigger round-trip восстановлен из history\n"
                     f"workingOrderId: {trigger_id}\nDeal ID: {opened.deal_id}\n"
                     f"Сторона: {direction}\nВход: {opened.level}\n"
@@ -2965,7 +3035,7 @@ class Bot:
                 )
                 self.state.remember_deal(raced_leg, 9)
                 self.state.remember_close(deal_id, "SCENARIO_9_TRIGGER_RACE", close)
-                self.telegram.send(
+                self._send_report(
                     "⚡ Сценарий 9: trigger исполнился во время отмены и закрыт MARKET\n"
                     f"workingOrderId: {position.get('workingOrderId')}\nDeal ID: {deal_id}\n"
                     f"Сторона: {direction}\nВход: {entry}\nЗакрытие: {close}\n"
@@ -3140,7 +3210,7 @@ class Bot:
         self.state.paused = True
         self.state.phase = "PAUSED"
         self.state.save(self.cfg.state_file)
-        self.telegram.send(
+        self._send_report(
             f"✅ Ручной режим сброшен\nПричина: {reason}\n"
             f"Предыдущий сценарий: {previous_scenario}\n"
             "Открытых позиций и ордеров нет. Новый цикл ожидает /start."
@@ -3152,7 +3222,8 @@ class Bot:
         ):
             self.telegram.send(
                 "⏳ Согласованный снимок диагностики поставлен в отдельную очередь документов. "
-                "Будет отправлен один .log или две последовательно пронумерованные части без GZIP."
+                "Будет отправлено необходимое количество последовательно пронумерованных "
+                "частей .log без обрезания содержимого."
             )
         else:
             LOG.warning("Diagnostic snapshot was not queued for Telegram")
@@ -3175,7 +3246,41 @@ class Bot:
             if self._take_profit_already_reached(leg):
                 self._close_reached_take_profit(leg)
                 return False
+            submitted_revision = (
+                leg.protection_sent_stop == leg.stop
+                and leg.protection_sent_take_profit == leg.take_profit
+                and leg.protection_confirmation in {"ACCEPTED", "исход неизвестен"}
+            )
+            if submitted_revision and leg.protection_readback != "ПОДТВЕРЖДЕНО":
+                # Confirmation belongs to this exact revision.  Retry only the safe GET
+                # read-back; never repeat PUT because its verification response was malformed or
+                # temporarily unavailable.
+                actual_stop, actual_tp = self._wait_position_protection(
+                    leg.deal_id, leg.stop, leg.take_profit
+                )
+                if actual_stop != leg.stop or actual_tp != leg.take_profit:
+                    leg.protection_readback = (
+                        f"НЕ ПОДТВЕРЖДЕНО: прочитано {actual_stop}/{actual_tp}"
+                    )
+                    self.state.save(self.cfg.state_file)
+                    return False
+                leg.confirmed_stop, leg.confirmed_take_profit = actual_stop, actual_tp
+                leg.protection_readback = "ПОДТВЕРЖДЕНО"
+                self.state.save(self.cfg.state_file)
+                self._send_report(
+                    f"🛡 {cycle_heading(self.state, 'отложенная проверка защиты завершена')}\n"
+                    f"{leg_details(leg)}\nПовторён только GET /positions; PUT не отправлялся."
+                )
+                return True
             try:
+                # Record exactly which calculated revision was submitted.  Previous confirmed
+                # levels remain historical until this revision has its own confirmation/readback.
+                leg.protection_sent_stop = leg.stop
+                leg.protection_sent_take_profit = leg.take_profit
+                leg.confirmation_stop = leg.confirmation_take_profit = None
+                leg.protection_confirmation = "ожидается"
+                leg.protection_readback = "не выполнено"
+                self.state.save(self.cfg.state_file)
                 reference = self.capital.update_position(
                     leg.deal_id, leg.stop, leg.take_profit
                 )
@@ -3207,6 +3312,8 @@ class Bot:
                         return False
                     if self._protection_matches(remote, leg):
                         leg.confirmed_stop, leg.confirmed_take_profit = leg.stop, leg.take_profit
+                        leg.protection_confirmation = "исход неизвестен"
+                        leg.protection_readback = "ПОДТВЕРЖДЕНО"
                         LOG.info(
                             "Protection PUT accepted despite transport error: dealId=%s",
                             leg.deal_id,
@@ -3226,17 +3333,29 @@ class Bot:
                 self._close_reached_take_profit(leg)
                 return False
             self._confirm_update(reference)
+            leg.confirmation_stop, leg.confirmation_take_profit = leg.stop, leg.take_profit
+            leg.protection_confirmation = "ACCEPTED"
+            leg.protection_readback = "ожидается"
+            self.state.save(self.cfg.state_file)
             actual_stop, actual_tp = self._wait_position_protection(
                 leg.deal_id, leg.stop, leg.take_profit
             )
             if actual_stop is None and actual_tp is None:
+                leg.protection_readback = "НЕ ПОДТВЕРЖДЕНО: позиция/уровни не прочитаны"
+                self.state.save(self.cfg.state_file)
                 return False
             if actual_stop != leg.stop or actual_tp != leg.take_profit:
+                leg.protection_readback = (
+                    f"НЕ ПОДТВЕРЖДЕНО: прочитано {actual_stop}/{actual_tp}"
+                )
+                self.state.save(self.cfg.state_file)
                 raise CapitalError(
                     f"Protection read-back mismatch {leg.deal_id}: "
                     f"expected {leg.stop}/{leg.take_profit}, actual {actual_stop}/{actual_tp}"
                 )
             leg.confirmed_stop, leg.confirmed_take_profit = actual_stop, actual_tp
+            leg.protection_readback = "ПОДТВЕРЖДЕНО"
+            self.state.save(self.cfg.state_file)
             details = leg_details(
                 leg, broker_stop=actual_stop, broker_target=actual_tp,
                 confirmation="ACCEPTED", readback="ПОДТВЕРЖДЕНО",
@@ -3282,7 +3401,7 @@ class Bot:
         if fill is None:
             fill = self._wait_any_closing_fill(leg, attempts=20, delay=0.5)
         if fill is None:
-            self.telegram.send(
+            self._send_report(
                 "⏳ MARKET-закрытие принято без подтверждённой связи с позицией. "
                 "Повторный DELETE запрещён; сверка продолжится по сохранённому reference."
             )
@@ -3340,7 +3459,7 @@ class Bot:
             LOG.info(
                 "Reached TP close is confirmed but trigger outcome remains pending: %s", exc
             )
-            self.telegram.send(
+            self._send_report(
                 "⏳ MARKET-закрытие по достигнутому TP подтверждено, но trigger ещё сверяется\n"
                 f"Сторона: {direction}\nФактическое закрытие: {fill}\n"
                 "Цикл остаётся активным; новый вход заблокирован."
@@ -3396,14 +3515,23 @@ class Bot:
         """Install an exact SL, verify its broker level, and deliberately leave TP unset."""
         if not leg or not leg.open or not leg.deal_id or leg.stop is None:
             return
+        leg.protection_sent_stop, leg.protection_sent_take_profit = leg.stop, None
+        leg.confirmation_stop = leg.confirmation_take_profit = None
         self._confirm_update(self.capital.update_position(leg.deal_id, leg.stop, None))
+        leg.confirmation_stop, leg.confirmation_take_profit = leg.stop, None
+        leg.protection_confirmation, leg.protection_readback = "ACCEPTED", "ожидается"
+        self.state.save(self.cfg.state_file)
         actual_stop = self._wait_position_stop(leg.deal_id, leg.stop)
         if actual_stop != leg.stop:
+            leg.protection_readback = f"НЕ ПОДТВЕРЖДЕНО: прочитано {actual_stop}"
+            self.state.save(self.cfg.state_file)
             raise CapitalError(
                 f"Capital.com не подтвердил точный SL {leg.stop} для {leg.deal_id}; "
                 f"фактический stopLevel={actual_stop}"
             )
         leg.confirmed_stop, leg.confirmed_take_profit = actual_stop, None
+        leg.protection_readback = "ПОДТВЕРЖДЕНО"
+        self.state.save(self.cfg.state_file)
         self._send_report(
             f"🛡 {cycle_heading(self.state, 'SL позиции подтверждён брокером')}\n"
             f"{leg_details(leg, broker_stop=actual_stop, confirmation='ACCEPTED', readback='ПОДТВЕРЖДЕНО')}\n"
@@ -3417,19 +3545,29 @@ class Bot:
             or leg.stop is None or leg.take_profit is None
         ):
             return
+        leg.protection_sent_stop = leg.stop
+        leg.protection_sent_take_profit = leg.take_profit
+        leg.confirmation_stop = leg.confirmation_take_profit = None
         self._confirm_update(
             self.capital.update_position(leg.deal_id, leg.stop, leg.take_profit)
         )
+        leg.confirmation_stop, leg.confirmation_take_profit = leg.stop, leg.take_profit
+        leg.protection_confirmation, leg.protection_readback = "ACCEPTED", "ожидается"
+        self.state.save(self.cfg.state_file)
         actual_stop, actual_tp = self._wait_position_protection(
             leg.deal_id, leg.stop, leg.take_profit
         )
         if actual_stop != leg.stop or actual_tp != leg.take_profit:
+            leg.protection_readback = f"НЕ ПОДТВЕРЖДЕНО: прочитано {actual_stop}/{actual_tp}"
+            self.state.save(self.cfg.state_file)
             raise CapitalError(
                 "Capital.com не подтвердил точную защиту "
                 f"для {leg.deal_id}; ожидались SL={leg.stop}, TP={leg.take_profit}; "
                 f"фактически SL={actual_stop}, TP={actual_tp}"
             )
         leg.confirmed_stop, leg.confirmed_take_profit = actual_stop, actual_tp
+        leg.protection_readback = "ПОДТВЕРЖДЕНО"
+        self.state.save(self.cfg.state_file)
         self._send_report(
             f"🎯 {cycle_heading(self.state, 'Take Profit подтверждён; полная защита позиции подтверждена брокером')}\n"
             f"{leg_details(leg, broker_stop=actual_stop, broker_target=actual_tp, confirmation='ACCEPTED', readback='ПОДТВЕРЖДЕНО')}\n"
@@ -3459,9 +3597,15 @@ class Bot:
                     LOG.info("Position %s closed before SL read-back", deal_id)
                     return None
                 raise
-            position = payload.get("position", payload)
-            value = position.get("stopLevel")
-            actual = D(str(value)) if value is not None else None
+            position = payload.get("position", payload) if isinstance(payload, dict) else None
+            if not isinstance(position, dict):
+                actual = None
+            else:
+                value = position.get("stopLevel")
+                try:
+                    actual = D(str(value)) if value is not None else None
+                except (ArithmeticError, TypeError, ValueError):
+                    actual = None
             if actual == expected:
                 return actual
             if attempt + 1 < attempts:
@@ -3493,16 +3637,30 @@ class Bot:
                     LOG.info("Position %s closed before protection read-back", deal_id)
                     return None, None
                 raise
-            position = payload.get("position", payload)
-            if not isinstance(position, dict):  # compatible third-party/test clients
-                return expected_stop, expected_tp
+            if not isinstance(payload, dict):
+                LOG.warning("Invalid /positions payload for %s: %r", deal_id, payload)
+                position = None
+            else:
+                position = payload.get("position", payload)
+            if not isinstance(position, dict):
+                actual_stop = actual_tp = None
+                if attempt + 1 < attempts:
+                    time.sleep(delay)
+                continue
             stop_value = position.get("stopLevel")
             tp_value = position.get("profitLevel")
             try:
                 actual_stop = D(str(stop_value)) if stop_value is not None else None
                 actual_tp = D(str(tp_value)) if tp_value is not None else None
-            except Exception:
-                return expected_stop, expected_tp
+            except (ArithmeticError, TypeError, ValueError):
+                LOG.warning(
+                    "Unreadable protection for %s: stopLevel=%r profitLevel=%r",
+                    deal_id, stop_value, tp_value,
+                )
+                actual_stop = actual_tp = None
+                if attempt + 1 < attempts:
+                    time.sleep(delay)
+                continue
             if actual_stop == expected_stop and actual_tp == expected_tp:
                 return actual_stop, actual_tp
             if attempt + 1 < attempts:

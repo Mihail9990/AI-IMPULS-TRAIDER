@@ -193,6 +193,9 @@ class Strategy:
         leg.open = True
         leg.trigger_id = leg.trigger_reference = ""
         leg.confirmed_stop = leg.confirmed_take_profit = None
+        leg.protection_sent_stop = leg.protection_sent_take_profit = None
+        leg.confirmation_stop = leg.confirmation_take_profit = None
+        leg.protection_confirmation = leg.protection_readback = ""
         leg.stop = stop_for(direction, fill, leg.stop_distance)
         self.state.remember_deal(leg, self.state.scenario)
         self._targets_from_entries()

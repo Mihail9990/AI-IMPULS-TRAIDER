@@ -74,12 +74,14 @@ class Telegram:
         self._documents: deque[_Delivery] = deque()
         self._commands: deque[str] = deque()
         self._delivery_acks: deque[dict] = deque()
+        self._document_acks: deque[dict] = deque()
         self._poll_thread: threading.Thread | None = None
         self._send_thread: threading.Thread | None = None
         self._document_thread: threading.Thread | None = None
         self._started = False
         self._startup_discard = self.offset == 0
         self._document_groups: dict[str, dict[str, object]] = {}
+        self._document_markers: set[tuple[str, int]] = set()
 
     @property
     def enabled(self) -> bool:
@@ -161,6 +163,37 @@ class Telegram:
             return False
         self._enqueue(_Delivery("document", str(file), compress=compress))
         return True
+
+    def send_document_part(
+        self, path: str, snapshot_id: str, part: int, total_parts: int
+    ) -> bool:
+        """Queue one already-materialized durable /sendlog part."""
+        file = Path(path)
+        if not self.enabled or not file.is_file():
+            return False
+        marker = (snapshot_id, part)
+        with self._lock:
+            if marker in self._document_markers:
+                return True
+            self._document_markers.add(marker)
+        self._enqueue(_Delivery(
+            "document", str(file), upload_path=str(file), group_id=snapshot_id,
+            report_id=snapshot_id, part=part, total_parts=total_parts,
+        ))
+        with self._lock:
+            self._document_groups.setdefault(snapshot_id, {
+                "total": total_parts, "delivered": [], "failed": [],
+            })
+        return True
+
+    def document_acks(self) -> list[dict]:
+        with self._lock:
+            values = list(self._document_acks); self._document_acks.clear()
+        return values
+
+    def queued_document_parts(self) -> set[tuple[str, int]]:
+        with self._lock:
+            return set(self._document_markers)
 
     def send_log_snapshot(self, builder: Callable[[], list[str]]) -> bool:
         """Build and upload an immutable log snapshot exclusively on the document worker."""
@@ -284,13 +317,14 @@ class Telegram:
             if item.kind == "snapshot":
                 try:
                     paths = item.builder() if item.builder else []
-                    if not paths or len(paths) > 2:
-                        raise RuntimeError("снимок должен содержать один или два файла")
-                    group_id = f"{time.time_ns()}-{id(item)}"
+                    if not paths:
+                        raise RuntimeError("снимок не содержит файлов")
+                    group_id = Path(paths[0]).name.split("-part-")[0]
                     parts = [
                         _Delivery(
-                            "document", path, upload_path=path, delete_upload=True,
-                            group_id=group_id, part=index, total_parts=len(paths),
+                            "document", path, upload_path=path, delete_upload=False,
+                            group_id=group_id, report_id=group_id,
+                            part=index, total_parts=len(paths),
                         )
                         for index, path in enumerate(paths, 1)
                     ]
@@ -298,6 +332,9 @@ class Telegram:
                         if self._documents and self._documents[0] is item:
                             self._documents.popleft()
                             self._documents.extendleft(reversed(parts))
+                            self._document_markers.update(
+                                (group_id, index) for index in range(1, len(parts) + 1)
+                            )
                             self._document_groups[group_id] = {
                                 "total": len(parts), "delivered": [], "failed": [],
                             }
@@ -356,6 +393,12 @@ class Telegram:
             )
             return
         with self._lock:
+            if item.report_id:
+                self._document_markers.discard((item.report_id, item.part))
+                self._document_acks.append({
+                    "snapshot_id": item.report_id, "part": item.part,
+                    "status": "delivered" if delivered else "failed",
+                })
             group = self._document_groups.get(item.group_id)
             if group is None:
                 return

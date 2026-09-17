@@ -96,13 +96,26 @@ class NotificationHistoryWorker:
     def _resolve(client: CapitalClient, job: dict) -> dict | None:
         target = job["waiting"]
         deal_id = str(target["deal_id"])
-        activity = client.activity(deal_id)
-        if not activity:
-            activity = client.activity()
-        for source in ("SL", "TP"):
-            event = find_close_event(activity, deal_id, source)
-            if event is not None and event.level is not None:
-                return {"source": source, "fill": str(event.level)}
+        # A restored job can be much older than CapitalClient.activity()'s 24-hour default.
+        # Keep the original attempt boundary in durable job metadata and widen the query with a
+        # margin.  Capital accepts lastPeriod in seconds; callers/tests without that optional
+        # argument remain supported without weakening identity checks.
+        started = float(job.get("search_from_epoch") or job.get("created_at") or time.time())
+        last_period = max(86400, int(time.time() - started) + 3600)
+
+        def read(specific: bool) -> list[dict]:
+            try:
+                return client.activity(deal_id if specific else "", last_period=last_period)
+            except TypeError:  # legacy read-only adapters
+                return client.activity(deal_id) if specific else client.activity()
+
+        # Non-empty deal history may contain only the opening.  Fall back based on absence of a
+        # matching confirmed close, never based merely on whether the response list is empty.
+        for activity in (read(True), read(False)):
+            for source in ("SL", "TP"):
+                event = find_close_event(activity, deal_id, source)
+                if event is not None and event.level is not None:
+                    return {"source": source, "fill": str(event.level)}
         return None
 
 

@@ -30,6 +30,12 @@ class Leg:
     take_profit: Decimal | None = None
     confirmed_stop: Decimal | None = None
     confirmed_take_profit: Decimal | None = None
+    protection_sent_stop: Decimal | None = None
+    protection_sent_take_profit: Decimal | None = None
+    confirmation_stop: Decimal | None = None
+    confirmation_take_profit: Decimal | None = None
+    protection_confirmation: str = ""
+    protection_readback: str = ""
     size: Decimal = D("0")
     stop_distance: Decimal = D("0")
     recovery: Decimal = D("0")
@@ -224,6 +230,13 @@ class CycleState:
         if not file.exists():
             return cls()
         raw = json.loads(file.read_text(encoding="utf-8"))
+        # A permanent transport classification applies only to that process/request.  On a later
+        # launch every non-delivered report part is eligible for recovery; acknowledged parts stay
+        # delivered and are never repeated.
+        for report in raw.get("report_outbox", []):
+            for part in report.get("parts", []):
+                if part.get("status") != "delivered":
+                    part["status"] = "pending"
         for name in ("long", "short"):
             leg = raw.get(name)
             if leg:
@@ -232,7 +245,9 @@ class CycleState:
                     leg.setdefault("original_trigger_level", legacy_entry)
                     leg.setdefault("current_entry", legacy_entry)
                 for key in ("original_trigger_level", "current_entry", "stop", "take_profit",
-                            "confirmed_stop", "confirmed_take_profit",
+                            "confirmed_stop", "confirmed_take_profit", "protection_sent_stop",
+                            "protection_sent_take_profit", "confirmation_stop",
+                            "confirmation_take_profit",
                             "size", "stop_distance", "recovery", "temporary_stop_compensation",
                             "temporary_spread_compensation", "temporary_slippage_compensation"):
                     if leg.get(key) is not None:
