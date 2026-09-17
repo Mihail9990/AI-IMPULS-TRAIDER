@@ -42,6 +42,8 @@ class Leg:
     temporary_stop_compensation: Decimal = D("0")
     temporary_spread_compensation: Decimal = D("0")
     temporary_slippage_compensation: Decimal = D("0")
+    # Field names absent from a legacy JSON object.  A saved numeric zero is not missing.
+    legacy_missing_fields: list[str] = field(default_factory=list)
 
     @property
     def effective_recovery(self) -> Decimal:
@@ -143,6 +145,8 @@ class CycleState:
             "entry": str(leg.current_entry),
             "scenario": self.scenario if scenario is None else scenario,
             "attempt_id": self.active_attempt_id or self.diagnostic_cycle_number,
+            "cycle_id": self.cycle_id,
+            "cycle_attempt": self.cycle_attempt,
             "trigger_id": leg.trigger_id,
             "size": str(leg.size),
             "close_source": "",
@@ -179,6 +183,8 @@ class CycleState:
             return
         self.attempt_history.append({
             "attempt_id": attempt_id,
+            "cycle_id": self.cycle_id,
+            "cycle_attempt": self.cycle_attempt,
             "status": status,
             "result": str(result),
             **{key: str(value) if isinstance(value, Decimal) else value
@@ -240,6 +246,11 @@ class CycleState:
         for name in ("long", "short"):
             leg = raw.get(name)
             if leg:
+                legacy_fields = (
+                    "size", "stop_distance", "recovery", "temporary_stop_compensation",
+                    "temporary_spread_compensation", "temporary_slippage_compensation",
+                )
+                missing = [key for key in legacy_fields if key not in leg]
                 legacy_entry = leg.pop("entry", None)
                 if legacy_entry is not None:
                     leg.setdefault("original_trigger_level", legacy_entry)
@@ -252,6 +263,7 @@ class CycleState:
                             "temporary_spread_compensation", "temporary_slippage_compensation"):
                     if leg.get(key) is not None:
                         leg[key] = D(str(leg[key]))
+                leg.setdefault("legacy_missing_fields", missing)
                 raw[name] = Leg(**leg)
         raw["recovery"] = D(str(raw.get("recovery", "0")))
         for name in (

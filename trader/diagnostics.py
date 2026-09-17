@@ -69,6 +69,17 @@ class CycleFileHandler(logging.FileHandler):
             item.setdefault("run_number", 0)
             item.setdefault("delivered_bytes", 0)
         known = {str(item.get("name")) for item in self._index["segments"]}
+        # Recover a crash after os.replace(source, legacy-*) but before index persistence.
+        for destination in sorted(self.history_dir.glob("legacy-*")):
+            if destination.name in known or not destination.is_file():
+                continue
+            self._index["segments"].append({
+                "name": destination.name, "kind": "legacy", "cycle": 0,
+                "ordinal": int(self._index["next_segment"]), "run_id": "legacy",
+                "run_number": 0, "delivered_bytes": 0,
+            })
+            self._index["next_segment"] = int(self._index["next_segment"]) + 1
+            known.add(destination.name)
         legacy = []
         for candidate in self.legacy_path.parent.glob(self.legacy_path.name + ".*"):
             suffix = candidate.name[len(self.legacy_path.name) + 1:]
@@ -132,7 +143,8 @@ class CycleFileHandler(logging.FileHandler):
 
     def _pending_segment_names(self) -> set[str]:
         return {str(r["name"]) for snap in self._index.get("snapshots", [])
-                if snap.get("status") != "delivered" for r in snap.get("ranges", [])}
+                if snap.get("status") not in {"delivered", "superseded"}
+                for r in snap.get("ranges", [])}
 
     def _cleanup_delivered_previous_runs(self) -> None:
         pending = self._pending_segment_names()
@@ -178,33 +190,41 @@ class CycleFileHandler(logging.FileHandler):
         outputs: list[Path] = []
         current = None
         current_size = 0
+
+        def write_block(block: bytes) -> None:
+            nonlocal current, current_size
+            offset = 0
+            while offset < len(block):
+                if current is None:
+                    number = len(outputs) + 1
+                    path = self.history_dir / f"{snapshot_id}-part-{number:04d}.log"
+                    current = path.open("wb")
+                    outputs.append(path)
+                    current_size = 0
+                amount = min(max_part_bytes - current_size, len(block) - offset)
+                current.write(block[offset:offset + amount])
+                offset += amount
+                current_size += amount
+                if current_size == max_part_bytes:
+                    current.close()
+                    current = None
+
         try:
             for boundary in ranges:
                 source = self.history_dir / str(boundary["name"])
                 header = (f"\n===== ДАННЫЕ ЗАПУСКА №{boundary['run_number']} id={boundary['run_id']} "
                           f"файл={boundary['name']} bytes={boundary['start']}..{boundary['end']} =====\n").encode()
-                pieces = [header]
+                write_block(header)
                 with source.open("rb") as incoming:
                     incoming.seek(int(boundary["start"]))
                     remaining = int(boundary["end"]) - int(boundary["start"])
                     while remaining:
-                        pieces.append(incoming.read(min(256 * 1024, remaining)))
-                        remaining -= len(pieces[-1])
-                for block in pieces:
-                    offset = 0
-                    while offset < len(block):
-                        if current is None:
-                            number = len(outputs) + 1
-                            path = self.history_dir / f"{snapshot_id}-part-{number:04d}.log"
-                            current = path.open("wb")
-                            outputs.append(path)
-                            current_size = 0
-                        amount = min(max_part_bytes - current_size, len(block) - offset)
-                        current.write(block[offset:offset + amount])
-                        offset += amount
-                        current_size += amount
-                        if current_size == max_part_bytes:
-                            current.close(); current = None
+                        block = incoming.read(min(256 * 1024, remaining))
+                        if not block:
+                            raise IOError(f"Диагностический сегмент усечён: {source}")
+                        remaining -= len(block)
+                        # Write this bounded chunk immediately; never retain the entire segment.
+                        write_block(block)
             if current is not None:
                 current.close(); current = None
             total = len(outputs)
@@ -229,18 +249,20 @@ class CycleFileHandler(logging.FileHandler):
 
     def pending_snapshots(self) -> list[dict]:
         return [json.loads(json.dumps(item)) for item in self._index.get("snapshots", [])
-                if item.get("status") != "delivered"]
+                if item.get("status") not in {"delivered", "superseded"}]
 
-    def acknowledge(self, snapshot_id: str, part: int, status: str) -> None:
+    def acknowledge(self, snapshot_id: str, part: int, status: str) -> bool:
         """Persist a document acknowledgement before deleting any covered material."""
         with self._index_lock:
             snapshot = next((s for s in self._index.get("snapshots", [])
                              if s.get("id") == snapshot_id), None)
             if snapshot is None:
-                return
+                return False
+            if snapshot.get("status") == "delivered":
+                return False
             target = next((p for p in snapshot["parts"] if int(p["number"]) == int(part)), None)
             if target is None:
-                return
+                return False
             target["status"] = status
             if all(p.get("status") == "delivered" for p in snapshot["parts"]):
                 snapshot["status"] = "delivered"
@@ -256,7 +278,28 @@ class CycleFileHandler(logging.FileHandler):
                 self._save_index()
                 for item in snapshot["parts"]:
                     Path(item["path"]).unlink(missing_ok=True)
-                return
+                self._supersede_covered_snapshots(snapshot_id)
+                return True
+            self._save_index()
+            return False
+
+    def _supersede_covered_snapshots(self, delivered_id: str) -> None:
+        """Release failed snapshots only when delivered byte boundaries prove coverage."""
+        changed = False
+        delivered = {item["name"]: int(item.get("delivered_bytes", 0))
+                     for item in self._index["segments"]}
+        for snapshot in self._index.get("snapshots", []):
+            if snapshot.get("id") == delivered_id or snapshot.get("status") == "delivered":
+                continue
+            if snapshot.get("ranges") and all(
+                delivered.get(boundary["name"], 0) >= int(boundary["end"])
+                for boundary in snapshot["ranges"]
+            ):
+                snapshot["status"] = "superseded"
+                for part in snapshot.get("parts", []):
+                    Path(part.get("path", "")).unlink(missing_ok=True)
+                changed = True
+        if changed:
             self._save_index()
 
 
@@ -304,6 +347,6 @@ def pending_diagnostic_snapshots(path: str) -> list[dict]:
     return handler.pending_snapshots() if handler else []
 
 
-def acknowledge_diagnostic_snapshot(path: str, snapshot_id: str, part: int, status: str) -> None:
+def acknowledge_diagnostic_snapshot(path: str, snapshot_id: str, part: int, status: str) -> bool:
     handler = _handler(path)
-    if handler: handler.acknowledge(snapshot_id, part, status)
+    return handler.acknowledge(snapshot_id, part, status) if handler else False

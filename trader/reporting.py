@@ -282,8 +282,11 @@ def cycle_result_text(state: CycleState, direction: str, fill: Decimal, size: De
     net_money = state.net_cycle_money or gross_money - losses_money
     deals = []
     calculated_losses = D("0")
-    selected = [item for item in state.deal_history
-                if item.get("deal_id") in state.attempt_deal_ids and item.get("close_level") is not None]
+    cycle_records = [item for item in state.deal_history
+                     if item.get("cycle_id") == state.cycle_id]
+    selected = [item for item in (cycle_records or state.deal_history)
+                if item.get("close_level") is not None
+                and (cycle_records or item.get("deal_id") in state.attempt_deal_ids)]
     for item in selected:
         entry = _decimal(item.get("entry"))
         close = _decimal(item.get("close_level"))
@@ -298,13 +301,23 @@ def cycle_result_text(state: CycleState, direction: str, fill: Decimal, size: De
             f"entry={entry}; close={close}; причина={item.get('close_source') or '?'}; "
             f"результат={formula}={result}"
         )
-    if selected:
+    detail_complete = bool(selected) and calculated_losses == state.realized_loss_money
+    # The durable aggregate spans every continuation attempt. Never replace it with a smaller
+    # subtotal merely because broker/deal detail is incomplete.
+    if not state.realized_loss_money and selected:
         losses_money = calculated_losses
-        net_money = gross_money - losses_money
+    net_money = state.net_cycle_money if state.net_cycle_money else gross_money - losses_money
     detail = "\n".join(deals) or "• Детализация сделок ещё уточняется по broker history."
+    attempts = [item for item in state.attempt_history if item.get("cycle_id") == state.cycle_id]
+    attempt_detail = "\n".join(
+        f"• попытка {item.get('cycle_attempt', '?')}: {item.get('status')} = {item.get('result')}"
+        for item in attempts
+    ) or "• Отдельные итоги попыток отсутствуют в сохранённом состоянии."
     return (
         f"🏁 Итог завершённого цикла\n"
         f"Сделки:\n{detail}\n"
+        f"Полнота детализации: {'ПОЛНАЯ' if detail_complete else 'НЕПОЛНАЯ; денежный итог взят из полного сохранённого агрегата'}\n"
+        f"Попытки логического цикла:\n{attempt_detail}\n"
         f"TP сторона: {direction}\nФактическое закрытие: {fill}\n"
         f"Валовая прибыль TP: {state.gross_take_profit} пункта\n"
         f"Общие убытки закрытых сторон: {state.realized_losses} пункта\n"

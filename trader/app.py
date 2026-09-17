@@ -120,6 +120,14 @@ class Bot:
         # dynamically-created Mock attribute swallow reports: chunking belongs to our concrete
         # asynchronous Telegram transport, while compatible transports receive the same text.
         if isinstance(self.telegram, Telegram) and self.telegram.enabled:
+            if "🏁 Итог завершённого цикла" in text:
+                existing_completion = next((item for item in self.state.report_outbox
+                    if str(item.get("key", "")).startswith(
+                        f"cycle-complete:{self.state.cycle_id}:{self.state.completed_cycles}"
+                    )), None)
+                if existing_completion is not None:
+                    self._queue_pending_reports()
+                    return
             identity = key or hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
             existing = self._store_report(text, identity)
             if existing is not None:
@@ -201,11 +209,22 @@ class Bot:
             for ack in self.telegram.document_acks():
                 marker = (str(ack["snapshot_id"]), int(ack["part"]))
                 self._queued_log_parts.discard(marker)
-                acknowledge_diagnostic_snapshot(
+                completed = acknowledge_diagnostic_snapshot(
                     self.cfg.diagnostic_log_file, marker[0], marker[1], str(ack["status"])
                 )
+                self.telegram.confirm_document_ack(marker[0], marker[1])
+                if completed:
+                    self._send_report(
+                        f"✅ /sendlog полностью доставлен: снимок {marker[0]}",
+                        key=f"sendlog-complete:{marker[0]}",
+                    )
             for snapshot in pending_diagnostic_snapshots(self.cfg.diagnostic_log_file):
                 total = len(snapshot.get("parts", []))
+                self.telegram.restore_document_group(
+                    str(snapshot["id"]), total,
+                    [int(part["number"]) for part in snapshot.get("parts", [])
+                     if part.get("status") == "delivered"],
+                )
                 already_queued = self.telegram.queued_document_parts()
                 for part in snapshot.get("parts", []):
                     marker = (str(snapshot["id"]), int(part["number"]))
@@ -251,7 +270,9 @@ class Bot:
             text = cycle_result_text(self.state, direction, fill, self.cfg.size) + (
                 f"\nДальнейший режим: {next_mode}"
             )
-            self._store_report(text, f"cycle-complete:{attempt_id}:{direction}:{fill}")
+            self._store_report(
+                text, f"cycle-complete:{self.state.cycle_id}:{self.state.completed_cycles}"
+            )
         # Completion counters and a recoverable final report are committed by one atomic replace.
         self.state.save(self.cfg.state_file)
         end_diagnostic_cycle(
@@ -1110,6 +1131,15 @@ class Bot:
                     raise CapitalError("Позиция появилась без фактической цены входа")
                 leg.current_entry = D(str(fill))
                 self._clear_pending_market(leg)
+                both_confirmed = all(
+                    candidate and candidate.deal_id
+                    for candidate in (self.state.long, self.state.short)
+                )
+                next_action = (
+                    "установить и проверить точные SL/TP обеих сторон"
+                    if both_confirmed else
+                    "открыть вторую сторону либо сверить раннее закрытие первой"
+                )
                 self._send_report(
                     f"✅ {cycle_heading(self.state, f'{leg.direction} MARKET-позиция подтверждена')}\n"
                     f"Broker confirmation и /positions: dealId={leg.deal_id}; объём={leg.size}; "
@@ -1117,8 +1147,7 @@ class Bot:
                     f"Сохранённый original trigger установлен равным первому fill: "
                     f"{leg.original_trigger_level}.\n"
                     f"Предварительный broker-side SL от MARKET distance={leg.stop}; точный SL/TP "
-                    "ещё не подтверждены. Следующее действие: открыть вторую сторону либо "
-                    "сверить раннее закрытие первой."
+                    f"ещё не подтверждены. Следующее действие: {next_action}."
                 )
                 return None
             except Exception as exc:
@@ -1788,14 +1817,31 @@ class Bot:
             return loss
         return None
 
-    @staticmethod
-    def _protection_matches(position: dict, leg: Leg) -> bool:
+    def _protection_matches(self, position: dict, leg: Leg) -> bool:
         """Return whether the broker snapshot contains the strategy's current SL and TP."""
+        if str(position.get("dealId", "")) != leg.deal_id:
+            return False
         stop = position.get("stopLevel")
         target = position.get("profitLevel")
-        actual_stop = D(str(stop)) if stop is not None else None
-        actual_target = D(str(target)) if target is not None else None
-        return actual_stop == leg.stop and actual_target == leg.take_profit
+        try:
+            actual_stop = D(str(stop)) if stop is not None else None
+            actual_target = D(str(target)) if target is not None else None
+        except (ArithmeticError, TypeError, ValueError):
+            return False
+        matches = actual_stop == leg.stop and actual_target == leg.take_profit
+        if matches and (
+            leg.confirmed_stop != actual_stop
+            or leg.confirmed_take_profit != actual_target
+            or leg.protection_readback != "ПОДТВЕРЖДЕНО"
+        ):
+            leg.confirmed_stop, leg.confirmed_take_profit = actual_stop, actual_target
+            leg.protection_readback = "ПОДТВЕРЖДЕНО"
+            # A GET proves broker state, not that an older/newer PUT confirmation belongs to it.
+            if (leg.protection_sent_stop != leg.stop
+                    or leg.protection_sent_take_profit != leg.take_profit):
+                leg.protection_confirmation = leg.protection_confirmation or "неизвестно"
+            self.state.save(self.cfg.state_file)
+        return matches
 
     def _retry_missing_positions(self, attempts: int = 10, delay: float = 0.5) -> dict[str, dict]:
         """Protect against short-lived empty /positions responses from the broker."""
@@ -2367,10 +2413,12 @@ class Bot:
             if leg.open:
                 self.strategy.stopped(leg.direction, fill, f"stop:{leg.deal_id}:{fill}")
             points = fill - leg.current_entry if leg.direction == "BUY" else leg.current_entry - fill
-            size = leg.size if self.cfg.scenario_sizes else self.cfg.size
+            size = leg.size if leg.size else self.cfg.size
             details.append((leg, fill, points * size))
         close_money = sum((item[2] for item in details), D("0"))
-        money = -(self.state.realized_losses - self.state.cycle_attempt_start_losses) * self.cfg.size
+        money = -(
+            self.state.realized_loss_money - self.state.cycle_attempt_start_loss_money
+        )
         self.state.remember_attempt(
             "DOUBLE_SL_CONTINUATION", money, scenario=self.state.scenario,
             closes=[{"direction": leg.direction, "deal_id": leg.deal_id,
@@ -2398,8 +2446,7 @@ class Bot:
             f"⏸ Цикл №{self.state.cycle_id}; сценарий {self.state.scenario}; "
             f"попытка {self.state.cycle_attempt}\n{lines}\n"
             f"Последние закрытия: {close_money}; результат попытки: {money}; "
-            f"накопленные убытки цикла: "
-            f"{self.state.realized_losses * self.cfg.size}\n"
+            f"накопленные убытки цикла: {self.state.realized_loss_money}\n"
             "Trigger: отменён или отсутствует; связанных позиций и ордеров нет.\n"
             f"Пауза до {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.state.continuation_pause_until))}. "
             "Затем бот перейдёт к обычному входному фильтру этого же цикла."
@@ -2612,6 +2659,7 @@ class Bot:
             for data in [self._order_data(item)]
             if data.get("dealId")
         }
+        self._migrate_legacy_legs(positions)
         known_ids = {leg.deal_id for leg in (self.state.long, self.state.short) if leg and leg.deal_id}
         snapshot = RemoteSnapshot(positions, gold_orders)
         unknown = snapshot.unknown_position_ids(known_ids, {
@@ -2674,6 +2722,34 @@ class Bot:
                      tuple((leg.open, leg.deal_id, leg.trigger_id) for leg in (self.state.long, self.state.short) if leg))
             if after == before:
                 break
+
+    def _migrate_legacy_legs(self, positions: dict[str, dict]) -> None:
+        """Recover only position-specific legacy values that broker evidence proves."""
+        unresolved = []
+        for leg in (self.state.long, self.state.short):
+            if leg is None or not leg.legacy_missing_fields:
+                continue
+            missing = set(leg.legacy_missing_fields)
+            remote = positions.get(leg.deal_id) if leg.open else None
+            if "size" in missing and remote and remote.get("size") is not None:
+                leg.size = D(str(remote["size"])); missing.remove("size")
+            if "stop_distance" in missing and remote and remote.get("stopLevel") is not None:
+                try:
+                    leg.stop_distance = abs(leg.current_entry - D(str(remote["stopLevel"])))
+                    missing.remove("stop_distance")
+                except (ArithmeticError, TypeError, ValueError):
+                    pass
+            # Recovery and temporary components are strategy history, not broker position fields.
+            # A numeric zero saved explicitly was never added to legacy_missing_fields.
+            leg.legacy_missing_fields = sorted(missing)
+            if missing:
+                unresolved.append(f"{leg.direction} dealId={leg.deal_id}: {sorted(missing)}")
+        self.state.save(self.cfg.state_file)
+        if unresolved:
+            raise RuntimeError(
+                "старое состояние не содержит однозначных параметров позиции; "
+                "автоматика заблокирована: " + "; ".join(unresolved)
+            )
 
     def _enter_manual_nine(self) -> None:
         """Automatically flatten scenario 9 using actual fills from both sides.

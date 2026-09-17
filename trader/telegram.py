@@ -82,6 +82,7 @@ class Telegram:
         self._startup_discard = self.offset == 0
         self._document_groups: dict[str, dict[str, object]] = {}
         self._document_markers: set[tuple[str, int]] = set()
+        self._document_ack_pending: set[tuple[str, int]] = set()
 
     @property
     def enabled(self) -> bool:
@@ -186,6 +187,22 @@ class Telegram:
             })
         return True
 
+    def restore_document_group(
+        self, snapshot_id: str, total_parts: int, delivered_parts: list[int]
+    ) -> None:
+        with self._lock:
+            group = self._document_groups.setdefault(snapshot_id, {
+                "total": total_parts, "delivered": [], "failed": [],
+            })
+            group["delivered"] = sorted(set(group["delivered"]) | set(delivered_parts))
+
+    def confirm_document_ack(self, snapshot_id: str, part: int) -> None:
+        """Release in-flight protection only after the main owner persisted the ACK."""
+        with self._lock:
+            marker = (snapshot_id, part)
+            self._document_ack_pending.discard(marker)
+            self._document_markers.discard(marker)
+
     def document_acks(self) -> list[dict]:
         with self._lock:
             values = list(self._document_acks); self._document_acks.clear()
@@ -193,7 +210,7 @@ class Telegram:
 
     def queued_document_parts(self) -> set[tuple[str, int]]:
         with self._lock:
-            return set(self._document_markers)
+            return set(self._document_markers) | set(self._document_ack_pending)
 
     def send_log_snapshot(self, builder: Callable[[], list[str]]) -> bool:
         """Build and upload an immutable log snapshot exclusively on the document worker."""
@@ -348,17 +365,19 @@ class Telegram:
                 continue
             try:
                 self._prepare_document(item)
+                upload = Path(item.upload_path)
+                upload_size = upload.stat().st_size
             except Exception as exc:
                 LOG.error("TELEGRAM document preparation failed permanent=true error=%s", self._safe_error(exc))
                 self._finish_document(item)
+                self._report_document_part(item, delivered=False)
                 self.send("⚠️ Не удалось подготовить диагностический файл к отправке.")
                 continue
             item.attempts += 1
-            upload = Path(item.upload_path)
             started = time.monotonic()
             LOG.info(
                 "TELEGRAM document upload started name=%s size=%s attempt=%s",
-                upload.name, upload.stat().st_size, item.attempts,
+                upload.name, upload_size, item.attempts,
             )
             try:
                 self._deliver_document(item)
@@ -367,7 +386,7 @@ class Telegram:
                 LOG.warning(
                     "TELEGRAM document upload failed name=%s size=%s attempt=%s elapsed=%.3fs "
                     "permanent=%s next_retry=%ss error=%s",
-                    upload.name, upload.stat().st_size, item.attempts,
+                    upload.name, upload_size, item.attempts,
                     time.monotonic() - started, permanent, 0 if permanent else delay,
                     self._safe_error(exc),
                 )
@@ -393,34 +412,21 @@ class Telegram:
             )
             return
         with self._lock:
+            group = self._document_groups.get(item.group_id)
+            if group is None:
+                return
             if item.report_id:
-                self._document_markers.discard((item.report_id, item.part))
+                self._document_ack_pending.add((item.report_id, item.part))
                 self._document_acks.append({
                     "snapshot_id": item.report_id, "part": item.part,
                     "status": "delivered" if delivered else "failed",
                 })
-            group = self._document_groups.get(item.group_id)
-            if group is None:
-                return
             key = "delivered" if delivered else "failed"
             group[key].append(item.part)
             done = len(group["delivered"]) + len(group["failed"]) == group["total"]
             if done:
                 self._document_groups.pop(item.group_id, None)
-        if not done:
-            return
-        delivered_parts = sorted(group["delivered"])
-        failed_parts = sorted(group["failed"])
-        if failed_parts:
-            self.send(
-                f"⚠️ /sendlog доставлен частично. Доставлены части: {delivered_parts or '-'}; "
-                f"не доставлены: {failed_parts}. Исходная история сохранена."
-            )
-        else:
-            self.send(
-                f"✅ /sendlog полностью доставлен: {group['total']} "
-                f"{'файл' if group['total'] == 1 else 'последовательных файла .log'}."
-            )
+        # The main state owner emits the durable completion report only after every ACK is saved.
 
     def _peek(self, queue: deque[_Delivery]) -> _Delivery | None:
         with self._lock:
@@ -438,6 +444,8 @@ class Telegram:
 
     def _prepare_document(self, item: _Delivery) -> None:
         if item.upload_path:
+            if not Path(item.upload_path).is_file():
+                raise FileNotFoundError(item.upload_path)
             return
         source = Path(item.value)
         if not source.is_file():
@@ -476,10 +484,9 @@ class Telegram:
                     recommended = float(response.headers.get("Retry-After", 0))
                 except (TypeError, ValueError):
                     recommended = 0
-            return bool(document and attempt >= 5), max(1.0, recommended)
+            return False, max(1.0, recommended)
         permanent_status = status is not None and status not in {408, 425, 429} and status < 500
-        max_attempts = 5 if document else 0
-        permanent = permanent_status or bool(max_attempts and attempt >= max_attempts)
+        permanent = permanent_status
         return permanent, min(300.0, 5.0 * (2 ** min(attempt - 1, 6)))
 
     def _safe_error(self, exc: Exception) -> str:
