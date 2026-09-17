@@ -29,6 +29,7 @@ class _Delivery:
     group_id: str = ""
     part: int = 0
     total_parts: int = 0
+    report_id: str = ""
 
 
 class Telegram:
@@ -72,6 +73,7 @@ class Telegram:
         self._messages: deque[_Delivery] = deque()
         self._documents: deque[_Delivery] = deque()
         self._commands: deque[str] = deque()
+        self._delivery_acks: deque[dict] = deque()
         self._poll_thread: threading.Thread | None = None
         self._send_thread: threading.Thread | None = None
         self._document_thread: threading.Thread | None = None
@@ -135,6 +137,22 @@ class Telegram:
         total = len(chunks)
         return all(self.send(f"Часть {index}/{total}\n{chunk}")
                    for index, chunk in enumerate(chunks, 1))
+
+    def send_report_part(self, text: str, report_id: str, part: int, total: int) -> bool:
+        """Queue one durable report part and expose its eventual delivery acknowledgement."""
+        LOG.info("TELEGRAM DURABLE QUEUE report=%s part=%s/%s", report_id, part, total)
+        if not self.enabled:
+            return False
+        self._enqueue(_Delivery(
+            "message", text, report_id=report_id, part=part, total_parts=total
+        ))
+        return True
+
+    def delivery_acks(self) -> list[dict]:
+        with self._lock:
+            values = list(self._delivery_acks)
+            self._delivery_acks.clear()
+        return values
 
     def send_document(self, path: str, *, compress: bool = False) -> bool:
         file = Path(path)
@@ -237,14 +255,24 @@ class Telegram:
                 )
                 if permanent:
                     self._remove(self._messages, item)
+                    self._ack(item, "failed")
                 elif not self._stop.wait(delay):
                     self._wake_messages.set()
                 continue
             self._remove(self._messages, item)
+            self._ack(item, "delivered")
             LOG.info(
                 "TELEGRAM delivery succeeded kind=%s attempt=%s elapsed=%.3fs pending=%s",
                 item.kind, item.attempts, time.monotonic() - started, self.pending_reports,
             )
+
+    def _ack(self, item: _Delivery, status: str) -> None:
+        if not item.report_id:
+            return
+        with self._lock:
+            self._delivery_acks.append({
+                "report_id": item.report_id, "part": item.part, "status": status,
+            })
 
     def _document_loop(self) -> None:
         while not self._stop.is_set():

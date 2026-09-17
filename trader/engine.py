@@ -192,6 +192,7 @@ class Strategy:
         leg.deal_id = deal_id
         leg.open = True
         leg.trigger_id = leg.trigger_reference = ""
+        leg.confirmed_stop = leg.confirmed_take_profit = None
         leg.stop = stop_for(direction, fill, leg.stop_distance)
         self.state.remember_deal(leg, self.state.scenario)
         self._targets_from_entries()

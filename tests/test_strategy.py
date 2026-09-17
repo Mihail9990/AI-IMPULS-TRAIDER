@@ -25,6 +25,7 @@ from trader.events import (
 )
 from trader.execution import ExecutionPolicy, is_crossed_level_rejection, trigger_level_passed
 from trader.model import CycleState, Leg, stop_slippage, target_for, trigger_slippage
+from trader.notifications import NotificationHistoryWorker, split_report
 from trader.reconcile import RemoteSnapshot
 from trader.reporting import cycle_result_text, leg_details, pnl_text, recovery_change_text, recovery_snapshot
 from trader.streaming import PriceWatch, QuoteStream
@@ -3438,6 +3439,204 @@ class StreamingQuoteTest(unittest.TestCase):
         bot.tick()
 
         bot._tick_cycle.assert_called_once()
+
+
+class DetailedNotificationRegressionTest(unittest.TestCase):
+    def settings(self):
+        return Settings(
+            scenario_sizes=(D("10"), D("10")) + (D("20"),) * 7,
+            scenario_stop_distances=(D("1"), D("2"), D("3")) + (D("4"),) * 6,
+        )
+
+    def test_cycle_273_first_and_second_increase_arithmetic(self):
+        state = CycleState(active=True, scenario=2, entry_spread=D("0.54"))
+        state.long = Leg("BUY", D("4300"), D("4300"), deal_id="buy", size=D("10"),
+                         stop_distance=D("2"), recovery=D("2.90"), stop=D("4298"))
+        state.short = Leg("SELL", D("4299.46"), D("4299.46"), open=False,
+                          size=D("10"), stop_distance=D("2"), recovery=D("2.90"))
+        strategy = Strategy(self.settings(), state)
+
+        before = recovery_snapshot(state)
+        strategy.reopened("SELL", D("4299.43"), "sell-3")
+        self.assertEqual(state.short.recovery, D("2.98"))
+        self.assertEqual(state.long.recovery, D("5.93"))
+        self.assertEqual(state.long.temporary_stop_compensation, D("3"))
+        self.assertEqual(state.long.temporary_spread_compensation, D("0.54"))
+        self.assertEqual(state.long.temporary_slippage_compensation, D("0.03"))
+        self.assertEqual(state.long.effective_recovery, D("9.50"))
+        text = recovery_change_text(
+            state, before, event="№273 первое увеличение", direction="SELL",
+            trigger_slippage=D("0.03"),
+        )
+        self.assertIn("(2.90 + 3) / 2 + 0.03 = 2.98", text)
+        self.assertIn("SL 0 → 3", text)
+
+        strategy.stopped("BUY", D("4297.91"), "buy-sl")
+        self.assertEqual(state.short.recovery, D("3.025"))
+        self.assertEqual(state.long.effective_recovery, D("9.59"))
+        strategy.reopened("BUY", D("4300"), "buy-4")
+        self.assertEqual(state.long.recovery, D("7.01"))
+        self.assertEqual(state.short.recovery, D("7.01"))
+        self.assertEqual(state.long.temporary_recovery, D("0"))
+        self.assertEqual(state.short.temporary_recovery, D("0"))
+
+    def test_cycle_274_repeated_large_side_then_alignment(self):
+        state = CycleState(active=True, scenario=3, entry_spread=D("0.60"))
+        state.long = Leg(
+            "BUY", D("4300"), D("4300"), deal_id="buy", size=D("10"),
+            stop_distance=D("2"), recovery=D("6.03"), stop=D("4298"),
+            temporary_stop_compensation=D("3"),
+            temporary_spread_compensation=D("0.60"),
+            temporary_slippage_compensation=D("0.03"),
+        )
+        state.short = Leg(
+            "SELL", D("4299.40"), D("4299.40"), open=False, size=D("20"),
+            stop_distance=D("3"), recovery=D("3.03"),
+        )
+        strategy = Strategy(self.settings(), state)
+        strategy.reopened("SELL", D("4299.36"), "sell-4")
+        self.assertEqual(state.long.recovery, D("10.07"))
+        self.assertEqual(state.long.temporary_stop_compensation, D("7"))
+        self.assertEqual(state.long.temporary_spread_compensation, D("0.60"))
+        self.assertEqual(state.long.temporary_slippage_compensation, D("0.07"))
+        self.assertEqual(state.long.effective_recovery, D("17.74"))
+
+        strategy.stopped("BUY", D("4297.97"), "buy-sl")
+        self.assertEqual(state.long.recovery, D("10.10"))
+        self.assertEqual(state.long.effective_recovery, D("17.77"))
+        strategy.reopened("BUY", D("4300.20"), "buy-5")
+        self.assertEqual(state.long.recovery, D("9.25"))
+        self.assertEqual(state.short.recovery, D("9.25"))
+        self.assertEqual(state.long.temporary_recovery, D("0"))
+
+    def test_protection_details_use_individual_recovery_and_sources(self):
+        leg = Leg(
+            "BUY", D("4284.14"), D("4284.14"), deal_id="buy-273", size=D("10"),
+            stop_distance=D("2"), recovery=D("5.93"), stop=D("4282.14"),
+            take_profit=D("4295.64"), temporary_stop_compensation=D("3"),
+            temporary_spread_compensation=D("0.54"),
+            temporary_slippage_compensation=D("0.03"),
+        )
+        text = leg_details(
+            leg, broker_stop=leg.stop, broker_target=leg.take_profit,
+            confirmation="ACCEPTED", readback="ПОДТВЕРЖДЕНО",
+        )
+        self.assertIn("основной Recovery=5.93", text)
+        self.assertIn("SL=3 + spread=0.54 + slippage=0.03 = 3.57", text)
+        self.assertIn("эффективный Recovery для TP=9.50", text)
+        self.assertIn("4284.14 + 2 + 9.50 = 4295.64", text)
+        self.assertIn("confirmation", text.lower())
+        self.assertIn("повторное чтение /positions=ПОДТВЕРЖДЕНО", text)
+
+    def test_closed_leg_levels_are_labelled_historical(self):
+        leg = Leg("SELL", D("100"), D("99"), deal_id="closed", open=False,
+                  size=D("20"), stop_distance=D("3"), recovery=D("3"),
+                  stop=D("102"), take_profit=D("93"))
+        text = leg_details(leg)
+        self.assertIn("исторические последние SL/TP", text)
+        self.assertIn("не являются расчётом от нового Recovery", text)
+
+    def test_cycle_result_lists_weighted_deals_and_trigger_fate(self):
+        state = CycleState(gross_take_profit=D("25.71"), realized_losses=D("0"),
+                           realized_loss_money=D("424.70"), net_cycle_money=D("89.50"))
+        state.long = Leg("BUY", D("4300"), D("4300"), size=D("20"))
+        state.attempt_deal_ids = ["winner", "loss"]
+        state.deal_history = [
+            {"deal_id": "winner", "direction": "BUY", "entry": "4295.15",
+             "close_level": "4320.86", "close_source": "TP", "size": "20"},
+            {"deal_id": "loss", "direction": "SELL", "entry": "4300",
+             "close_level": "4301.06", "close_source": "SL", "size": "10"},
+        ]
+        state.last_trigger_resolution = "workingOrderId=trigger: DELETE confirmation ACCEPTED."
+        text = cycle_result_text(state, "BUY", D("4320.86"), D("10"))
+        self.assertIn("dealId=winner", text)
+        self.assertIn("причина=TP", text)
+        self.assertIn("(4320.86 − 4295.15) × 20=514.20", text)
+        self.assertIn("убытки 424.70; итог 89.50", text)
+        self.assertIn("workingOrderId=trigger", text)
+
+    def test_history_worker_resolves_late_close_without_trading_mutation(self):
+        client = Mock()
+        client.activity.return_value = [{
+            "dealId": "buy-270", "source": "SL", "status": "ACCEPTED",
+            "type": "POSITION", "details": {"level": 4285.04},
+        }]
+        job = {"waiting": {"deal_id": "buy-270"}}
+        result = NotificationHistoryWorker._resolve(client, job)
+        self.assertEqual(result, {"source": "SL", "fill": "4285.04"})
+        client.open_position.assert_not_called()
+        client.update_position.assert_not_called()
+
+    def test_notification_jobs_and_outbox_survive_restart(self):
+        state = CycleState()
+        state.pending_notification_jobs = [{
+            "key": "initial", "waiting": {"deal_id": "buy"}, "closed": {},
+        }]
+        state.report_outbox = [{
+            "id": "1:report", "key": "report", "parts": [
+                {"number": 1, "text": "one", "status": "delivered"},
+                {"number": 2, "text": "two", "status": "pending"},
+            ],
+        }]
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "state.json")
+            state.save(path)
+            loaded = CycleState.load(path)
+        self.assertEqual(loaded.pending_notification_jobs[0]["key"], "initial")
+        self.assertEqual(loaded.report_outbox[0]["parts"][0]["status"], "delivered")
+        self.assertEqual(loaded.report_outbox[0]["parts"][1]["status"], "pending")
+
+    def test_late_manual_result_uses_saved_snapshot_after_legs_change(self):
+        bot = EntryRetryTest().make_bot()
+        bot.state.long = Leg("BUY", D("999"), D("999"), deal_id="new-cycle")
+        bot.state.pending_notification_jobs = [{
+            "key": "initial-270", "cycle_id": 270, "cycle_attempt": 1, "scenario": 1,
+            "closed": {"direction": "SELL", "deal_id": "sell-270", "entry": "4285.12",
+                       "size": "10", "stop": "4286.12", "source": "SL", "fill": "4286.14"},
+            "waiting": {"direction": "BUY", "deal_id": "buy-270", "entry": "4286.07",
+                        "size": "10", "stop": "4285.07", "source": "", "fill": None},
+        }]
+        worker = Mock()
+        worker.results.return_value = [{
+            "key": "initial-270", "result": {"source": "SL", "fill": "4285.04"},
+        }]
+        bot.notification_worker = worker
+        with tempfile.TemporaryDirectory() as directory:
+            object.__setattr__(bot.cfg, "state_file", str(Path(directory) / "state.json"))
+            bot._tick_notifications()
+        text = bot.telegram.send.call_args.args[0]
+        self.assertIn("Цикл №270", text)
+        self.assertIn("dealId=buy-270", text)
+        self.assertIn("-20.50", text)
+        self.assertNotIn("new-cycle", text)
+        self.assertEqual(bot.state.pending_notification_jobs, [])
+
+    def test_restart_queues_only_unconfirmed_report_parts(self):
+        bot = Bot.__new__(Bot)
+        bot.telegram = Telegram("token", "chat")
+        bot.state = CycleState(report_outbox=[{
+            "id": "7:result", "key": "result", "parts": [
+                {"number": 1, "text": "already sent", "status": "delivered"},
+                {"number": 2, "text": "resume me", "status": "pending"},
+            ],
+        }])
+        bot._queued_report_parts = set()
+        bot._queue_pending_reports()
+        self.assertEqual(len(bot.telegram._messages), 1)
+        self.assertEqual(bot.telegram._messages[0].part, 2)
+        self.assertEqual(bot.telegram._messages[0].value, "resume me")
+
+    def test_stable_report_parts_and_delivery_ack(self):
+        parts = split_report("A\n" * 4000, limit=1000)
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(parts[0].startswith(f"Часть 1/{len(parts)}"))
+        telegram = Telegram("token", "chat")
+        telegram.send_report_part(parts[0], "report-1", 1, len(parts))
+        item = telegram._messages[0]
+        telegram._ack(item, "delivered")
+        self.assertEqual(telegram.delivery_acks(), [{
+            "report_id": "report-1", "part": 1, "status": "delivered",
+        }])
 
 
 class PydroidConfigTest(unittest.TestCase):

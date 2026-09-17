@@ -28,6 +28,8 @@ class Leg:
     pending_market_preexisting_ids: list[str] = field(default_factory=list)
     stop: Decimal | None = None
     take_profit: Decimal | None = None
+    confirmed_stop: Decimal | None = None
+    confirmed_take_profit: Decimal | None = None
     size: Decimal = D("0")
     stop_distance: Decimal = D("0")
     recovery: Decimal = D("0")
@@ -107,6 +109,13 @@ class CycleState:
     attempt_deal_ids: list[str] = field(default_factory=list)
     pending_actual_attempt_id: int = 0
     pending_actual_deal_ids: list[str] = field(default_factory=list)
+    # Durable notification state is deliberately separate from processed trading events.  A
+    # broker event may be fully accounted while its human-readable report is still waiting for
+    # history or Telegram delivery.
+    pending_notification_jobs: list[dict] = field(default_factory=list)
+    report_outbox: list[dict] = field(default_factory=list)
+    next_report_id: int = 1
+    last_trigger_resolution: str = "Нет связанного Trigger."
     processed_events: list[str] = field(default_factory=list)
     cycle_trigger_ids: list[str] = field(default_factory=list)
     # Durable broker ledger.  Leg.deal_id necessarily changes after every trigger fill, while
@@ -223,6 +232,7 @@ class CycleState:
                     leg.setdefault("original_trigger_level", legacy_entry)
                     leg.setdefault("current_entry", legacy_entry)
                 for key in ("original_trigger_level", "current_entry", "stop", "take_profit",
+                            "confirmed_stop", "confirmed_take_profit",
                             "size", "stop_distance", "recovery", "temporary_stop_compensation",
                             "temporary_spread_compensation", "temporary_slippage_compensation"):
                     if leg.get(key) is not None:
@@ -263,6 +273,7 @@ class CycleState:
         self.pending_tp_direction = ""
         self.pending_tp_fill = None
         self.pending_close_direction = self.pending_close_reference = self.pending_close_reason = ""
+        self.last_trigger_resolution = "Нет связанного Trigger."
         self.long = self.short = None
         self.phase = "IDLE"
         self.processed_events.clear()

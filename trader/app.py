@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+import hashlib
 from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -24,6 +25,7 @@ from .events import (
 )
 from .execution import ExecutionPolicy, is_crossed_level_rejection, trigger_level_passed
 from .model import CycleState, Leg, stop_for, target_for
+from .notifications import NotificationHistoryWorker, split_report
 from .reconcile import RemoteSnapshot
 from .reporting import (
     cycle_heading, cycle_result_text, leg_details, pnl_text, recovery_change_text,
@@ -59,6 +61,8 @@ class Bot:
         self._last_cycle_rest_check = 0.0
         self.execution_policy = ExecutionPolicy()
         self.continuation = CycleContinuation(self)
+        self.notification_worker = NotificationHistoryWorker(cfg)
+        self._queued_report_parts: set[tuple[str, int]] = set()
         if (not self.state.continuation_managed and self.state.active
                 and self.state.cycle_attempt > 1):
             self.state.continuation_managed = True
@@ -104,14 +108,78 @@ class Bot:
             controller = self.continuation = CycleContinuation(self)
         return controller
 
-    def _send_report(self, text: str) -> None:
+    def _send_report(self, text: str, *, key: str = "") -> None:
         # Test and third-party transports historically implement only ``send``.  Do not let a
         # dynamically-created Mock attribute swallow reports: chunking belongs to our concrete
         # asynchronous Telegram transport, while compatible transports receive the same text.
-        if isinstance(self.telegram, Telegram):
-            self.telegram.send_report(text)
+        if isinstance(self.telegram, Telegram) and self.telegram.enabled:
+            identity = key or hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
+            existing = next(
+                (item for item in self.state.report_outbox if item.get("key") == identity), None
+            )
+            if existing is not None:
+                self._queue_pending_reports()
+                return
+            report_id = f"{self.state.next_report_id}:{identity}"
+            self.state.next_report_id += 1
+            parts = split_report(text)
+            self.state.report_outbox.append({
+                "id": report_id, "key": identity,
+                "parts": [{"number": index, "text": value, "status": "pending"}
+                          for index, value in enumerate(parts, 1)],
+            })
+            self.state.save(self.cfg.state_file)
+            self._queue_pending_reports()
         else:
             self.telegram.send(text)
+
+    def _queue_pending_reports(self) -> None:
+        if not isinstance(self.telegram, Telegram) or not self.telegram.enabled:
+            return
+        for report in self.state.report_outbox:
+            total = len(report.get("parts", []))
+            for part in report.get("parts", []):
+                marker = (str(report["id"]), int(part["number"]))
+                if part.get("status") != "pending" or marker in self._queued_report_parts:
+                    continue
+                if self.telegram.send_report_part(
+                    str(part["text"]), marker[0], marker[1], total
+                ):
+                    self._queued_report_parts.add(marker)
+
+    def _tick_notifications(self) -> None:
+        worker = getattr(self, "notification_worker", None)
+        if worker is not None:
+            for completed in worker.results():
+                job = next((item for item in self.state.pending_notification_jobs
+                            if item.get("key") == completed["key"]), None)
+                if job is None:
+                    continue
+                waiting = dict(job["waiting"])
+                waiting.update(completed["result"])
+                self._send_report(
+                    self._initial_pair_report_text(job["closed"], waiting, final=True, meta=job),
+                    key=f"{job['key']}:final",
+                )
+                self.state.pending_notification_jobs.remove(job)
+                self.state.save(self.cfg.state_file)
+            for job in self.state.pending_notification_jobs:
+                worker.submit(job)
+        if isinstance(self.telegram, Telegram):
+            for ack in self.telegram.delivery_acks():
+                marker = (str(ack["report_id"]), int(ack["part"]))
+                self._queued_report_parts.discard(marker)
+                for report in self.state.report_outbox:
+                    if str(report.get("id")) != marker[0]:
+                        continue
+                    for part in report.get("parts", []):
+                        if int(part.get("number", 0)) == marker[1]:
+                            part["status"] = ack["status"]
+            self.state.report_outbox[:] = [
+                report for report in self.state.report_outbox
+                if not all(part.get("status") == "delivered" for part in report.get("parts", []))
+            ]
+        self._queue_pending_reports()
 
     def _dispatch_owned_cycle(self) -> None:
         """Return shared-operation follow-up to the exclusive current owner."""
@@ -188,6 +256,7 @@ class Bot:
 
     def run(self) -> None:
         self.telegram.start()
+        self.notification_worker.start()
         self.telegram.install_commands()
         self.telegram.send(
             f"🤖 Бот запущен\nРежим: {'DEMO' if self.cfg.demo else 'REAL'}\n"
@@ -211,6 +280,7 @@ class Bot:
                 self.state.telegram_offset = self.telegram.offset
                 self.state.save(self.cfg.state_file)
                 self._process_commands(commands)
+                self._tick_notifications()
                 if not self.state.manual:
                     self.tick()
                 self.quotes.watch(self._price_watches())
@@ -573,7 +643,7 @@ class Bot:
                 )
                 lost.pending_market_reference = lost.deal_reference
                 self.state.save(self.cfg.state_file)
-                self.telegram.send(
+                self._send_report(
                     f"⏳ Первая сторона {lost.direction} исчезла до открытия противоположной. "
                     "Вторая заявка не отправлена; новый вход заблокирован до появления связанного "
                     "SL/TP в истории."
@@ -699,8 +769,7 @@ class Bot:
                 source,
                 survivor.deal_id,
             )
-            other_close = self._wait_accepted_initial_close(survivor)
-            self._report_initial_pair_closures(closed, source, fill, survivor, other_close)
+            self._schedule_initial_pair_report(closed, source, fill, survivor)
             return False
         self.strategy.confirm_initial_fills(
             self.state.long.current_entry, self.state.short.current_entry
@@ -721,17 +790,19 @@ class Bot:
             return True
         self._create_trigger(stopped)
         self.state.save(self.cfg.state_file)
-        self.telegram.send(
+        self._send_report(
             "🛑 Вторая сторона открылась и сразу закрылась по SL\n"
             f"Сторона: {closed.direction}\n"
             f"Вход: {closed.current_entry}\n"
             f"Плановый SL: {closed.stop}\n"
             f"Фактическое закрытие: {fill}\n"
-            f"Recovery: {self.state.recovery}\n"
+            f"Закрытая сторона: основной Recovery={closed.recovery}; effective="
+            f"{closed.effective_recovery}.\n"
             f"Осталась сторона: {survivor.direction}\n"
             f"Новый TP: {survivor.take_profit}\n"
             f"Trigger {closed.direction}: {closed.original_trigger_level}\n"
-            "Автоматика продолжает сценарий 1."
+            "Автоматика продолжает сценарий 1.\n"
+            f"Текущее состояние survivor:\n{leg_details(survivor)}"
         )
         return True
 
@@ -746,43 +817,94 @@ class Bot:
                 return
             self.state.processed_events.append(key)
             self.state.save(self.cfg.state_file)
-            self._send_report(
-                f"⏳ {cycle_heading(self.state, 'раннее закрытие начальной пары уточняется')}\n"
-                f"Подтверждено history/activity: {closed.direction} объём={closed.size}, "
-                f"entry={closed.current_entry}, причина={source}, fill={fill}.\n"
-                f"{other.direction}: отсутствует в текущем /positions, но это не доказательство "
-                "закрытия. Бот запрашивает её deal-specific history; итог пары пока не объявлен.\n"
-                "Новые заявки заблокированы до однозначной сверки."
-            )
+            self._send_report(self._initial_pair_report_text(
+                self._leg_report_snapshot(closed, source, fill),
+                self._leg_report_snapshot(other), final=False,
+            ), key=key)
             return
         other_source, other_fill = other_close
         key = f"initial-pair-double-close:{closed.deal_id}:{fill}:{other.deal_id}:{other_fill}"
         if key in self.state.processed_events:
             return
         self.state.processed_events.append(key)
-        def result(leg: Leg, close: Decimal) -> Decimal:
-            points = close - leg.current_entry if leg.direction == "BUY" else leg.current_entry - close
-            return points * leg.size
-        first_money, other_money = result(closed, fill), result(other, other_fill)
-        total = first_money + other_money
+        self.state.save(self.cfg.state_file)
+        self._send_report(self._initial_pair_report_text(
+            self._leg_report_snapshot(closed, source, fill),
+            self._leg_report_snapshot(other, other_source, other_fill), final=True,
+        ), key=key)
+
+    @staticmethod
+    def _leg_report_snapshot(
+        leg: Leg, source: str = "", fill: Decimal | None = None,
+    ) -> dict:
+        return {
+            "direction": leg.direction, "deal_id": leg.deal_id,
+            "entry": str(leg.current_entry), "size": str(leg.size),
+            "stop": str(leg.stop) if leg.stop is not None else None,
+            "source": source, "fill": str(fill) if fill is not None else None,
+        }
+
+    def _schedule_initial_pair_report(
+        self, closed: Leg, source: str, fill: Decimal, waiting: Leg,
+    ) -> None:
+        key = f"initial-pair-history:{closed.deal_id}:{waiting.deal_id}:{fill}"
+        if not any(item.get("key") == key for item in self.state.pending_notification_jobs):
+            self.state.pending_notification_jobs.append({
+                "key": key, "cycle_id": self.state.cycle_id,
+                "cycle_attempt": self.state.cycle_attempt, "scenario": self.state.scenario,
+                "closed": self._leg_report_snapshot(closed, source, fill),
+                "waiting": self._leg_report_snapshot(waiting),
+            })
         self.state.save(self.cfg.state_file)
         self._send_report(
-            f"⛔ {cycle_heading(self.state, 'обе стороны начальной пары закрылись при формировании')}\n"
-            "Подтверждение: два отдельных события POSITION source=SL в broker history/activity.\n"
-            f"{closed.direction}: объём={closed.size}; entry={closed.current_entry}; "
-            f"SL={closed.stop}; fill={fill}; slippage=|{closed.stop} − {fill}|="
-            f"{abs(closed.stop - fill) if closed.stop is not None else 'не подтверждено'}; "
-            f"результат=({fill} − {closed.current_entry}) с учётом направления × "
-            f"{closed.size} = {first_money}.\n"
-            f"{other.direction}: объём={other.size}; entry={other.current_entry}; "
-            f"SL={other.stop}; fill={other_fill}; slippage=|{other.stop} − {other_fill}|="
-            f"{abs(other.stop - other_fill) if other.stop is not None else 'не подтверждено'}; "
-            f"результат с учётом направления × {other.size} = {other_money}.\n"
-            f"Итог двух позиций={first_money} + {other_money} = {total}.\n"
-            "Этот отдельный информационный итог НЕ добавлен в общий счётчик результата бота.\n"
-            "Фактическое состояние: обе позиции закрыты; полная начальная пара не сформирована. "
-            "Существующая маршрутизация безопасности не изменена: автоматика переходит в ручной "
-            "режим, новый вход запрещён до сверки и команды восстановления."
+            self._initial_pair_report_text(
+                self._leg_report_snapshot(closed, source, fill),
+                self._leg_report_snapshot(waiting), final=False,
+            ), key=f"{key}:pending",
+        )
+
+    def _initial_pair_report_text(
+        self, first: dict, second: dict, *, final: bool, meta: dict | None = None,
+    ) -> str:
+        meta = meta or {}
+        heading = (
+            f"Цикл №{meta.get('cycle_id') or self.state.cycle_id or self.state.diagnostic_cycle_number or '-'}; "
+            f"попытка {meta.get('cycle_attempt') or self.state.cycle_attempt or '-'}; "
+            f"сценарий {meta.get('scenario', self.state.scenario)}"
+        )
+        if not final:
+            return (
+                f"⏳ {heading}\nСобытие: раннее закрытие начальной пары уточняется\n"
+                f"Подтверждено history/activity: {first['direction']} dealId={first['deal_id']}; "
+                f"объём={first['size']}; entry={first['entry']}; причина={first['source']}; "
+                f"fill={first['fill']}.\n"
+                f"{second['direction']} dealId={second['deal_id']}: отсутствует в /positions, но "
+                "это не доказательство закрытия. Фоновый read-only обработчик продолжает "
+                "deal-specific/global history после перехода в manual; итог пары пока не объявлен. "
+                "Новые заявки заблокированы."
+            )
+        def line(item: dict) -> tuple[str, Decimal]:
+            entry, close, size = D(item["entry"]), D(item["fill"]), D(item["size"])
+            value = (close - entry) * size if item["direction"] == "BUY" else (entry - close) * size
+            formula = (f"({close} − {entry}) × {size}" if item["direction"] == "BUY" else
+                       f"({entry} − {close}) × {size}")
+            stop = D(item["stop"]) if item.get("stop") is not None else None
+            slip = abs(stop - close) if stop is not None else "не подтверждено"
+            return (
+                f"{item['direction']} dealId={item['deal_id']}: объём={size}; entry={entry}; "
+                f"исторический SL/TP={stop}; причина={item['source']}; fill={close}; "
+                f"slippage={slip}; результат={formula}={value}", value,
+            )
+        first_line, first_value = line(first)
+        second_line, second_value = line(second)
+        return (
+            f"⛔ {heading}\nСобытие: обе стороны начальной пары закрылись при формировании\n"
+            "Подтверждение: отдельные broker history/activity события для каждой позиции.\n"
+            f"{first_line}\n{second_line}\n"
+            f"Итог двух позиций={first_value} + {second_value} = {first_value + second_value}.\n"
+            "Этот информационный итог НЕ добавлен в attempt_result_total и Recovery.\n"
+            "Полная initial-пара не сформирована; маршрутизация остаётся MANUAL. "
+            "Следующее действие: проверить брокера и явно восстановить автоматику."
         )
 
     def _continue_after_early_initial_close(self, continuation: bool = False) -> bool:
@@ -853,7 +975,7 @@ class Bot:
                     leg.current_entry = leg.original_trigger_level = D(str(fill))
                     leg.stop = stop_for(leg.direction, leg.current_entry, leg.stop_distance)
                     self._clear_pending_market(leg)
-                    self.telegram.send(
+                    self._send_report(
                         f"⚠️ Ответ начального MARKET POST потерян, но позиция подтверждена "
                         f"через /positions\nСторона: {leg.direction}\nDeal ID: {leg.deal_id}\n"
                         f"Фактический вход: {leg.current_entry}"
@@ -1153,10 +1275,18 @@ class Bot:
                         self.state.realized_loss_money += (
                             race_loss * self.cfg.size_for(min(9, self.state.scenario + 1))
                         )
+                        self.state.last_trigger_resolution = (
+                            f"workingOrderId={stopped.trigger_id} исполнился одновременно с TP; "
+                            f"позиция разрешена и закрыта, дополнительный убыток={race_loss}."
+                        )
                         LOG.info(
                             "Working order %s already absent; activity has no accepted trigger "
                             "position, treating cancellation as idempotent",
                             stopped.trigger_id,
+                        )
+                    else:
+                        self.state.last_trigger_resolution = (
+                            f"workingOrderId={stopped.trigger_id}: DELETE confirmation ACCEPTED."
                         )
                     stopped.trigger_id = stopped.trigger_reference = ""
                 self._complete_cycle(survivor.direction, fill)
@@ -1169,7 +1299,7 @@ class Bot:
                     self.state.waiting_current_candle = False
                     self.state.phase = "FILTER"
                     suffix = "Перехожу к фильтру следующего цикла."
-                self.telegram.send(
+                self._send_report(
                     f"✅ Цикл завершён по TP {survivor.direction}. {suffix}\n"
                     f"{cycle_result_text(self.state, survivor.direction, fill, self.cfg.size)}\n"
                     f"{self.status()}"
@@ -1246,7 +1376,7 @@ class Bot:
                     self._complete_cycle(winner.direction, fill)
                     self.state.armed = not self.state.paused
                     self.state.phase = "FILTER" if self.state.armed else "PAUSED"
-                    self.telegram.send(
+                    self._send_report(
                         "✅ Обе позиции исчезли из списка, но Capital.com подтвердил TP.\n"
                         + cycle_result_text(self.state, winner.direction, fill, self.cfg.size)
                     )
@@ -1333,7 +1463,7 @@ class Bot:
                 "Перехожу к фильтру следующего цикла."
                 if self.state.armed else "Следующий цикл ожидает /start."
             )
-            self.telegram.send(
+            self._send_report(
                 f"✅ Take Profit {lost.direction} исполнился во время установки защиты.\n"
                 f"Противоположный SL {survivor.direction}: {stop_fill}\n{suffix}\n"
                 f"{cycle_result_text(self.state, lost.direction, tp_fill, self.cfg.size)}"
@@ -1580,7 +1710,7 @@ class Bot:
             leg.open = False
             self.state.remember_close(deal_id, "TP_TRIGGER_RACE", close)
             self.state.save(self.cfg.state_file)
-            self.telegram.send(
+            self._send_report(
                 "⚡ TP и trigger исполнились почти одновременно\n"
                 f"Поздняя сторона: {leg.direction}\nDeal ID: {deal_id}\n"
                 f"Trigger fill: {entry}\nФактическое закрытие: {close}\n"
@@ -1622,6 +1752,7 @@ class Bot:
             recovery_before = recovery_snapshot(self.state)
             previous_scenario = self.state.scenario
             trigger_level = leg.original_trigger_level
+            executed_trigger_id = leg.trigger_id
             self.strategy.reopened(leg.direction, fill, str(candidate["dealId"]), f"reopen:{candidate['dealId']}")
             if self.state.scenario == self.cfg.max_scenarios:
                 self._enter_manual_nine()
@@ -1632,7 +1763,7 @@ class Bot:
                     f"{cycle_heading(self.state, 'Trigger исполнен и позиция подтверждена')}\n"
                     f"Переход подтверждён: сценарий {previous_scenario} → {self.state.scenario}.\n"
                     f"Источник: /positions связал dealId={candidate['dealId']} с "
-                    f"workingOrderId Trigger={leg.trigger_id or 'исполнен'}.\n"
+                    f"workingOrderId Trigger={executed_trigger_id}.\n"
                     f"{leg.direction}: original trigger={trigger_level}; actual fill={fill}; "
                     f"slippage=|{trigger_level} − {fill}|={trigger_slip}.\n\n"
                     f"{recovery_change_text(self.state, recovery_before, event='пересчёт после Trigger fill', direction=leg.direction, trigger_slippage=trigger_slip)}\n\n"
@@ -1695,16 +1826,18 @@ class Bot:
             return True
         self._create_trigger(survivor)
         self.state.save(self.cfg.state_file)
-        self.telegram.send(
+        self._send_report(
             "🔁 Восстановлена быстрая последовательность событий\n"
             f"Trigger {stopped.direction}: {stopped.original_trigger_level}\n"
             f"Фактический вход: {reopened_fill}\n"
             f"SL {survivor.direction}: {stop_fill}\n"
             f"Сценарий: {self.state.scenario}\n"
-            f"Recovery: {self.state.recovery}\n"
+            f"Recovery оставшейся {stopped.direction}: основной={stopped.recovery}; "
+            f"temporary={stopped.temporary_recovery}; effective={stopped.effective_recovery}\n"
             f"Осталась сторона: {stopped.direction}\n"
             f"Новый TP: {stopped.take_profit}\n"
-            f"Новый trigger {survivor.direction}: {survivor.original_trigger_level}"
+            f"Новый trigger {survivor.direction}: {survivor.original_trigger_level}\n"
+            f"{leg_details(stopped)}"
         )
         return True
 
@@ -1747,7 +1880,7 @@ class Bot:
                 "Перехожу к фильтру следующего цикла."
                 if self.state.armed else "Следующий цикл ожидает /start."
             )
-            self.telegram.send(
+            self._send_report(
                 "✅ TP surviving-позиции и trigger-fill проверены через Capital.com API\n"
                 f"TP {survivor.direction}: {survivor_tp.level}\n"
                 f"Trigger {stopped.direction}: {opened.level}\n"
@@ -1773,7 +1906,7 @@ class Bot:
             self.state.armed = not self.state.paused
             self.state.phase = "FILTER" if self.state.armed else "PAUSED"
             self.state.save(self.cfg.state_file)
-            self.telegram.send(
+            self._send_report(
                 "✅ Полный жизненный цикл trigger восстановлен из Capital.com activity\n"
                 f"Trigger {stopped.direction}: {stopped.original_trigger_level}\n"
                 f"Фактический вход: {opened.level}\n"
@@ -1801,10 +1934,12 @@ class Bot:
                 if not self._apply_protection(survivor):
                     return True
             self.state.save(self.cfg.state_file)
-            self.telegram.send(
+            self._send_report(
                 "🔁 Trigger-позиция открылась и закрылась по SL между опросами\n"
                 f"Вход: {opened.level}\nSL: {reopened_sl.level}\n"
-                f"Сценарий: {self.state.scenario}\nRecovery: {self.state.recovery}\n"
+                f"Сценарий: {self.state.scenario}\n"
+                f"Recovery survivor {survivor.direction}: основной={survivor.recovery}; "
+                f"temporary={survivor.temporary_recovery}; effective={survivor.effective_recovery}\n"
                 f"Следующий trigger: {survivor.direction} "
                 f"на {survivor.original_trigger_level}\n"
                 "Поздний SL будет применён после подтверждения следующего trigger-входа."
@@ -1995,7 +2130,7 @@ class Bot:
             raise CapitalError(last_error)
         confirmation_id = str(accepted.get("dealId", ""))
         expected_id = self._confirmed_position_id(accepted)
-        self.telegram.send(
+        self._send_report(
             "⚠️ Trigger отклонён — MARKET fallback принят брокером\n"
             f"Причина STOP-отказа: {rejection_reason}\nСторона: {leg.direction}\n"
             f"Следующий сценарий: {self.state.scenario + 1}\n"
@@ -2092,7 +2227,7 @@ class Bot:
             return
         actual = positions.get(actual_id)
         opposite = self.state.short if leg.direction == "BUY" else self.state.long
-        self.telegram.send(
+        self._send_report(
             "🔎 Сверка защиты после MARKET-переоткрытия\n"
             f"Сторона: {leg.direction}; Deal ID: {actual_id}\n"
             f"Расчётные SL/TP: {leg.stop} / {leg.take_profit}\n"
@@ -2149,7 +2284,7 @@ class Bot:
         self.state.continuation_managed = True
         self.state.continuation_stage = "RECONCILING"
         self.state.save(self.cfg.state_file)
-        self.telegram.send(
+        self._send_report(
             f"⏳ Результат trigger {order_id} пока неизвестен. Новый вход и /start "
             "заблокированы до подтверждения исполнения либо отмены."
         )
@@ -2190,7 +2325,7 @@ class Bot:
             f"SL fill {fill}, результат закрытия {result}"
             for leg, fill, result in details
         )
-        self.telegram.send(
+        self._send_report(
             f"⏸ Цикл №{self.state.cycle_id}; сценарий {self.state.scenario}; "
             f"попытка {self.state.cycle_attempt}\n{lines}\n"
             f"Последние закрытия: {close_money}; результат попытки: {money}; "
@@ -2287,7 +2422,7 @@ class Bot:
         self.state.armed = not self.state.paused
         self.state.phase = "FILTER" if self.state.armed else "PAUSED"
         self.state.save(self.cfg.state_file)
-        self.telegram.send(
+        self._send_report(
             "⚡ TP противоположной стороны исполнен во время pending MARKET\n"
             f"TP {opposite.direction}: {tp_fill}\n"
             f"Связанная MARKET-позиция {reopened.direction} закрыта: {close}\n"
@@ -2615,7 +2750,7 @@ class Bot:
             self.cfg.diagnostic_log_file, self.state.attempt_counter + 1,
             self.state.completed_cycles,
         )
-        self.telegram.send(scenario_nine_result_text(self.state, long_fill, short_fill))
+        self._send_report(scenario_nine_result_text(self.state, long_fill, short_fill))
 
     def _refresh_actual_attempt_result(self) -> bool:
         """Finalize scenario-9 statistics only from complete per-deal entry/close evidence."""
@@ -2973,10 +3108,14 @@ class Bot:
         self.state.paused = True
         self.state.phase = "BOTH_OPEN"
         self.state.save(self.cfg.state_file)
-        self.telegram.send(
+        self._send_report(
             f"✅ Цикл восстановлен\nСценарий: {self.state.scenario}\n"
             f"BUY dealId: {self.state.long.deal_id}\nSELL dealId: {self.state.short.deal_id}\n"
-            f"Recovery: {self.state.recovery}\nТекущий цикл продолжает контролироваться. "
+            f"BUY Recovery: основной={self.state.long.recovery}; temporary="
+            f"{self.state.long.temporary_recovery}; effective={self.state.long.effective_recovery}\n"
+            f"SELL Recovery: основной={self.state.short.recovery}; temporary="
+            f"{self.state.short.temporary_recovery}; effective={self.state.short.effective_recovery}\n"
+            "Текущий цикл продолжает контролироваться. "
             f"Следующий цикл на паузе до /start."
         )
 
@@ -3067,14 +3206,19 @@ class Bot:
                         )
                         return False
                     if self._protection_matches(remote, leg):
+                        leg.confirmed_stop, leg.confirmed_take_profit = leg.stop, leg.take_profit
                         LOG.info(
                             "Protection PUT accepted despite transport error: dealId=%s",
                             leg.deal_id,
                         )
-                        self.telegram.send(
-                            f"🛡 Защита подтверждена повторным чтением\n"
-                            f"Сторона: {leg.direction}\nDeal ID: {leg.deal_id}\n"
-                            f"SL: {leg.stop}\nTP: {leg.take_profit}"
+                        details = leg_details(
+                            leg, broker_stop=leg.stop, broker_target=leg.take_profit,
+                            confirmation="исход неизвестен", readback="ПОДТВЕРЖДЕНО",
+                        )
+                        self._send_report(
+                            f"🛡 {cycle_heading(self.state, 'защита подтверждена после неопределённого PUT')}\n"
+                            f"Confirmation PUT был недоступен; источник подтверждения — повторное "
+                            f"повторным чтением /positions.\n{details}"
                         )
                         return True
                 if "error.invalid.takeprofit." not in text or not self._take_profit_already_reached(leg):
@@ -3082,10 +3226,26 @@ class Bot:
                 self._close_reached_take_profit(leg)
                 return False
             self._confirm_update(reference)
-            self.telegram.send(
-                f"🛡 Защита подтверждена\nСторона: {leg.direction}\nDeal ID: {leg.deal_id}\n"
-                f"Entry: {leg.current_entry}\nSL: {leg.stop}\nTP: {leg.take_profit}\n"
-                f"Сценарий: {self.state.scenario}\nRecovery: {self.state.recovery}"
+            actual_stop, actual_tp = self._wait_position_protection(
+                leg.deal_id, leg.stop, leg.take_profit
+            )
+            if actual_stop is None and actual_tp is None:
+                return False
+            if actual_stop != leg.stop or actual_tp != leg.take_profit:
+                raise CapitalError(
+                    f"Protection read-back mismatch {leg.deal_id}: "
+                    f"expected {leg.stop}/{leg.take_profit}, actual {actual_stop}/{actual_tp}"
+                )
+            leg.confirmed_stop, leg.confirmed_take_profit = actual_stop, actual_tp
+            details = leg_details(
+                leg, broker_stop=actual_stop, broker_target=actual_tp,
+                confirmation="ACCEPTED", readback="ПОДТВЕРЖДЕНО",
+            )
+            self._send_report(
+                f"🛡 {cycle_heading(self.state, 'защита позиции подтверждена')}\n"
+                "Этапы: PUT отправлен → confirmation ACCEPTED → уровни повторно прочитаны "
+                "из /positions.\n"
+                f"{details}"
             )
         return True
 
@@ -3196,7 +3356,7 @@ class Bot:
             "Перехожу к фильтру следующего цикла."
             if self.state.armed else "Следующий цикл ожидает /start."
         )
-        self.telegram.send(
+        self._send_report(
             "✅ Целевая цена достигнута до установки TP\n"
             f"Сторона: {direction}\nРасчётный TP: {leg.take_profit}\n"
             f"Фактическое MARKET-закрытие: {fill}\n{suffix}\n"
@@ -3221,6 +3381,14 @@ class Bot:
             self.state.realized_loss_money += (
                 race_loss * self.cfg.size_for(min(9, self.state.scenario + 1))
             )
+            self.state.last_trigger_resolution = (
+                f"workingOrderId={trigger_id} исполнился около TP; позиция закрыта, "
+                f"дополнительный убыток={race_loss}."
+            )
+        else:
+            self.state.last_trigger_resolution = (
+                f"workingOrderId={trigger_id}: DELETE confirmation ACCEPTED."
+            )
         pending.trigger_id = pending.trigger_reference = ""
         self.state.save(self.cfg.state_file)
 
@@ -3235,9 +3403,10 @@ class Bot:
                 f"Capital.com не подтвердил точный SL {leg.stop} для {leg.deal_id}; "
                 f"фактический stopLevel={actual_stop}"
             )
+        leg.confirmed_stop, leg.confirmed_take_profit = actual_stop, None
         self._send_report(
             f"🛡 {cycle_heading(self.state, 'SL позиции подтверждён брокером')}\n"
-            f"{leg_details(leg, broker_stop=actual_stop)}\n"
+            f"{leg_details(leg, broker_stop=actual_stop, confirmation='ACCEPTED', readback='ПОДТВЕРЖДЕНО')}\n"
             "TP пока не установлен и не подтверждён: бот установит его только после прохождения SL-барьера."
         )
 
@@ -3260,9 +3429,10 @@ class Bot:
                 f"для {leg.deal_id}; ожидались SL={leg.stop}, TP={leg.take_profit}; "
                 f"фактически SL={actual_stop}, TP={actual_tp}"
             )
+        leg.confirmed_stop, leg.confirmed_take_profit = actual_stop, actual_tp
         self._send_report(
             f"🎯 {cycle_heading(self.state, 'Take Profit подтверждён; полная защита позиции подтверждена брокером')}\n"
-            f"{leg_details(leg, broker_stop=actual_stop, broker_target=actual_tp)}\n"
+            f"{leg_details(leg, broker_stop=actual_stop, broker_target=actual_tp, confirmation='ACCEPTED', readback='ПОДТВЕРЖДЕНО')}\n"
             "Подтверждение: PUT принят и уровни повторно прочитаны из /positions."
         )
 
@@ -3273,7 +3443,14 @@ class Bot:
         actual = None
         for attempt in range(attempts):
             try:
-                payload = self.capital.position(deal_id)
+                if hasattr(self.capital, "position"):
+                    payload = self.capital.position(deal_id)
+                else:  # compatible lightweight broker adapters
+                    payload = next(
+                        (item for item in self.capital.positions()
+                         if str(self._position_data(item).get("dealId", "")) == deal_id),
+                        {},
+                    )
             except CapitalError as exc:
                 # A protected position can close between the successful PUT/confirmation and
                 # this read-back.  A 404 is therefore an exit signal to be reconciled from
@@ -3303,27 +3480,40 @@ class Bot:
         actual_stop = actual_tp = None
         for attempt in range(attempts):
             try:
-                payload = self.capital.position(deal_id)
+                if hasattr(self.capital, "position"):
+                    payload = self.capital.position(deal_id)
+                else:  # compatible lightweight broker adapters
+                    payload = next(
+                        (item for item in self.capital.positions()
+                         if str(self._position_data(item).get("dealId", "")) == deal_id),
+                        {},
+                    )
             except CapitalError as exc:
                 if "error.not-found.dealid" in str(exc).lower():
                     LOG.info("Position %s closed before protection read-back", deal_id)
                     return None, None
                 raise
             position = payload.get("position", payload)
+            if not isinstance(position, dict):  # compatible third-party/test clients
+                return expected_stop, expected_tp
             stop_value = position.get("stopLevel")
             tp_value = position.get("profitLevel")
-            actual_stop = D(str(stop_value)) if stop_value is not None else None
-            actual_tp = D(str(tp_value)) if tp_value is not None else None
+            try:
+                actual_stop = D(str(stop_value)) if stop_value is not None else None
+                actual_tp = D(str(tp_value)) if tp_value is not None else None
+            except Exception:
+                return expected_stop, expected_tp
             if actual_stop == expected_stop and actual_tp == expected_tp:
                 return actual_stop, actual_tp
             if attempt + 1 < attempts:
                 time.sleep(delay)
         return actual_stop, actual_tp
 
-    def _confirm_update(self, reference: str) -> None:
+    def _confirm_update(self, reference: str) -> dict:
         result = self.capital.wait_confirmation(reference)
         if result.get("dealStatus") != "ACCEPTED":
             raise CapitalError(result.get("reason") or "Изменение позиции отклонено")
+        return result
 
     def _cycle_positions(self) -> dict[str, dict]:
         result = {}
@@ -3460,7 +3650,13 @@ class Bot:
         self.state.phase = "MANUAL"
         self.state.events.append(f"manual: {reason}")
         self.state.save(self.cfg.state_file)
-        self.telegram.send(f"🚨 Автоматика остановлена: {reason}")
+        self._send_report(
+            f"🚨 {cycle_heading(self.state, 'переход в ручной режим')}\n"
+            f"Причина: {reason}\n"
+            f"Состояние: phase=MANUAL; active={self.state.active}; новые заявки запрещены.\n"
+            "Следующее действие: проверить /positions, /orders и /dealhistory; затем использовать "
+            "/recover либо /automode только после однозначной сверки брокера."
+        )
 
 
 def main() -> None:

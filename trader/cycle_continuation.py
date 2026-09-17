@@ -248,7 +248,7 @@ class CycleContinuation:
         self.state.save(self.bot.cfg.state_file)
         suffix = ("Перехожу к фильтру нового цикла со сценарием 1."
                   if self.state.armed else "Следующий новый цикл ожидает /start.")
-        self.bot.telegram.send(
+        self.bot._send_report(
             f"✅ Продолженный цикл завершён по TP {direction}. {suffix}\n"
             f"{cycle_result_text(self.state, direction, fill, self.bot.cfg.size)}"
         )
