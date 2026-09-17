@@ -293,8 +293,33 @@ class CapitalClient:
                 return False
             raise
 
-    def activity(self, deal_id: str = "", last_period: int = 86400) -> list[dict]:
-        params = {"lastPeriod": last_period, "detailed": "true"}
+    def activity(
+        self, deal_id: str = "", last_period: int = 86400, *,
+        from_date: str = "", to_date: str = "",
+    ) -> list[dict]:
+        """Return activity for at most one day, as required by Capital.com.
+
+        Explicit UTC boundaries are used for durable jobs older than 24 hours.  Capital.com does
+        not allow combining them with ``lastPeriod`` and limits both forms to a one-day window.
+        """
+        if from_date or to_date:
+            if from_date and to_date:
+                start = datetime.fromisoformat(from_date.replace("Z", "+00:00"))
+                end = datetime.fromisoformat(to_date.replace("Z", "+00:00"))
+                seconds = (end - start).total_seconds()
+                if not 0 < seconds <= 86400:
+                    raise ValueError(
+                        "Capital.com activity from/to range must be positive and at most one day"
+                    )
+            params = {"detailed": "true"}
+            if from_date:
+                params["from"] = from_date
+            if to_date:
+                params["to"] = to_date
+        else:
+            if not 0 < last_period <= 86400:
+                raise ValueError("Capital.com activity lastPeriod must be between 1 and 86400")
+            params = {"lastPeriod": last_period, "detailed": "true"}
         if deal_id:
             params["dealId"] = deal_id
         return self.request("GET", "/history/activity", params=params).get("activities", [])

@@ -9,6 +9,7 @@ from collections import deque
 import logging
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Callable
 
 from .capital import CapitalClient
@@ -96,26 +97,44 @@ class NotificationHistoryWorker:
     def _resolve(client: CapitalClient, job: dict) -> dict | None:
         target = job["waiting"]
         deal_id = str(target["deal_id"])
-        # A restored job can be much older than CapitalClient.activity()'s 24-hour default.
-        # Keep the original attempt boundary in durable job metadata and widen the query with a
-        # margin.  Capital accepts lastPeriod in seconds; callers/tests without that optional
-        # argument remain supported without weakening identity checks.
+        # Capital.com caps /history/activity at one day.  A restored job can be older than that,
+        # so query its saved attempt interval as consecutive, non-expanding UTC windows instead
+        # of sending an invalid lastPeriod > 86400.
         started = float(job.get("search_from_epoch") or job.get("created_at") or time.time())
-        last_period = max(86400, int(time.time() - started) + 3600)
+        saved_end = float(job.get("search_to_epoch") or (started + 86400))
+        ended = max(started + 1, min(saved_end, time.time()))
 
-        def read(specific: bool) -> list[dict]:
+        def formatted(value: float) -> str:
+            return datetime.fromtimestamp(value, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+        def read(specific: bool, window_start: float, window_end: float) -> list[dict]:
             try:
-                return client.activity(deal_id if specific else "", last_period=last_period)
+                return client.activity(
+                    deal_id if specific else "",
+                    from_date=formatted(window_start), to_date=formatted(window_end),
+                )
             except TypeError:  # legacy read-only adapters
-                return client.activity(deal_id) if specific else client.activity()
+                # Compatibility is deliberately limited to a valid recent one-day query.  Old
+                # jobs require the production client's explicit from/to support.
+                try:
+                    return client.activity(deal_id if specific else "", last_period=86400)
+                except TypeError:
+                    return client.activity(deal_id) if specific else client.activity()
 
         # Non-empty deal history may contain only the opening.  Fall back based on absence of a
         # matching confirmed close, never based merely on whether the response list is empty.
-        for activity in (read(True), read(False)):
-            for source in ("SL", "TP"):
-                event = find_close_event(activity, deal_id, source)
-                if event is not None and event.level is not None:
-                    return {"source": source, "fill": str(event.level)}
+        window_start = started
+        while window_start < ended:
+            window_end = min(window_start + 86400, ended)
+            for activity in (
+                read(True, window_start, window_end),
+                read(False, window_start, window_end),
+            ):
+                for source in ("SL", "TP"):
+                    event = find_close_event(activity, deal_id, source)
+                    if event is not None and event.level is not None:
+                        return {"source": source, "fill": str(event.level)}
+            window_start = window_end
         return None
 
 

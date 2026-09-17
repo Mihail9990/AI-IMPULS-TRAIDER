@@ -1,4 +1,5 @@
 from decimal import Decimal as D
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -2858,6 +2859,27 @@ class DiagnosticHistoryTest(unittest.TestCase):
 
 
 class CapitalClientTest(unittest.TestCase):
+    def test_activity_uses_explicit_one_day_utc_range_without_last_period(self):
+        client = CapitalClient(Settings(api_key="key", identifier="id", password="password"))
+        client.request = Mock(return_value={"activities": []})
+        client.activity(
+            "deal-old", from_date="2026-09-14T12:00:00", to_date="2026-09-15T12:00:00"
+        )
+        params = client.request.call_args.kwargs["params"]
+        self.assertEqual(params["from"], "2026-09-14T12:00:00")
+        self.assertEqual(params["to"], "2026-09-15T12:00:00")
+        self.assertEqual(params["dealId"], "deal-old")
+        self.assertNotIn("lastPeriod", params)
+
+    def test_activity_rejects_last_period_over_documented_limit(self):
+        client = CapitalClient(Settings(api_key="key", identifier="id", password="password"))
+        with self.assertRaises(ValueError):
+            client.activity(last_period=86401)
+        with self.assertRaises(ValueError):
+            client.activity(
+                from_date="2026-09-14T00:00:00", to_date="2026-09-15T00:00:01"
+            )
+
     def test_repeated_activity_responses_log_unique_events_once(self):
         client = CapitalClient(Settings(api_key="key", identifier="id", password="password"))
         response = Mock(status_code=200, content=b"yes", text="")
@@ -3677,11 +3699,42 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
             [{"dealId": "buy-old", "source": "TP", "status": "ACCEPTED",
               "type": "POSITION", "level": 105}],
         ]
+        started = time.time() - 3 * 86400
         result = NotificationHistoryWorker._resolve(client, {
-            "waiting": {"deal_id": "buy-old"}, "search_from_epoch": time.time() - 3 * 86400,
+            "waiting": {"deal_id": "buy-old"}, "search_from_epoch": started,
+            "search_to_epoch": started + 86400,
         })
         self.assertEqual(result, {"source": "TP", "fill": "105"})
-        self.assertGreaterEqual(client.activity.call_args_list[0].kwargs["last_period"], 3 * 86400)
+        first = client.activity.call_args_list[0]
+        self.assertIn("from_date", first.kwargs)
+        self.assertIn("to_date", first.kwargs)
+        self.assertNotIn("last_period", first.kwargs)
+        start_value = datetime.fromisoformat(first.kwargs["from_date"]).replace(tzinfo=timezone.utc)
+        end_value = datetime.fromisoformat(first.kwargs["to_date"]).replace(tzinfo=timezone.utc)
+        self.assertLessEqual((end_value - start_value).total_seconds(), 86400)
+
+    def test_old_history_job_splits_saved_range_into_one_day_windows(self):
+        calls = []
+
+        class HistoryClient:
+            def activity(self, deal_id="", last_period=86400, *, from_date="", to_date=""):
+                calls.append((deal_id, from_date, to_date, last_period))
+                if len(calls) == 6:
+                    return [{"dealId": "old-deal", "source": "SL", "status": "ACCEPTED",
+                             "type": "POSITION", "level": 97}]
+                return []
+
+        started = time.time() - 5 * 86400
+        result = NotificationHistoryWorker._resolve(HistoryClient(), {
+            "waiting": {"deal_id": "old-deal"}, "search_from_epoch": started,
+            "search_to_epoch": started + 3 * 86400,
+        })
+        self.assertEqual(result, {"source": "SL", "fill": "97"})
+        self.assertEqual(len(calls), 6)
+        for _, start_text, end_text, _ in calls:
+            start_value = datetime.fromisoformat(start_text).replace(tzinfo=timezone.utc)
+            end_value = datetime.fromisoformat(end_text).replace(tzinfo=timezone.utc)
+            self.assertLessEqual((end_value - start_value).total_seconds(), 86400)
 
     def test_late_tp_report_uses_historical_tp_and_current_state(self):
         bot = EntryRetryTest().make_bot()
