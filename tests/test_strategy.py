@@ -26,7 +26,9 @@ from trader.events import (
 )
 from trader.execution import ExecutionPolicy, is_crossed_level_rejection, trigger_level_passed
 from trader.model import CycleState, Leg, stop_slippage, target_for, trigger_slippage
-from trader.notifications import NotificationHistoryWorker, split_report
+from trader.notifications import (
+    NotificationHistoryWorker, migrate_notification_jobs, split_report,
+)
 from trader.reconcile import RemoteSnapshot
 from trader.reporting import cycle_result_text, leg_details, pnl_text, recovery_change_text, recovery_snapshot
 from trader.streaming import PriceWatch, QuoteStream
@@ -3712,6 +3714,140 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
         start_value = datetime.fromisoformat(first.kwargs["from_date"]).replace(tzinfo=timezone.utc)
         end_value = datetime.fromisoformat(first.kwargs["to_date"]).replace(tzinfo=timezone.utc)
         self.assertLessEqual((end_value - start_value).total_seconds(), 86400)
+
+    def test_specific_sl_returns_without_global_request(self):
+        client = Mock()
+        client.activity.return_value = [{
+            "dealId": "wanted", "source": "SL", "status": "ACCEPTED", "level": 99,
+        }]
+        result = NotificationHistoryWorker._resolve(client, {
+            "waiting": {"deal_id": "wanted"}, "search_from_epoch": 1000,
+            "search_to_epoch": 2000,
+        })
+        self.assertEqual(result, {"source": "SL", "fill": "99"})
+        client.activity.assert_called_once()
+        self.assertEqual(client.activity.call_args.args[0], "wanted")
+
+    def test_specific_tp_returns_even_if_global_would_fail(self):
+        client = Mock()
+
+        def activity(deal_id="", **kwargs):
+            if not deal_id:
+                raise CapitalError("global unavailable")
+            return [{"dealId": "wanted", "source": "TP", "status": "ACCEPTED",
+                     "level": 103}]
+
+        client.activity.side_effect = activity
+        result = NotificationHistoryWorker._resolve(client, {
+            "waiting": {"deal_id": "wanted"}, "search_from_epoch": 1000,
+            "search_to_epoch": 2000,
+        })
+        self.assertEqual(result, {"source": "TP", "fill": "103"})
+        self.assertEqual(client.activity.call_count, 1)
+
+    def test_foreign_deal_close_is_not_accepted(self):
+        client = Mock()
+        client.activity.return_value = [{
+            "dealId": "foreign", "source": "SL", "status": "ACCEPTED", "level": 99,
+        }]
+        result = NotificationHistoryWorker._resolve(client, {
+            "waiting": {"deal_id": "wanted"}, "search_from_epoch": 1000,
+            "search_to_epoch": 2000,
+        })
+        self.assertIsNone(result)
+        self.assertEqual(client.activity.call_count, 2)
+
+    def test_legacy_job_without_dates_uses_frozen_last_day_and_finds_recent_sl(self):
+        now = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc).timestamp()
+        event_time = now - 60
+        calls = []
+
+        class FilteringClient:
+            def activity(self, deal_id="", **kwargs):
+                calls.append((deal_id, kwargs))
+                start = datetime.fromisoformat(kwargs["from_date"]).replace(tzinfo=timezone.utc).timestamp()
+                end = datetime.fromisoformat(kwargs["to_date"]).replace(tzinfo=timezone.utc).timestamp()
+                if deal_id == "legacy" and start <= event_time <= end:
+                    return [{"dealId": "legacy", "source": "SL", "status": "ACCEPTED",
+                             "level": 98, "dateUTC": "2026-09-17T11:59:00"}]
+                return []
+
+        job = {"waiting": {"deal_id": "legacy"}}
+        with patch("trader.notifications.time.time", return_value=now):
+            result = NotificationHistoryWorker._resolve(FilteringClient(), job)
+        self.assertEqual(result, {"source": "SL", "fill": "98"})
+        self.assertEqual(job["search_from_epoch"], now - 86400)
+        self.assertEqual(job["search_to_epoch"], now)
+        self.assertTrue(job["history_range_uncertain"])
+        self.assertEqual(len(calls), 1)
+
+    def test_legacy_job_migration_survives_load_save_and_preserves_known_bounds(self):
+        now = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc).timestamp()
+        legacy = {"key": "legacy", "waiting": {"deal_id": "old"}, "closed": {}}
+        known = {"key": "known", "waiting": {"deal_id": "dated"},
+                 "search_from_epoch": 1234.0, "search_to_epoch": 5678.0,
+                 "search_range_source": "saved_attempt"}
+        state = CycleState(pending_notification_jobs=[legacy, known])
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "state.json")
+            state.save(path)
+            loaded = CycleState.load(path)
+            self.assertTrue(migrate_notification_jobs(
+                loaded.pending_notification_jobs, now=now
+            ))
+            loaded.save(path)
+            restored = CycleState.load(path)
+        job = restored.pending_notification_jobs[0]
+        self.assertEqual(job["search_from_epoch"], now - 86400)
+        self.assertEqual(job["search_to_epoch"], now)
+        self.assertEqual(job["search_range_source"], "legacy_fallback_last_24h")
+        self.assertFalse(migrate_notification_jobs([job], now=now + 9999))
+        self.assertEqual(job["search_from_epoch"], now - 86400)
+        known_restored = restored.pending_notification_jobs[1]
+        self.assertEqual(known_restored["search_from_epoch"], 1234.0)
+        self.assertEqual(known_restored["search_to_epoch"], 5678.0)
+
+    def test_legacy_job_uses_trustworthy_snapshot_timestamp_not_migration_time(self):
+        event_time = datetime(2026, 9, 10, 8, 30, tzinfo=timezone.utc).timestamp()
+        migration_time = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc).timestamp()
+        job = {
+            "waiting": {"deal_id": "old"},
+            "closed": {"deal_id": "known", "dateUTC": "2026-09-10T08:30:00Z"},
+        }
+        self.assertTrue(migrate_notification_jobs([job], now=migration_time))
+        self.assertEqual(job["search_from_epoch"], event_time - 3600)
+        self.assertEqual(job["search_to_epoch"], event_time + 3600)
+        self.assertEqual(job["search_range_source"], "attempt_snapshot")
+        self.assertFalse(job["history_range_uncertain"])
+
+    def test_uncertain_range_stays_pending_and_late_publication_is_found(self):
+        now = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc).timestamp()
+        events = []
+
+        class Client:
+            def activity(self, deal_id="", **kwargs):
+                return list(events)
+
+        job = {"waiting": {"deal_id": "late"}}
+        with patch("trader.notifications.time.time", return_value=now):
+            self.assertIsNone(NotificationHistoryWorker._resolve(Client(), job))
+            frozen = (job["search_from_epoch"], job["search_to_epoch"])
+            events.append({"dealId": "late", "source": "SL", "status": "ACCEPTED",
+                           "level": 97})
+            self.assertEqual(
+                NotificationHistoryWorker._resolve(Client(), job),
+                {"source": "SL", "fill": "97"},
+            )
+        self.assertEqual((job["search_from_epoch"], job["search_to_epoch"]), frozen)
+
+    def test_history_api_error_does_not_invent_a_result(self):
+        client = Mock()
+        client.activity.side_effect = CapitalError("history unavailable")
+        job = {"waiting": {"deal_id": "late"}}
+        with patch("trader.notifications.time.time", return_value=100000):
+            with self.assertRaises(CapitalError):
+                NotificationHistoryWorker._resolve(client, job)
+        self.assertTrue(job["history_range_uncertain"])
 
     def test_old_history_job_splits_saved_range_into_one_day_windows(self):
         calls = []

@@ -20,6 +20,55 @@ from .events import find_close_event
 LOG = logging.getLogger(__name__)
 
 
+def migrate_notification_jobs(jobs: list[dict], *, now: float | None = None) -> bool:
+    """Add durable search bounds to pre-range notification jobs in the main state owner.
+
+    Legacy jobs did not contain time metadata.  A timestamp embedded in their immutable attempt
+    snapshot is preferred.  Otherwise a frozen last-24-hours fallback is recorded explicitly as
+    uncertain; migration time is never represented as the original attempt time.
+    """
+    current = time.time() if now is None else now
+    changed = False
+
+    def timestamp(value) -> float | None:
+        if isinstance(value, (int, float)):
+            return float(value)
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError):
+            return None
+
+    for job in jobs:
+        if job.get("search_from_epoch") is not None and job.get("search_to_epoch") is not None:
+            continue
+        candidates = [
+            timestamp(job.get(name))
+            for name in ("attempt_started_at", "attempt_epoch", "event_epoch")
+        ]
+        for snapshot_name in ("closed", "waiting"):
+            snapshot = job.get(snapshot_name, {})
+            if isinstance(snapshot, dict):
+                candidates.extend(timestamp(snapshot.get(name)) for name in (
+                    "dateUTC", "createdDateUTC", "timestamp", "event_epoch",
+                ))
+        known = [value for value in candidates if value is not None]
+        if known:
+            job["search_from_epoch"] = min(known) - 3600
+            job["search_to_epoch"] = max(known) + 3600
+            job["search_range_source"] = "attempt_snapshot"
+            job["history_range_uncertain"] = False
+        else:
+            job["search_from_epoch"] = current - 86400
+            job["search_to_epoch"] = current
+            job["search_range_source"] = "legacy_fallback_last_24h"
+            job["history_range_uncertain"] = True
+            job["range_migrated_at"] = current
+        changed = True
+    return changed
+
+
 class NotificationHistoryWorker:
     def __init__(
         self, cfg: Settings, *, client_factory: Callable[[Settings], CapitalClient] = CapitalClient,
@@ -100,8 +149,12 @@ class NotificationHistoryWorker:
         # Capital.com caps /history/activity at one day.  A restored job can be older than that,
         # so query its saved attempt interval as consecutive, non-expanding UTC windows instead
         # of sending an invalid lastPeriod > 86400.
-        started = float(job.get("search_from_epoch") or job.get("created_at") or time.time())
-        saved_end = float(job.get("search_to_epoch") or (started + 86400))
+        if job.get("search_from_epoch") is None or job.get("search_to_epoch") is None:
+            # Direct callers and legacy queues are safe even before the main owner persists the
+            # migration.  The worker mutates only its private job copy, never CycleState.
+            migrate_notification_jobs([job])
+        started = float(job["search_from_epoch"])
+        saved_end = float(job["search_to_epoch"])
         ended = max(started + 1, min(saved_end, time.time()))
 
         def formatted(value: float) -> str:
@@ -123,17 +176,25 @@ class NotificationHistoryWorker:
 
         # Non-empty deal history may contain only the opening.  Fall back based on absence of a
         # matching confirmed close, never based merely on whether the response list is empty.
+        def resolve(activity: list[dict]) -> dict | None:
+            for source in ("SL", "TP"):
+                event = find_close_event(activity, deal_id, source)
+                if event is not None and event.level is not None:
+                    return {"source": source, "fill": str(event.level)}
+            return None
+
         window_start = started
         while window_start < ended:
             window_end = min(window_start + 86400, ended)
-            for activity in (
-                read(True, window_start, window_end),
-                read(False, window_start, window_end),
-            ):
-                for source in ("SL", "TP"):
-                    event = find_close_event(activity, deal_id, source)
-                    if event is not None and event.level is not None:
-                        return {"source": source, "fill": str(event.level)}
+            # Parse the specific response before issuing a broader request.  Besides avoiding an
+            # unnecessary API call, this preserves an already-proved close if global history is
+            # temporarily unavailable.
+            result = resolve(read(True, window_start, window_end))
+            if result is not None:
+                return result
+            result = resolve(read(False, window_start, window_end))
+            if result is not None:
+                return result
             window_start = window_end
         return None
 

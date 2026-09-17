@@ -27,7 +27,7 @@ from .events import (
 )
 from .execution import ExecutionPolicy, is_crossed_level_rejection, trigger_level_passed
 from .model import CycleState, Leg, stop_for, target_for
-from .notifications import NotificationHistoryWorker, split_report
+from .notifications import NotificationHistoryWorker, migrate_notification_jobs, split_report
 from .reconcile import RemoteSnapshot
 from .reporting import (
     cycle_heading, cycle_result_text, leg_details, pnl_text, recovery_change_text,
@@ -45,6 +45,10 @@ class Bot:
     def __init__(self, cfg: Settings):
         self.cfg = cfg
         self.state = CycleState.load(cfg.state_file)
+        if migrate_notification_jobs(self.state.pending_notification_jobs):
+            # Only the main Bot thread owns and persists CycleState.  The history worker receives
+            # copies and never writes bot_state.json.
+            self.state.save(cfg.state_file)
         self.strategy = Strategy(cfg, self.state)
         self.capital = CapitalClient(cfg)
         self.quotes = QuoteStream(
