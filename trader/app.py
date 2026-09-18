@@ -1068,6 +1068,8 @@ class Bot:
                     )
                 if position is not None:
                     leg.deal_id = str(position["dealId"])
+                    if position.get("size") is not None:
+                        leg.size = D(str(position["size"]))
                     fill = position.get("level")
                     if fill is None:
                         return "MARKET-позиция найдена без фактической цены входа"
@@ -1111,6 +1113,8 @@ class Bot:
                 if position is not None and position.get("level") is not None:
                     leg.deal_reference = reference
                     leg.deal_id = str(position["dealId"])
+                    if position.get("size") is not None:
+                        leg.size = D(str(position["size"]))
                     leg.current_entry = leg.original_trigger_level = D(str(position["level"]))
                     leg.stop = stop_for(leg.direction, leg.current_entry, leg.stop_distance)
                     self._clear_pending_market(leg)
@@ -1139,6 +1143,8 @@ class Bot:
                     epic=self.cfg.epic,
                 )
                 leg.deal_id = str(position["dealId"])
+                if position.get("size") is not None:
+                    leg.size = D(str(position["size"]))
                 fill = position.get("level", confirmation.get("level"))
                 if fill is None:
                     raise CapitalError("Позиция появилась без фактической цены входа")
@@ -1881,7 +1887,11 @@ class Bot:
             previous_scenario = self.state.scenario
             trigger_level = leg.original_trigger_level
             executed_trigger_id = leg.trigger_id
-            self.strategy.reopened(leg.direction, fill, str(candidate["dealId"]), f"reopen:{candidate['dealId']}")
+            actual_size = D(str(candidate["size"])) if candidate.get("size") is not None else None
+            self.strategy.reopened(
+                leg.direction, fill, str(candidate["dealId"]),
+                f"reopen:{candidate['dealId']}", actual_size=actual_size,
+            )
             if self.state.scenario == self.cfg.max_scenarios:
                 self._enter_manual_nine()
             else:
@@ -1940,6 +1950,7 @@ class Bot:
             reopened_fill,
             reopened_id,
             f"reopen:{reopened_id}",
+            actual_size=(D(str(candidate["size"])) if candidate.get("size") is not None else None),
         )
         stopped.deal_reference = str(candidate.get("dealReference") or stopped.deal_reference)
         self.strategy.stopped(
@@ -2292,7 +2303,8 @@ class Bot:
         previous_scenario = self.state.scenario
         trigger_level = leg.original_trigger_level
         self.strategy.reopened(
-            leg.direction, fill, actual_id, f"reopen:{actual_id}"
+            leg.direction, fill, actual_id, f"reopen:{actual_id}",
+            actual_size=(D(str(position["size"])) if position.get("size") is not None else None),
         )
         self._clear_pending_market(leg)
         leg.deal_reference = reference

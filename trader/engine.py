@@ -211,7 +211,8 @@ class Strategy:
             raise RuntimeError(f"No unaccounted pending D snapshot for {direction}")
         return candidates[-1]
 
-    def reopened(self, direction: str, fill: Decimal, deal_id: str = "", event_id: str = "") -> None:
+    def reopened(self, direction: str, fill: Decimal, deal_id: str = "", event_id: str = "",
+                 actual_size: Decimal | None = None) -> None:
         if self.state.scenario >= self.cfg.max_scenarios:
             raise RuntimeError("Scenario limit reached")
         leg = self._leg(direction)
@@ -219,7 +220,9 @@ class Strategy:
             return
         pending = self._pending_for(direction)
         next_scenario = self.state.scenario + 1
-        new_size, new_distance = self.cfg.size_for(next_scenario), self.cfg.stop_for(next_scenario)
+        requested_size = self.cfg.size_for(next_scenario)
+        new_size = actual_size if actual_size is not None else requested_size
+        new_distance = self.cfg.stop_for(next_scenario)
         if new_size <= 0:
             raise RuntimeError("Reopened position size is unknown")
         slip_distance = trigger_slippage(direction, leg.original_trigger_level, fill)
