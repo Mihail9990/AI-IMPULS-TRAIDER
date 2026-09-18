@@ -46,8 +46,8 @@ def leg_details(
               f"ЗАКРЫТА; Trigger={leg.trigger_id}" if leg.trigger_id else "ЗАКРЫТА")
     confirmation = confirmation if confirmation is not None else (leg.protection_confirmation or "не отправлено")
     readback = readback if readback is not None else (leg.protection_readback or "не выполнено")
-    distance = (general_recovery / leg.size if general_recovery is not None and leg.size > 0
-                else leg.recovery if leg.size > 0 else None)
+    distance = (general_recovery / leg.size
+                if general_recovery is not None and leg.size > 0 else "НЕИЗВЕСТНО")
     levels = (f"  расчётные SL/TP={leg.stop} / {leg.take_profit}\n"
               f"  отправленные SL/TP={leg.protection_sent_stop} / {leg.protection_sent_take_profit}\n"
               f"  confirmation={confirmation}; принятые SL/TP={leg.confirmation_stop} / {leg.confirmation_take_profit}\n"
@@ -60,7 +60,8 @@ def leg_details(
         f"{leg.direction}: {status}\n"
         f"  dealId={leg.deal_id or 'не подтверждён'}; size={leg.size}; "
         f"current_entry={leg.current_entry}; original_trigger={leg.original_trigger_level}\n"
-        f"  действующий D={leg.stop_distance}; recovery_distance={distance}\n{levels}\n"
+        f"  desired D={leg.stop_distance}; broker-confirmed D={leg.confirmed_stop_distance}; "
+        f"recovery_distance={distance}\n{levels}\n"
         f"  формула TP: entry {'+' if leg.direction == 'BUY' else '−'} D "
         f"{'+' if leg.direction == 'BUY' else '−'} GENERAL_RECOVERY/size"
     )

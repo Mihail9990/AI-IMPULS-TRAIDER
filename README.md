@@ -35,12 +35,25 @@ GENERAL_RECOVERY = abs(BUY_fill - SELL_fill) * initial_position_size + target_va
 росте объёма. Повторная continuation-пара добавляет только свой фактический spread × фактический
 размер пары.
 
+`begin_continuation()` создаёт только projected legs от текущих BID/ASK и не меняет денежный
+баланс. Компонент continuation spread появляется лишь после broker-confirmed fill и size обеих
+сторон. Он привязан к `cycle_id/cycle_attempt`, поэтому повторная сверка или restart не начисляют
+его второй раз. Если фактические BUY/SELL sizes различаются, окончательной формулы spread для
+такой пары нет: GENERAL_RECOVERY остаётся прежним, позиции сохраняются под защитой, а бот
+переходит в безопасную сверку/manual.
+
 При подтверждённом SL сразу добавляется только
 `abs(confirmed_SL - close_fill) * closed_size`. Одновременно сохраняется неизменяемый снимок
 закрытой сделки и `pending_D = действовавший D * closed_size`. Pending D переносится ровно один
 раз после подтверждённого Trigger либо эквивалентного MARKET fallback; тогда же добавляется
 `abs(original_trigger_level - actual_reentry_fill) * new_size`. Создание ордера, пересечение цены
 и неопределённый POST баланс не меняют.
+
+Desired `stop_distance` и рассчитанный SL не считаются действующей защитой сразу после локального
+перехода Scenario. Для снимка закрытия используется последний SL, подтверждённый через PUT
+confirmation либо `/positions` read-back; pending D вычисляется как расстояние этого уровня от
+фактического `current_entry`, умноженное на фактический size. Поэтому SL по старому D во время
+неподтверждённого PUT не переносит новый desired D.
 
 После double-SL сначала разрешается судьба всех Trigger/MARKET. Только после доказанного flat
 все ещё неучтённые pending D этой попытки переносятся в GENERAL_RECOVERY, затем сохраняются

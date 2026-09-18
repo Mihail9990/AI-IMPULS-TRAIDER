@@ -109,6 +109,9 @@ class Bot:
                 self.state.completed_cycles,
             )
 
+    def _leg_details(self, leg: Leg, **kwargs) -> str:
+        return leg_details(leg, general_recovery=self.state.general_recovery, **kwargs)
+
     def _get_continuation(self) -> CycleContinuation:
         controller = getattr(self, "continuation", None)
         if controller is None:
@@ -781,12 +784,18 @@ class Bot:
                 return
             opened.append(leg)
         assert self.state.long and self.state.short
-        if continuation:
-            self._get_continuation().confirm_pair_fills()
-        else:
-            self.strategy.confirm_initial_fills(
-                self.state.long.current_entry, self.state.short.current_entry
-            )
+        try:
+            if continuation:
+                self._get_continuation().confirm_pair_fills()
+            else:
+                self.strategy.confirm_initial_fills(
+                    self.state.long.current_entry, self.state.short.current_entry
+                )
+        except RuntimeError as exc:
+            # Both real positions remain protected by their MARKET stopDistance. An asymmetric
+            # or insufficiently confirmed pair has no user-defined monetary spread formula.
+            self._manual(f"Пара требует безопасной сверки; Recovery не изменён: {exc}")
+            return
         # The first MARKET leg can hit its broker-side stop in the very small window between
         # opening the opposite leg and replacing the provisional distance-based protection with
         # the exact strategy levels.  That is a real scenario-1 stop, not a broken hedge.  Check
@@ -814,17 +823,32 @@ class Bot:
             self._manual(f"Обе стороны открыты, но точные SL/TP не подтверждены: {exc}")
             return
         self.state.save(self.cfg.state_file)
+        if continuation:
+            pair_key = f"continuation-pair:{self.state.cycle_id}:{self.state.cycle_attempt}"
+            component = next(
+                item for item in self.state.recovery_events if item.get("key") == pair_key
+            )
+            recovery_summary = (
+                f"GENERAL_RECOVERY: {component['before']} + подтверждённый continuation "
+                f"spread {component['spread_distance']} × {component['size']} = "
+                f"{self.state.general_recovery}"
+            )
+        else:
+            recovery_summary = (
+                f"GENERAL_RECOVERY={self.state.entry_spread} × "
+                f"{self.state.initial_position_size} (spread value) + "
+                f"{self.state.target_value} (зафиксированная денежная цель) "
+                f"= {self.state.general_recovery}"
+            )
         self._send_report(
             f"✅ {cycle_heading(self.state, 'повторная пара подтверждена' if continuation else 'начальная пара подтверждена')}\n"
             "Подтверждение: обе MARKET-позиции имеют broker dealId; точные SL и TP "
             "установлены и прочитаны обратно из Capital.com.\n"
             f"Фактический spread=|{self.state.long.current_entry} − "
             f"{self.state.short.current_entry}|={self.state.entry_spread}\n"
-            f"GENERAL_RECOVERY={self.state.entry_spread} × {self.state.initial_position_size} "
-            f"(spread value) + {self.state.target_value} (зафиксированная денежная цель) "
-            f"= {self.state.general_recovery}\n\n"
-            f"{leg_details(self.state.long, broker_stop=self.state.long.stop, broker_target=self.state.long.take_profit)}\n\n"
-            f"{leg_details(self.state.short, broker_stop=self.state.short.stop, broker_target=self.state.short.take_profit)}\n\n"
+            f"{recovery_summary}\n\n"
+            f"{self._leg_details(self.state.long, broker_stop=self.state.long.stop, broker_target=self.state.long.take_profit)}\n\n"
+            f"{self._leg_details(self.state.short, broker_stop=self.state.short.stop, broker_target=self.state.short.take_profit)}\n\n"
             "Следующее действие: сопровождать обе позиции; изменение сценария возможно только "
             "после подтверждённого исполнения Trigger."
         )
@@ -891,7 +915,7 @@ class Bot:
             f"Новый TP: {survivor.take_profit}\n"
             f"Trigger {closed.direction}: {closed.original_trigger_level}\n"
             "Автоматика продолжает сценарий 1.\n"
-            f"Текущее состояние survivor:\n{leg_details(survivor)}"
+            f"Текущее состояние survivor:\n{self._leg_details(survivor)}"
         )
         return True
 
@@ -1070,10 +1094,12 @@ class Bot:
                     leg.deal_id = str(position["dealId"])
                     if position.get("size") is not None:
                         leg.size = D(str(position["size"]))
+                        leg.size_confirmation = "positions"
                     fill = position.get("level")
                     if fill is None:
                         return "MARKET-позиция найдена без фактической цены входа"
                     leg.current_entry = leg.original_trigger_level = D(str(fill))
+                    leg.entry_confirmation = "positions"
                     leg.stop = stop_for(leg.direction, leg.current_entry, leg.stop_distance)
                     self._clear_pending_market(leg)
                     self._send_report(
@@ -1115,7 +1141,9 @@ class Bot:
                     leg.deal_id = str(position["dealId"])
                     if position.get("size") is not None:
                         leg.size = D(str(position["size"]))
+                        leg.size_confirmation = "positions"
                     leg.current_entry = leg.original_trigger_level = D(str(position["level"]))
+                    leg.entry_confirmation = "positions"
                     leg.stop = stop_for(leg.direction, leg.current_entry, leg.stop_distance)
                     self._clear_pending_market(leg)
                     return None
@@ -1137,6 +1165,10 @@ class Bot:
                 leg.current_entry = D(str(confirmation["level"]))
                 leg.original_trigger_level = leg.current_entry
                 leg.stop = stop_for(leg.direction, leg.current_entry, leg.stop_distance)
+                leg.entry_confirmation = "confirmation"
+            if confirmation.get("size") is not None:
+                leg.size = D(str(confirmation["size"]))
+                leg.size_confirmation = "confirmation"
             try:
                 position = self.capital.wait_position(
                     leg.deal_id, reference, leg.direction, excluded_ids=preexisting_ids,
@@ -1145,10 +1177,12 @@ class Bot:
                 leg.deal_id = str(position["dealId"])
                 if position.get("size") is not None:
                     leg.size = D(str(position["size"]))
+                    leg.size_confirmation = "positions"
                 fill = position.get("level", confirmation.get("level"))
                 if fill is None:
                     raise CapitalError("Позиция появилась без фактической цены входа")
                 leg.current_entry = D(str(fill))
+                leg.entry_confirmation = "positions"
                 self._clear_pending_market(leg)
                 both_confirmed = all(
                     candidate and candidate.deal_id
@@ -1611,7 +1645,7 @@ class Bot:
             f"Результат позиции={result_formula} = {-max(D('0'), loss_points) * lost.size}.\n"
             f"Сценарий остаётся {self.state.scenario}; SL сам сценарий не увеличивает.\n\n"
             f"{recovery_change_text(self.state, recovery_before, event='пересчёт после SL', direction=lost.direction, stop_slippage=slippage)}\n\n"
-            f"Состояние surviving-стороны:\n{leg_details(survivor)}\n\n"
+            f"Состояние surviving-стороны:\n{self._leg_details(survivor)}\n\n"
             f"План: сначала подтвердить новый TP {survivor.direction}, затем создать Trigger "
             f"{stopped.direction} на сохранённом уровне {stopped.original_trigger_level}. "
             "До broker confirmation Trigger считается только запланированным."
@@ -1701,8 +1735,12 @@ class Bot:
         if position is None:
             return True
         leg.deal_id = str(position["dealId"])
+        if position.get("size") is not None:
+            leg.size = D(str(position["size"]))
+            leg.size_confirmation = "positions"
         if position.get("level") is not None:
             leg.current_entry = leg.original_trigger_level = D(str(position["level"]))
+            leg.entry_confirmation = "positions"
             leg.stop = stop_for(leg.direction, leg.current_entry, leg.stop_distance)
         current = self._cycle_positions()
         opposite = self.state.short if leg.direction == "BUY" else self.state.long
@@ -1854,6 +1892,7 @@ class Bot:
             or leg.protection_readback != "ПОДТВЕРЖДЕНО"
         ):
             leg.confirmed_stop, leg.confirmed_take_profit = actual_stop, actual_target
+            leg.confirmed_stop_distance = abs(leg.current_entry - actual_stop)
             leg.protection_readback = "ПОДТВЕРЖДЕНО"
             # A GET proves broker state, not that an older/newer PUT confirmation belongs to it.
             if (leg.protection_sent_stop != leg.stop
@@ -1976,7 +2015,7 @@ class Bot:
             f"Осталась сторона: {stopped.direction}\n"
             f"Новый TP: {stopped.take_profit}\n"
             f"Новый trigger {survivor.direction}: {survivor.original_trigger_level}\n"
-            f"{leg_details(stopped)}"
+            f"{self._leg_details(stopped)}"
         )
         return True
 
@@ -2146,7 +2185,7 @@ class Bot:
                         "actual fill, Trigger slippage, итоговый Recovery и точная защита будут "
                         "уточнены только после исполнения.\n"
                         f"Текущее состояние другой стороны:\n"
-                        f"{leg_details(self.state.short if leg.direction == 'BUY' else self.state.long)}"
+                        f"{self._leg_details(self.state.short if leg.direction == 'BUY' else self.state.long)}"
                     )
                     return
                 last_error = result.get("reason") or last_error
@@ -3394,11 +3433,12 @@ class Bot:
                     self.state.save(self.cfg.state_file)
                     return False
                 leg.confirmed_stop, leg.confirmed_take_profit = actual_stop, actual_tp
+                leg.confirmed_stop_distance = abs(leg.current_entry - actual_stop)
                 leg.protection_readback = "ПОДТВЕРЖДЕНО"
                 self.state.save(self.cfg.state_file)
                 self._send_report(
                     f"🛡 {cycle_heading(self.state, 'отложенная проверка защиты завершена')}\n"
-                    f"{leg_details(leg)}\nПовторён только GET /positions; PUT не отправлялся."
+                    f"{self._leg_details(leg)}\nПовторён только GET /positions; PUT не отправлялся."
                 )
                 return True
             try:
@@ -3441,13 +3481,14 @@ class Bot:
                         return False
                     if self._protection_matches(remote, leg):
                         leg.confirmed_stop, leg.confirmed_take_profit = leg.stop, leg.take_profit
+                        leg.confirmed_stop_distance = abs(leg.current_entry - leg.stop)
                         leg.protection_confirmation = "исход неизвестен"
                         leg.protection_readback = "ПОДТВЕРЖДЕНО"
                         LOG.info(
                             "Protection PUT accepted despite transport error: dealId=%s",
                             leg.deal_id,
                         )
-                        details = leg_details(
+                        details = self._leg_details(
                             leg, broker_stop=leg.stop, broker_target=leg.take_profit,
                             confirmation="исход неизвестен", readback="ПОДТВЕРЖДЕНО",
                         )
@@ -3483,9 +3524,10 @@ class Bot:
                     f"expected {leg.stop}/{leg.take_profit}, actual {actual_stop}/{actual_tp}"
                 )
             leg.confirmed_stop, leg.confirmed_take_profit = actual_stop, actual_tp
+            leg.confirmed_stop_distance = abs(leg.current_entry - actual_stop)
             leg.protection_readback = "ПОДТВЕРЖДЕНО"
             self.state.save(self.cfg.state_file)
-            details = leg_details(
+            details = self._leg_details(
                 leg, broker_stop=actual_stop, broker_target=actual_tp,
                 confirmation="ACCEPTED", readback="ПОДТВЕРЖДЕНО",
             )
@@ -3659,11 +3701,12 @@ class Bot:
                 f"фактический stopLevel={actual_stop}"
             )
         leg.confirmed_stop, leg.confirmed_take_profit = actual_stop, None
+        leg.confirmed_stop_distance = abs(leg.current_entry - actual_stop)
         leg.protection_readback = "ПОДТВЕРЖДЕНО"
         self.state.save(self.cfg.state_file)
         self._send_report(
             f"🛡 {cycle_heading(self.state, 'SL позиции подтверждён брокером')}\n"
-            f"{leg_details(leg, broker_stop=actual_stop, confirmation='ACCEPTED', readback='ПОДТВЕРЖДЕНО')}\n"
+            f"{self._leg_details(leg, broker_stop=actual_stop, confirmation='ACCEPTED', readback='ПОДТВЕРЖДЕНО')}\n"
             "TP пока не установлен и не подтверждён: бот установит его только после прохождения SL-барьера."
         )
 
@@ -3695,11 +3738,12 @@ class Bot:
                 f"фактически SL={actual_stop}, TP={actual_tp}"
             )
         leg.confirmed_stop, leg.confirmed_take_profit = actual_stop, actual_tp
+        leg.confirmed_stop_distance = abs(leg.current_entry - actual_stop)
         leg.protection_readback = "ПОДТВЕРЖДЕНО"
         self.state.save(self.cfg.state_file)
         self._send_report(
             f"🎯 {cycle_heading(self.state, 'Take Profit подтверждён; полная защита позиции подтверждена брокером')}\n"
-            f"{leg_details(leg, broker_stop=actual_stop, broker_target=actual_tp, confirmation='ACCEPTED', readback='ПОДТВЕРЖДЕНО')}\n"
+            f"{self._leg_details(leg, broker_stop=actual_stop, broker_target=actual_tp, confirmation='ACCEPTED', readback='ПОДТВЕРЖДЕНО')}\n"
             "Подтверждение: PUT принят и уровни повторно прочитаны из /positions."
         )
 

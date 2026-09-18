@@ -29,6 +29,10 @@ general_recovery = target_value + spread_value
 
 Предварительные котировки заменяются фактическими fills согласованно; повтор того же подтверждения
 ничего не добавляет. `/profit200` влияет на `cycle_target_profit` только при начале цикла.
+Окончательный `initial_position_size` берётся из подтверждённой пары. Если Capital вернул размер
+12 вместо requested 10, target и spread умножаются на 12. Неравные фактические sizes двух сторон
+не имеют приблизительной формулы: денежный компонент не создаётся, а пара передаётся безопасной
+сверке.
 
 ## SL, pending D и переоткрытие
 
@@ -36,6 +40,11 @@ general_recovery = target_value + spread_value
 добавляется только `abs(confirmed_SL - close_fill) * closed_size`. Неизменяемый снимок содержит
 `dealId`, entry, old size, действовавшие D/SL, close fill, оба представления slippage и
 `pending_D_value = old_D * old_size`.
+
+`old_D` — не новый локально рассчитанный `Leg.stop_distance`, а расстояние между фактическим entry
+и последним broker-confirmed SL. Confirmation принятого PUT и read-back `/positions` хранятся
+отдельно. Пока новый PUT ожидает подтверждения, прежний подтверждённый SL остаётся источником
+pending D; после подтверждения нового уровня источником становится новый D.
 
 До исполнения Trigger сценарий и D survivor не меняются. После подтверждённого Trigger или
 эквивалентного MARKET fallback ровно один раз добавляются:
@@ -52,6 +61,11 @@ pending_D_value + abs(original_trigger_level - actual_reentry_fill) * new_actual
 `projected_reopen()` использует `general_recovery + pending_D_value` только для предварительной
 защиты. Проекция не изменяет баланс, pending-снимок или сценарий и не придумывает будущее
 slippage.
+
+`begin_continuation()` также является чистой проекцией: BID/ASK не считаются fills и не меняют
+GENERAL_RECOVERY. `confirm_continuation_fills()` добавляет spread лишь при двух фактических fills
+и одинаковом подтверждённом размере. Ключ `continuation-pair:<cycle_id>:<cycle_attempt>` делает
+операцию однократной после REST/history/restart.
 
 ## Double-SL и continuation
 

@@ -4,7 +4,8 @@ from decimal import Decimal
 
 from .config import Settings
 from .model import (
-    CycleState, Leg, protection_levels, recovery_distance, stop_slippage, trigger_slippage,
+    CycleState, Leg, protection_levels, recovery_distance, stop_for, stop_slippage,
+    trigger_slippage,
 )
 
 
@@ -41,20 +42,10 @@ class Strategy:
             self._record_recovery(key, kind, amount, **details)
             return
         old = Decimal(str(existing["amount"]))
-        if old == amount:
-            return
-        before = self.state.general_recovery
-        self.state.general_recovery += amount - old
-        existing.update({
-            "before": str(before), "amount": str(amount),
-            "after": str(self.state.general_recovery),
-            **{name: str(value) if isinstance(value, Decimal) else value
-               for name, value in details.items()},
-        })
-        self.state.events.append(
-            f"GENERAL_RECOVERY {kind} confirmed fills: key={key}; before={before}; "
-            f"replace={old}->{amount}; after={self.state.general_recovery}"
-        )
+        if old != amount:
+            raise RuntimeError(
+                f"Conflicting confirmed pair component {key}: saved={old}, received={amount}"
+            )
 
     def _clear_legacy_leg_components(self) -> None:
         for leg in (self.state.long, self.state.short):
@@ -97,17 +88,24 @@ class Strategy:
         self.state.recovery_migration_error = ""
         self.state.phase = "BOTH_OPEN"
         size, distance = self.cfg.size_for(1), self.cfg.stop_for(1)
-        self.state.initial_position_size = size
-        self.state.target_value = self.state.cycle_target_profit * size
         self.state.long = Leg("BUY", ask, ask, size=size, stop_distance=distance)
         self.state.short = Leg("SELL", bid, bid, size=size, stop_distance=distance)
-        self.confirm_initial_fills(ask, bid)
+        for leg in (self.state.long, self.state.short):
+            leg.stop = stop_for(leg.direction, leg.current_entry, leg.stop_distance)
 
     def confirm_initial_fills(self, long_fill: Decimal, short_fill: Decimal) -> None:
         if not self.state.long or not self.state.short or self.state.scenario != 1:
             raise RuntimeError("Initial legs have not been prepared")
-        if self.state.initial_position_size <= 0:
+        long_size, short_size = self.state.long.size, self.state.short.size
+        if long_size <= 0 or short_size <= 0:
             raise RuntimeError("Initial position size is unknown")
+        if long_size != short_size:
+            raise RuntimeError(
+                f"Initial hedge sizes differ: BUY={long_size}, SELL={short_size}; "
+                "GENERAL_RECOVERY was not changed"
+            )
+        self.state.initial_position_size = long_size
+        self.state.target_value = self.state.cycle_target_profit * long_size
         spread = abs(long_fill - short_fill)
         self.state.entry_spread = spread
         key = f"initial-pair:{self.state.cycle_id}:{self.state.cycle_attempt}"
@@ -119,6 +117,9 @@ class Strategy:
         )
         for leg, fill in ((self.state.long, long_fill), (self.state.short, short_fill)):
             leg.original_trigger_level = leg.current_entry = fill
+            leg.entry_confirmation = "broker"
+            if leg.size_confirmation == "requested":
+                leg.size_confirmation = "accepted_request"
             self.state.remember_deal(leg, 1)
         self._targets_from_entries()
         self.state.events.append(
@@ -132,19 +133,29 @@ class Strategy:
         size, distance = self.cfg.size_for(self.state.scenario), self.cfg.stop_for(self.state.scenario)
         self.state.long = Leg("BUY", ask, ask, size=size, stop_distance=distance)
         self.state.short = Leg("SELL", bid, bid, size=size, stop_distance=distance)
-        self.confirm_continuation_fills(ask, bid)
+        # Quotes are projections only. They must never create a monetary pair component.
+        self._targets_from_entries()
 
     def confirm_continuation_fills(self, long_fill: Decimal, short_fill: Decimal) -> None:
         if not self.state.long or not self.state.short:
             raise RuntimeError("Continuation legs have not been prepared")
         self.state.long.current_entry = self.state.long.original_trigger_level = long_fill
         self.state.short.current_entry = self.state.short.original_trigger_level = short_fill
+        self.state.long.entry_confirmation = self.state.short.entry_confirmation = "broker"
+        for leg in (self.state.long, self.state.short):
+            if leg.size_confirmation == "requested":
+                leg.size_confirmation = "accepted_request"
         spread = abs(long_fill - short_fill)
         self.state.entry_spread = spread
         # Both confirmed fills are required. A repeated confirmation has the same stable key.
-        size = self.state.long.size
-        if size <= 0 or self.state.short.size <= 0:
+        size, short_size = self.state.long.size, self.state.short.size
+        if size <= 0 or short_size <= 0:
             raise RuntimeError("Continuation pair size is unknown")
+        if size != short_size:
+            raise RuntimeError(
+                f"Continuation hedge sizes differ: BUY={size}, SELL={short_size}; "
+                "GENERAL_RECOVERY was not changed"
+            )
         key = f"continuation-pair:{self.state.cycle_id}:{self.state.cycle_attempt}"
         self._set_pair_component(key, "CONTINUATION_SPREAD", spread * size,
                                  spread_distance=spread, size=size)
@@ -161,12 +172,20 @@ class Strategy:
             raise RuntimeError(f"{direction} is not an open protected leg")
         if leg.size <= 0:
             raise RuntimeError("Closed position size is unknown")
-        expected_stop = leg.confirmed_stop
-        if expected_stop is None:
+        if (leg.protection_confirmation == "ACCEPTED"
+                and leg.confirmation_stop is not None):
+            expected_stop = leg.confirmation_stop
+            stop_source = "confirmation"
+        elif leg.confirmed_stop is not None:
+            expected_stop = leg.confirmed_stop
+            stop_source = "positions_readback"
+        else:
             # The calculated stop is usable only when no conflicting/unconfirmed revision exists.
             if leg.protection_sent_stop is not None and leg.protection_readback != "ПОДТВЕРЖДЕНО":
                 raise RuntimeError("Cannot calculate SL slippage from an unconfirmed protection")
             expected_stop = leg.stop
+            stop_source = "initial_calculated_without_new_put"
+        confirmed_distance = abs(leg.current_entry - expected_stop)
         slip_distance = stop_slippage(direction, expected_stop, fill)
         slip_value = slip_distance * leg.size
         loss = max(Decimal("0"), leg.current_entry - fill) if direction == "BUY" else max(
@@ -186,10 +205,12 @@ class Strategy:
             self.state.pending_recovery.append({
                 "close_key": close_key, "deal_id": leg.deal_id, "direction": direction,
                 "entry": str(leg.current_entry), "size": str(leg.size),
-                "stop_distance": str(leg.stop_distance), "confirmed_stop": str(expected_stop),
+                "stop_distance": str(confirmed_distance), "confirmed_stop": str(expected_stop),
+                "desired_stop_distance": str(leg.stop_distance), "desired_stop": str(leg.stop),
+                "stop_source": stop_source,
                 "close_fill": str(fill), "sl_slippage_distance": str(slip_distance),
                 "sl_slippage_value": str(slip_value),
-                "pending_d_value": str(leg.stop_distance * leg.size),
+                "pending_d_value": str(confirmed_distance * leg.size),
                 "d_accounted": False, "reopen_event_id": "", "trigger_slippage_accounted": False,
             })
         survivor = self._leg("SELL" if direction == "BUY" else "BUY")
@@ -245,11 +266,14 @@ class Strategy:
             if candidate and (candidate.open or candidate is leg):
                 candidate.stop_distance = new_distance
         leg.size = new_size
+        leg.size_confirmation = "broker" if actual_size is not None else "accepted_request"
+        leg.entry_confirmation = "broker"
         leg.current_entry = fill
         leg.deal_id = deal_id
         leg.open = True
         leg.trigger_id = leg.trigger_reference = ""
         leg.confirmed_stop = leg.confirmed_take_profit = None
+        leg.confirmed_stop_distance = None
         leg.protection_sent_stop = leg.protection_sent_take_profit = None
         leg.confirmation_stop = leg.confirmation_take_profit = None
         leg.protection_confirmation = leg.protection_readback = ""

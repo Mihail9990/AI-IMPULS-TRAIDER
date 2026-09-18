@@ -29,6 +29,7 @@ class Leg:
     stop: Decimal | None = None
     take_profit: Decimal | None = None
     confirmed_stop: Decimal | None = None
+    confirmed_stop_distance: Decimal | None = None
     confirmed_take_profit: Decimal | None = None
     protection_sent_stop: Decimal | None = None
     protection_sent_take_profit: Decimal | None = None
@@ -36,6 +37,8 @@ class Leg:
     confirmation_take_profit: Decimal | None = None
     protection_confirmation: str = ""
     protection_readback: str = ""
+    entry_confirmation: str = "projected"
+    size_confirmation: str = "requested"
     size: Decimal = D("0")
     stop_distance: Decimal = D("0")
     recovery: Decimal = D("0")
@@ -271,6 +274,7 @@ class CycleState:
                     leg.setdefault("current_entry", legacy_entry)
                 for key in ("original_trigger_level", "current_entry", "stop", "take_profit",
                             "confirmed_stop", "confirmed_take_profit", "protection_sent_stop",
+                            "confirmed_stop_distance",
                             "protection_sent_take_profit", "confirmation_stop",
                             "confirmation_take_profit",
                             "size", "stop_distance", "recovery", "temporary_stop_compensation",

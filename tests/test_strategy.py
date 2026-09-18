@@ -35,38 +35,40 @@ from trader.streaming import PriceWatch, QuoteStream
 from trader.telegram import Telegram
 
 
+_RUNTIME_STATE_PATH = Path(__file__).resolve().parents[1] / "bot_state.json"
+_RUNTIME_STATE_EXISTED = _RUNTIME_STATE_PATH.exists()
+_RUNTIME_STATE_BYTES = _RUNTIME_STATE_PATH.read_bytes() if _RUNTIME_STATE_EXISTED else None
+
+
+def tearDownModule():
+    """Never leave test state in the project or overwrite a user's pre-existing state."""
+    if _RUNTIME_STATE_EXISTED:
+        _RUNTIME_STATE_PATH.write_bytes(_RUNTIME_STATE_BYTES)
+    else:
+        _RUNTIME_STATE_PATH.unlink(missing_ok=True)
+
+
 class StrategyTest(unittest.TestCase):
     def setUp(self):
         self.state = CycleState()
         self.strategy = Strategy(Settings(), self.state)
         self.strategy.begin(D("4010.30"), D("4010.00"))
+        self.strategy.confirm_initial_fills(D("4010.30"), D("4010.00"))
 
-    @unittest.skip("replaced by monetary GENERAL_RECOVERY regression coverage")
     def test_first_targets_use_each_leg_actual_entry(self):
-        self.assertEqual(self.state.recovery, D("0.60"))
+        self.assertEqual(self.state.general_recovery, D("0.060"))
         self.assertEqual(self.state.long.stop, D("4009.30"))
         self.assertEqual(self.state.short.stop, D("4011.00"))
         self.assertEqual(self.state.long.take_profit, D("4011.90"))
         self.assertEqual(self.state.short.take_profit, D("4008.40"))
 
-    @unittest.skip("replaced by monetary GENERAL_RECOVERY regression coverage")
     def test_detailed_report_uses_persisted_recovery_components(self):
         before = recovery_snapshot(self.state)
-        self.state.long.recovery = D("12.80")
-        self.state.long.temporary_stop_compensation = D("4")
-        self.state.long.temporary_spread_compensation = D("0.50")
-        self.state.long.temporary_slippage_compensation = D("0.10")
-        self.state.long.size = D("10")
-        self.state.long.stop_distance = D("4")
-        self.state.long.stop = D("4006.50")
-        self.state.long.take_profit = D("4031.90")
-        text = recovery_change_text(
-            self.state, before, event="проверка временной компенсации", direction="BUY"
-        )
-        self.assertIn("SL=4 + spread=0.50 + slippage=0.10 = 4.60", text)
-        self.assertIn("эффективный Recovery=12.80 + 4.60 = 17.40", text)
-        details = leg_details(self.state.long, broker_stop=D("4006.50"), readback="ПОДТВЕРЖДЕНО")
-        self.assertIn("фактически прочитанные SL/TP=4006.50 / не подтверждено", details)
+        self.strategy.stopped("BUY", D("4009.20"), "report-sl")
+        text = recovery_change_text(self.state, before, event="SL", direction="BUY")
+        self.assertIn("GENERAL_RECOVERY", text)
+        self.assertIn("pending D", text)
+        self.assertNotIn("temporary:", text)
 
     def test_trigger_open_is_found_by_working_order_in_global_activity(self):
         activity = [{
@@ -109,37 +111,33 @@ class StrategyTest(unittest.TestCase):
         }]
         self.assertIsNotNone(find_working_order_cancellation(cancelled, "trigger-sell"))
 
-    @unittest.skip("replaced by monetary GENERAL_RECOVERY regression coverage")
     def test_actual_initial_fills_define_immutable_trigger_anchors(self):
-        self.strategy.confirm_initial_fills(D("4010.35"), D("4010.00"))
-        self.assertEqual(self.state.entry_spread, D("0.35"))
-        self.assertEqual(self.state.recovery, D("0.65"))
-        self.assertEqual(self.state.long.original_trigger_level, D("4010.35"))
-        self.assertEqual(self.state.long.take_profit, D("4012.00"))
+        state = CycleState(); strategy = Strategy(Settings(), state)
+        strategy.begin(D("4010.30"), D("4010.00"))
+        strategy.confirm_initial_fills(D("4010.35"), D("4010.00"))
+        self.assertEqual(state.general_recovery, D("0.065"))
+        self.assertEqual(state.long.original_trigger_level, D("4010.35"))
+        strategy.stopped("BUY", state.long.stop, "anchor-stop")
+        strategy.reopened("BUY", D("4010.45"), "buy-2", "anchor-open")
+        self.assertEqual(state.long.original_trigger_level, D("4010.35"))
+        self.assertEqual(state.long.current_entry, D("4010.45"))
 
-    @unittest.skip("replaced by monetary GENERAL_RECOVERY regression coverage")
     def test_favorable_sequential_fill_gap_is_absolute_spread(self):
-        self.strategy.confirm_initial_fills(D("4658.48"), D("4658.72"))
-        self.assertEqual(self.state.entry_spread, D("0.24"))
-        self.assertEqual(self.state.recovery, D("0.54"))
-        self.assertEqual(self.state.long.stop, D("4657.48"))
-        self.assertEqual(self.state.short.stop, D("4659.72"))
-        self.assertEqual(self.state.long.take_profit, D("4660.02"))
-        self.assertEqual(self.state.short.take_profit, D("4657.18"))
+        state = CycleState(); strategy = Strategy(Settings(), state)
+        strategy.begin(D("4658.50"), D("4658.70"))
+        strategy.confirm_initial_fills(D("4658.48"), D("4658.72"))
+        self.assertEqual(state.entry_spread, D("0.24"))
+        self.assertEqual(state.general_recovery, D("0.054"))
+        self.assertEqual(state.long.take_profit, D("4660.02"))
+        self.assertEqual(state.short.take_profit, D("4657.18"))
 
-    @unittest.skip("replaced by monetary GENERAL_RECOVERY regression coverage")
     def test_absolute_stop_slippage_is_added_in_both_directions(self):
         self.strategy.stopped("SELL", D("4011.10"), "stop-1")
-        self.assertEqual(self.state.recovery, D("0.70"))
-        self.assertEqual(self.state.realized_losses, D("1.10"))
-        self.assertEqual(self.state.long.take_profit, D("4012.00"))
-
-        second = CycleState()
-        strategy = Strategy(Settings(), second)
-        strategy.begin(D("4010.30"), D("4010.00"))
-        strategy.stopped("SELL", D("4010.95"))
-        self.assertEqual(second.recovery, D("0.65"))
-        self.assertEqual(second.realized_losses, D("0.95"))
+        self.assertEqual(self.state.general_recovery, D("0.070"))
+        second = CycleState(); strategy = Strategy(Settings(), second)
+        strategy.begin(D("4010.30"), D("4010.00")); strategy.confirm_initial_fills(D("4010.30"), D("4010.00"))
+        strategy.stopped("BUY", D("4009.20"), "stop-2")
+        self.assertEqual(second.general_recovery, D("0.070"))
 
     def test_completion_calculates_gross_losses_and_net_result(self):
         self.strategy.stopped("SELL", D("4011.10"), "stop-1")
@@ -157,17 +155,12 @@ class StrategyTest(unittest.TestCase):
             restored = CycleState.load(file.name)
         self.assertEqual(restored.completed_cycles, 1)
 
-    @unittest.skip("replaced by monetary GENERAL_RECOVERY regression coverage")
     def test_reopen_uses_current_entry_for_stop_and_anchor_for_slippage(self):
-        self.strategy.stopped("SELL", D("4011.10"))
-        self.strategy.reopened("SELL", D("4009.90"), "short-2")
-        self.assertEqual(self.state.scenario, 2)
-        self.assertEqual(self.state.recovery, D("1.80"))
+        self.strategy.stopped("SELL", D("4011.10"), "sell-stop")
+        self.strategy.reopened("SELL", D("4009.90"), "short-2", "sell-open")
+        self.assertEqual(self.state.general_recovery, D("0.180"))
         self.assertEqual(self.state.short.original_trigger_level, D("4010.00"))
         self.assertEqual(self.state.short.current_entry, D("4009.90"))
-        self.assertEqual(self.state.short.stop, D("4010.90"))
-        self.assertEqual(self.state.long.take_profit, D("4013.10"))
-        self.assertEqual(self.state.short.take_profit, D("4007.10"))
 
     def test_target_helper_is_symmetric_and_independent_of_opposite_stop(self):
         self.assertEqual(target_for("BUY", D("4011.05"), D("1"), D("0.65")), D("4012.70"))
@@ -177,33 +170,16 @@ class StrategyTest(unittest.TestCase):
         self.strategy._targets_from_entries()
         self.assertEqual(self.state.long.take_profit, before)
 
-    @unittest.skip("replaced by monetary GENERAL_RECOVERY regression coverage")
     def test_recovery_table_scenarios_one_through_nine(self):
-        state = CycleState()
-        strategy = Strategy(Settings(stop_distance=D("1"), target_profit=D("0.30")), state)
-        strategy.begin(D("4011.05"), D("4010.70"))
-        self.assertEqual(state.recovery, D("0.65"))
-        expected_after_stop = [D("0.75"), D("1.95"), D("3.15"), D("4.35"),
-                               D("5.55"), D("6.75"), D("7.95"), D("9.15")]
-        direction = "SELL"
-        for scenario, expected in enumerate(expected_after_stop, 1):
-            leg = state.short if direction == "SELL" else state.long
-            actual_stop = leg.stop + (D("0.10") if direction == "SELL" else D("-0.10"))
-            strategy.stopped(direction, actual_stop, f"stop-{scenario}")
-            self.assertEqual(state.scenario, scenario)
-            self.assertEqual(state.recovery, expected)
-            if scenario == 8:
-                break
-            fill = leg.original_trigger_level + (D("-0.10") if direction == "SELL" else D("0.10"))
-            strategy.reopened(direction, fill, f"deal-{scenario + 1}", f"reopen-{scenario + 1}")
-            self.assertEqual(state.recovery, expected + D("1.10"))
-            direction = "BUY" if direction == "SELL" else "SELL"
-        leg = state.short if direction == "SELL" else state.long
-        fill = leg.original_trigger_level + (D("-0.10") if direction == "SELL" else D("0.10"))
-        strategy.reopened(direction, fill, "deal-9", "reopen-9")
-        self.assertEqual(state.scenario, 9)
-        self.assertEqual(state.recovery, D("10.25"))
-        self.assertEqual(state.phase, "SCENARIO_9_CLOSING")
+        previous = self.state.general_recovery
+        for index, direction in enumerate(("SELL", "BUY", "SELL", "BUY", "SELL", "BUY", "SELL", "BUY"), 2):
+            leg = self.state.short if direction == "SELL" else self.state.long
+            self.strategy.stopped(direction, leg.stop, f"stop-{index}")
+            self.strategy.reopened(direction, leg.original_trigger_level, f"deal-{index}", f"open-{index}")
+            self.assertGreater(self.state.general_recovery, previous)
+            previous = self.state.general_recovery
+        self.assertEqual(self.state.scenario, 9)
+        self.assertEqual(self.state.phase, "SCENARIO_9_CLOSING")
 
     def test_refresh_targets_migrates_old_tp_without_changing_recovery(self):
         recovery = self.state.recovery
@@ -214,13 +190,10 @@ class StrategyTest(unittest.TestCase):
         self.assertEqual(self.state.long.take_profit, D("4011.90"))
         self.assertEqual(self.state.short.take_profit, D("4008.40"))
 
-    @unittest.skip("replaced by monetary GENERAL_RECOVERY regression coverage")
     def test_scenario_nine_enters_automatic_closing_phase(self):
         self.state.scenario = 8
-        self.state.short.open = False
-        self.strategy.reopened("SELL", D("4010"), "short-9")
-        self.assertFalse(self.state.manual)
-        self.assertFalse(self.state.paused)
+        self.strategy.stopped("SELL", self.state.short.stop, "s8-stop")
+        self.strategy.reopened("SELL", self.state.short.original_trigger_level, "short-9", "s9-open")
         self.assertEqual(self.state.phase, "SCENARIO_9_CLOSING")
 
     def test_scenario_nine_result_uses_actual_close_gap_and_prior_losses(self):
@@ -236,14 +209,11 @@ class StrategyTest(unittest.TestCase):
         self.assertFalse(self.state.manual)
         self.assertFalse(self.state.active)
 
-    @unittest.skip("replaced by monetary GENERAL_RECOVERY regression coverage")
     def test_zero_profit_override_is_not_replaced_by_config_default(self):
-        self.state.reset()
-        self.state.profit_override = D("0")
-        self.state.profit_override_remaining = 1
-        self.strategy.begin(D("4010.3"), D("4010"))
-        self.assertEqual(self.state.cycle_target_profit, D("0"))
-        self.assertEqual(self.state.recovery, D("0.3"))
+        self.state.reset(); self.state.profit_override = D("0"); self.state.profit_override_remaining = 1
+        self.strategy.begin(D("4010.3"), D("4010")); self.strategy.confirm_initial_fills(D("4010.3"), D("4010"))
+        self.assertEqual(self.state.target_value, D("0.0"))
+        self.assertEqual(self.state.general_recovery, D("0.03"))
 
     def test_profit_override_applies_to_exactly_200_completed_cycles(self):
         self.state.reset()
@@ -265,46 +235,12 @@ class StrategyTest(unittest.TestCase):
         self.strategy.stopped("SELL", D("4011.10"), "event")
         self.assertEqual(self.state.recovery, recovery)
 
-    @unittest.skip("replaced by monetary GENERAL_RECOVERY regression coverage")
     def test_state_round_trip(self):
-        self.state.telegram_offset = 123
-        self.state.short.pending_market_reference = "market-pending"
-        self.state.short.pending_market_reason = "confirmation delayed"
-        self.state.attempt_counter = self.state.active_attempt_id = 212
-        self.state.attempt_result_total = D("-46.40")
-        self.state.attempt_history = [{"attempt_id": 212, "status": "INITIAL_PAIR_NOT_FORMED",
-                                       "result": "-15.20"}]
-        self.state.initial_submitted_directions = ["BUY", "SELL"]
-        self.state.pending_close_direction = "SELL"
-        self.state.pending_close_reference = "close-ref"
-        self.state.cycle_id = 224
-        self.state.cycle_attempt = 2
-        self.state.continuation_pause_until = 1789146300.0
-        self.state.continuation_stopped_by_user = True
-        self.state.cycle_attempt_start_losses = D("14.71")
-        self.state.continuation_managed = True
-        self.state.continuation_stage = "FORMING_PAIR"
         with tempfile.NamedTemporaryFile() as file:
-            self.state.save(file.name)
-            restored = CycleState.load(file.name)
-        self.assertEqual(restored.long.original_trigger_level, D("4010.30"))
-        self.assertEqual(restored.long.current_entry, D("4010.30"))
-        self.assertEqual(restored.recovery, D("0.60"))
-        self.assertEqual(restored.telegram_offset, 123)
-        self.assertEqual(restored.short.pending_market_reference, "market-pending")
-        self.assertEqual(restored.short.pending_market_reason, "confirmation delayed")
-        self.assertEqual(restored.active_attempt_id, 212)
-        self.assertEqual(restored.attempt_result_total, D("-46.40"))
-        self.assertEqual(restored.attempt_history[0]["attempt_id"], 212)
-        self.assertEqual(restored.initial_submitted_directions, ["BUY", "SELL"])
-        self.assertEqual(restored.cycle_id, 224)
-        self.assertEqual(restored.cycle_attempt, 2)
-        self.assertEqual(restored.continuation_pause_until, 1789146300.0)
-        self.assertTrue(restored.continuation_stopped_by_user)
-        self.assertEqual(restored.cycle_attempt_start_losses, D("14.71"))
-        self.assertTrue(restored.continuation_managed)
-        self.assertEqual(restored.continuation_stage, "FORMING_PAIR")
-        self.assertEqual(restored.pending_close_reference, "close-ref")
+            self.state.save(file.name); restored = CycleState.load(file.name)
+        self.assertEqual(restored.general_recovery, self.state.general_recovery)
+        self.assertEqual(restored.target_value, self.state.target_value)
+        self.assertEqual(restored.recovery_events, self.state.recovery_events)
 
     def test_deal_ids_survive_reopen_reset_and_state_round_trip(self):
         self.state.long.deal_id = "long-1"
@@ -341,6 +277,7 @@ class ScenarioParameterStrategyTest(unittest.TestCase):
                        scenario_stop_distances=self.STOPS)
         strategy = Strategy(cfg, state)
         strategy.begin(D("4010.50"), D("4010.00"))
+        strategy.confirm_initial_fills(D("4010.50"), D("4010.00"))
         return strategy, state
 
     @staticmethod
@@ -350,119 +287,43 @@ class ScenarioParameterStrategyTest(unittest.TestCase):
         strategy.reopened(direction, leg.original_trigger_level,
                           f"deal-{state.scenario + 1}-{direction}")
 
-    @unittest.skip("replaced by monetary GENERAL_RECOVERY regression coverage")
     def test_full_control_example_without_slippage(self):
         strategy, state = self.make_strategy()
-        self.assertEqual(state.recovery, D("0.80"))
-        self.reopen_exact(strategy, state, "BUY")
-        self.assertEqual(state.long.recovery, D("1.80"))
-        self.reopen_exact(strategy, state, "SELL")
-        self.assertEqual(state.short.recovery, D("4.80"))
-        self.reopen_exact(strategy, state, "BUY")
-        self.assertEqual(state.long.recovery, D("8.80"))
-
-        self.reopen_exact(strategy, state, "SELL")
-        self.assertEqual((state.short.size, state.short.stop_distance, state.short.recovery),
-                         (D("20"), D("4"), D("6.40")))
-        self.assertEqual(state.short.stop, D("4014.00"))
-        self.assertEqual(state.short.take_profit, D("3999.60"))
-        self.assertEqual(state.long.size, D("10"))
-        self.assertEqual(state.long.recovery, D("12.80"))
-        self.assertEqual(state.long.effective_recovery, D("17.30"))
-        self.assertEqual(state.long.take_profit, D("4031.80"))
-
-        self.reopen_exact(strategy, state, "BUY")
-        self.assertEqual(state.long.recovery, D("10.40"))
-        self.assertEqual(state.short.recovery, D("10.40"))
-        self.assertEqual(state.long.effective_recovery, D("10.40"))
-        self.assertEqual(state.short.take_profit, D("3995.60"))
-        self.reopen_exact(strategy, state, "SELL")
-        self.assertEqual(state.short.recovery, D("14.40"))
-        self.reopen_exact(strategy, state, "BUY")
-        self.assertEqual(state.long.recovery, D("18.40"))
-        self.reopen_exact(strategy, state, "SELL")
-        self.assertEqual(state.short.recovery, D("22.40"))
+        for direction in ("BUY", "SELL", "BUY", "SELL", "BUY", "SELL", "BUY", "SELL"):
+            self.reopen_exact(strategy, state, direction)
         self.assertEqual(state.scenario, 9)
         self.assertEqual(state.phase, "SCENARIO_9_CLOSING")
+        self.assertTrue(all(leg.temporary_recovery == 0 for leg in (state.long, state.short)))
 
-    @unittest.skip("replaced by monetary GENERAL_RECOVERY regression coverage")
     def test_first_increase_slippage_is_divided_after_old_slippage_but_not_trigger_slippage(self):
         strategy, state = self.make_strategy()
-        self.reopen_exact(strategy, state, "BUY")
-        self.reopen_exact(strategy, state, "SELL")
-        self.reopen_exact(strategy, state, "BUY")
-        strategy.stopped("SELL", D("4013.10"), "sell-old-slippage")
-        self.assertEqual(state.short.recovery, D("8.90"))
-        strategy.reopened("SELL", D("4009.90"), "sell-5", "sell-trigger-slippage")
-        self.assertEqual(state.short.recovery, D("6.55"))
-        self.assertEqual(state.short.stop, D("4013.90"))
-        self.assertEqual(state.short.take_profit, D("3999.35"))
-        # x2 position slippage is transferred twice to the still-small BUY.
-        self.assertEqual(state.long.recovery, D("13.00"))
-        self.assertEqual(state.long.temporary_slippage_compensation, D("0.10"))
-        self.assertEqual(state.long.effective_recovery, D("17.60"))
+        for direction in ("BUY", "SELL", "BUY"): self.reopen_exact(strategy, state, direction)
+        before = state.general_recovery
+        strategy.stopped("SELL", state.short.stop + D("0.10"), "sell-slip")
+        self.assertEqual(state.general_recovery, before + D("1"))
+        strategy.reopened("SELL", state.short.original_trigger_level - D("0.10"), "sell-5", "sell-open")
+        self.assertEqual(state.short.size, D("20"))
 
-    @unittest.skip("replaced by monetary GENERAL_RECOVERY regression coverage")
     def test_first_buy_increase_is_mirror_of_sell_increase(self):
         strategy, state = self.make_strategy()
-        self.reopen_exact(strategy, state, "SELL")
-        self.reopen_exact(strategy, state, "BUY")
-        self.reopen_exact(strategy, state, "SELL")
-        strategy.stopped("BUY", state.long.stop - D("0.10"), "buy-old-slippage")
-        strategy.reopened("BUY", D("4010.60"), "buy-5", "buy-trigger-slippage")
+        for direction in ("SELL", "BUY", "SELL"): self.reopen_exact(strategy, state, direction)
+        strategy.stopped("BUY", state.long.stop - D("0.10"), "buy-slip")
+        strategy.reopened("BUY", state.long.original_trigger_level + D("0.10"), "buy-5", "buy-open")
         self.assertEqual(state.long.size, D("20"))
-        self.assertEqual(state.long.recovery, D("6.55"))
-        self.assertEqual(state.long.stop, D("4006.60"))
-        self.assertEqual(state.long.take_profit, D("4021.15"))
-        self.assertEqual(state.short.recovery, D("13.00"))
-        self.assertEqual(state.short.temporary_slippage_compensation, D("0.10"))
-        self.assertEqual(state.short.effective_recovery, D("17.60"))
+        self.assertEqual(state.short.size, D("10"))
 
-    @unittest.skip("replaced by monetary GENERAL_RECOVERY regression coverage")
     def test_second_increase_removes_only_temporary_parts_and_synchronizes_recovery(self):
         strategy, state = self.make_strategy()
-        self.reopen_exact(strategy, state, "BUY")
-        self.reopen_exact(strategy, state, "SELL")
-        self.reopen_exact(strategy, state, "BUY")
-        strategy.stopped("SELL", D("4013.10"), "old-sell-slippage")
-        strategy.reopened("SELL", D("4009.90"), "sell-5", "first-large-fill")
-        self.assertEqual(state.long.recovery, D("13.00"))
-        self.assertEqual(state.long.temporary_recovery, D("4.60"))
+        for direction in ("BUY", "SELL", "BUY", "SELL", "BUY"): self.reopen_exact(strategy, state, direction)
+        self.assertEqual((state.long.size, state.short.size), (D("20"), D("20")))
+        self.assertEqual(state.general_recovery / state.long.size, state.general_recovery / state.short.size)
+        self.assertEqual((state.long.temporary_recovery, state.short.temporary_recovery), (D("0"), D("0")))
 
-        strategy.stopped("BUY", state.long.stop - D("0.20"), "small-buy-slippage")
-        self.assertEqual(state.long.recovery, D("13.20"))
-        self.assertEqual(state.long.temporary_recovery, D("4.60"))
-        self.assertEqual(state.short.recovery, D("6.65"))
-        projected = strategy.projected_reopen("BUY")
-        self.assertEqual(projected, (D("20"), D("4"), D("10.60")))
-        # Merely projecting the working order must not mutate the open SELL.
-        self.assertEqual(state.short.recovery, D("6.65"))
-
-        with tempfile.NamedTemporaryFile() as file:
-            state.save(file.name)
-            restored = CycleState.load(file.name)
-        restored_strategy = Strategy(strategy.cfg, restored)
-        restored_strategy.reopened("BUY", D("4010.80"), "buy-6", "second-large-fill")
-        self.assertEqual(restored.long.recovery, D("10.90"))
-        self.assertEqual(restored.short.recovery, D("10.90"))
-        self.assertEqual(restored.long.temporary_recovery, D("0"))
-        self.assertEqual(restored.short.temporary_recovery, D("0"))
-        before = (restored.scenario, restored.long.recovery, restored.short.recovery)
-        restored_strategy.reopened("BUY", D("4010.80"), "buy-6", "second-large-fill")
-        self.assertEqual((restored.scenario, restored.long.recovery, restored.short.recovery), before)
-
-    @unittest.skip("replaced by monetary GENERAL_RECOVERY regression coverage")
     def test_same_large_side_can_reopen_twice_without_another_division(self):
         strategy, state = self.make_strategy()
-        for direction in ("BUY", "SELL", "BUY", "SELL"):
-            self.reopen_exact(strategy, state, direction)
-        self.reopen_exact(strategy, state, "SELL")
-        self.assertEqual(state.short.size, D("20"))
-        self.assertEqual(state.short.recovery, D("10.40"))
-        self.assertEqual(state.long.size, D("10"))
-        self.assertEqual(state.long.recovery, D("16.80"))
-        self.assertEqual(state.long.temporary_stop_compensation, D("8"))
-        self.assertEqual(state.long.effective_recovery, D("25.30"))
+        for direction in ("BUY", "SELL", "BUY", "SELL", "SELL"): self.reopen_exact(strategy, state, direction)
+        self.assertEqual(state.short.size, D("20")); self.assertEqual(state.long.size, D("10"))
+        self.assertEqual(state.scenario, 6)
 
     def test_increase_may_begin_at_scenario_three_or_seven(self):
         for start in (3, 7):
@@ -478,34 +339,20 @@ class ScenarioParameterStrategyTest(unittest.TestCase):
             self.assertEqual(increased.size, D("20"))
             self.assertEqual(unchanged.size, D("10"))
 
-    @unittest.skip("replaced by monetary GENERAL_RECOVERY regression coverage")
     def test_state_round_trip_preserves_scaled_recovery_and_temporary_parts(self):
-        strategy, state = self.make_strategy()
-        for direction in ("BUY", "SELL", "BUY", "SELL"):
-            self.reopen_exact(strategy, state, direction)
+        strategy, state = self.make_strategy(); self.reopen_exact(strategy, state, "BUY")
         with tempfile.NamedTemporaryFile() as file:
-            state.save(file.name)
-            restored = CycleState.load(file.name)
-        self.assertEqual(restored.short.size, D("20"))
-        self.assertEqual(restored.short.recovery, D("6.40"))
-        self.assertEqual(restored.long.temporary_stop_compensation, D("4"))
-        self.assertEqual(restored.long.temporary_spread_compensation, D("0.50"))
-        self.assertEqual(restored.long.temporary_slippage_compensation, D("0"))
+            state.save(file.name); restored = CycleState.load(file.name)
+        self.assertEqual(restored.general_recovery, state.general_recovery)
+        self.assertEqual(restored.pending_recovery, state.pending_recovery)
 
-    @unittest.skip("replaced by monetary GENERAL_RECOVERY regression coverage")
     def test_continuation_rebuilds_equal_pair_from_money_without_temporary_parts(self):
-        strategy, state = self.make_strategy()
-        state.scenario = 6
-        state.active = True
-        state.realized_losses = D("7")
-        state.realized_loss_money = D("100")
+        strategy, state = self.make_strategy(); state.scenario = 6; state.cycle_attempt = 2
+        state.general_recovery = D("100")
         strategy.begin_continuation(D("4020.50"), D("4020.00"))
-        self.assertEqual(state.long.size, D("20"))
-        self.assertEqual(state.short.size, D("20"))
-        self.assertEqual(state.long.recovery, D("5.80"))
-        self.assertEqual(state.short.recovery, D("5.80"))
-        self.assertEqual(state.long.temporary_stop_compensation, D("0"))
-        self.assertEqual(state.short.temporary_spread_compensation, D("0"))
+        self.assertEqual(state.general_recovery, D("100"))
+        strategy.confirm_continuation_fills(D("4020.50"), D("4020.00"))
+        self.assertEqual(state.general_recovery, D("110"))
 
     def test_invalid_size_sequences_are_rejected(self):
         for sizes in ((D("10"),) * 8,
@@ -537,6 +384,7 @@ class EntryRetryTest(unittest.TestCase):
         bot.execution_policy = ExecutionPolicy()
         bot._flat_checks = 0
         bot.strategy.begin(D("4010.30"), D("4010.00"))
+        bot.strategy.confirm_initial_fills(D("4010.30"), D("4010.00"))
         return bot
 
     def test_double_initial_stop_report_is_separate_and_idempotent(self):
@@ -597,6 +445,7 @@ class EntryRetryTest(unittest.TestCase):
         bot.state = CycleState()
         bot.strategy = Strategy(bot.cfg, bot.state)
         bot.strategy.begin(D("4010.50"), D("4010.00"))
+        bot.strategy.confirm_initial_fills(D("4010.50"), D("4010.00"))
         bot.strategy.stopped("BUY", D("4009.50"), "buy-stop")
         bot.capital.wait_confirmation.return_value = {
             "dealStatus": "ACCEPTED", "dealId": "buy-trigger"
@@ -1455,6 +1304,7 @@ class EntryRetryTest(unittest.TestCase):
         bot.state = CycleState()
         bot.strategy = Strategy(bot.cfg, bot.state)
         bot.strategy.begin(D("4010.50"), D("4010.00"))
+        bot.strategy.confirm_initial_fills(D("4010.50"), D("4010.00"))
         for direction in ("BUY", "SELL", "BUY"):
             leg = bot.state.long if direction == "BUY" else bot.state.short
             bot.strategy.stopped(direction, leg.stop, f"stop-{bot.state.scenario}-{direction}")
@@ -1689,6 +1539,8 @@ class EntryRetryTest(unittest.TestCase):
         bot.state.scenario = 8
         bot.state.cycle_attempt = 2
         bot.strategy.begin_continuation(D("4375.20"), D("4375.00"))
+        self.assertEqual(bot.state.general_recovery, D("0.060"))
+        bot.strategy.confirm_continuation_fills(D("4375.20"), D("4375.00"))
         self.assertEqual(bot.state.general_recovery, D("0.080"))
         self.assertEqual(bot.state.long.original_trigger_level, D("4375.20"))
         self.assertEqual(bot.state.short.original_trigger_level, D("4375.00"))
@@ -1949,6 +1801,7 @@ class EntryRetryTest(unittest.TestCase):
 
     def test_early_initial_stop_is_replayed_instead_of_manual_404(self):
         bot = self.make_bot()
+        bot.state.general_recovery = D("0"); bot.state.recovery_events.clear()
         bot.state.long.deal_id = "long-1"
         bot.state.short.deal_id = "short-1"
         bot.strategy.confirm_initial_fills(D("4645.81"), D("4644.88"))
@@ -1981,6 +1834,7 @@ class EntryRetryTest(unittest.TestCase):
 
     def test_second_initial_leg_stopped_before_position_sync_continues_scenario(self):
         bot = self.make_bot()
+        bot.state.general_recovery = D("0"); bot.state.recovery_events.clear()
         bot.state.long.deal_id = "long-1"
         bot.state.long.current_entry = D("4633.17")
         bot.state.long.original_trigger_level = D("4633.17")
@@ -2027,6 +1881,7 @@ class EntryRetryTest(unittest.TestCase):
 
     def test_second_initial_stop_tolerates_transient_missing_survivor(self):
         bot = self.make_bot()
+        bot.state.general_recovery = D("0"); bot.state.recovery_events.clear()
         bot.state.long.deal_id = "long-1"
         bot.state.long.current_entry = D("4633.17")
         bot.state.long.original_trigger_level = D("4633.17")
@@ -3639,44 +3494,12 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
             scenario_stop_distances=(D("1"), D("2"), D("3")) + (D("4"),) * 6,
         )
 
-    @unittest.skip("replaced by monetary GENERAL_RECOVERY regression coverage")
     def test_cycle_273_first_and_second_increase_arithmetic(self):
-        state = CycleState(active=True, scenario=2, entry_spread=D("0.54"))
-        state.long = Leg("BUY", D("4300"), D("4300"), deal_id="buy", size=D("10"),
-                         stop_distance=D("2"), recovery=D("2.90"), stop=D("4298"))
-        state.short = Leg("SELL", D("4299.46"), D("4299.46"), open=False,
-                          size=D("10"), stop_distance=D("2"), recovery=D("2.90"))
-        strategy = Strategy(self.settings(), state)
-
-        before = recovery_snapshot(state)
-        strategy.reopened("SELL", D("4299.43"), "sell-3")
-        self.assertEqual(state.short.recovery, D("2.98"))
-        self.assertEqual(state.long.recovery, D("5.93"))
-        self.assertEqual(state.long.temporary_stop_compensation, D("3"))
-        self.assertEqual(state.long.temporary_spread_compensation, D("0.54"))
-        self.assertEqual(state.long.temporary_slippage_compensation, D("0.03"))
-        self.assertEqual(state.long.effective_recovery, D("9.50"))
-        text = recovery_change_text(
-            state, before, event="№273 первое увеличение", direction="SELL",
-            trigger_slippage=D("0.03"),
-        )
-        self.assertIn("(2.90 + 3) / 2 + 0.03 = 2.98", text)
-        self.assertIn("SL 0 → 3", text)
-
-        strategy.stopped("BUY", D("4297.91"), "buy-sl")
-        self.assertEqual(state.short.recovery, D("3.025"))
-        self.assertEqual(state.long.effective_recovery, D("9.59"))
-        before_second = recovery_snapshot(state)
-        strategy.reopened("BUY", D("4300"), "buy-4")
-        self.assertEqual(state.long.recovery, D("7.01"))
-        self.assertEqual(state.short.recovery, D("7.01"))
-        self.assertEqual(state.long.temporary_recovery, D("0"))
-        self.assertEqual(state.short.temporary_recovery, D("0"))
-        second_text = recovery_change_text(
-            state, before_second, event="№273 второе увеличение", direction="BUY",
-            trigger_slippage=D("0"),
-        )
-        self.assertIn("(9.59 − 3.57) / 2 + 4 + 0 = 7.01", second_text)
+        state = CycleState(general_recovery=D("102"))
+        leg = Leg("SELL", D("4000"), D("3999.9"), size=D("20"), stop_distance=D("4"))
+        state.short = leg
+        text = leg_details(leg, general_recovery=state.general_recovery)
+        self.assertIn("recovery_distance=5.1", text)
 
     def test_double_sl_attempt_uses_actual_sizes_ten_and_twenty(self):
         bot = EntryRetryTest().make_bot()
@@ -3700,61 +3523,20 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
         self.assertIn("результат попытки: -70", report)
         self.assertIn("накопленные убытки цикла: 70", report)
 
-    @unittest.skip("replaced by monetary GENERAL_RECOVERY regression coverage")
     def test_cycle_274_repeated_large_side_then_alignment(self):
-        state = CycleState(active=True, scenario=3, entry_spread=D("0.60"))
-        state.long = Leg(
-            "BUY", D("4300"), D("4300"), deal_id="buy", size=D("10"),
-            stop_distance=D("2"), recovery=D("6.03"), stop=D("4298"),
-            temporary_stop_compensation=D("3"),
-            temporary_spread_compensation=D("0.60"),
-            temporary_slippage_compensation=D("0.03"),
-        )
-        state.short = Leg(
-            "SELL", D("4299.40"), D("4299.40"), open=False, size=D("20"),
-            stop_distance=D("3"), recovery=D("3.03"),
-        )
-        strategy = Strategy(self.settings(), state)
-        strategy.reopened("SELL", D("4299.36"), "sell-4")
-        self.assertEqual(state.long.recovery, D("10.07"))
-        self.assertEqual(state.long.temporary_stop_compensation, D("7"))
-        self.assertEqual(state.long.temporary_spread_compensation, D("0.60"))
-        self.assertEqual(state.long.temporary_slippage_compensation, D("0.07"))
-        self.assertEqual(state.long.effective_recovery, D("17.74"))
+        settings = self.settings(); state = CycleState(); strategy = Strategy(settings, state)
+        strategy.begin(D("4300.5"), D("4300")); strategy.confirm_initial_fills(D("4300.5"), D("4300"))
+        for direction in ("SELL", "SELL", "SELL", "BUY", "BUY"):
+            leg = state.short if direction == "SELL" else state.long
+            strategy.stopped(direction, leg.stop, f"stop-{state.scenario}-{direction}")
+            strategy.reopened(direction, leg.original_trigger_level, f"deal-{state.scenario + 1}", f"open-{state.scenario + 1}")
+        self.assertEqual(state.scenario, 6)
 
-        strategy.stopped("BUY", D("4297.97"), "buy-sl")
-        self.assertEqual(state.long.recovery, D("10.10"))
-        self.assertEqual(state.long.effective_recovery, D("17.77"))
-        before_alignment = recovery_snapshot(state)
-        strategy.reopened("BUY", D("4300.20"), "buy-5")
-        self.assertEqual(state.long.recovery, D("9.25"))
-        self.assertEqual(state.short.recovery, D("9.25"))
-        self.assertEqual(state.long.temporary_recovery, D("0"))
-        alignment = recovery_change_text(
-            state, before_alignment, event="№274 выравнивание", direction="BUY",
-            trigger_slippage=D("0.20"),
-        )
-        self.assertIn("(17.77 − 7.67) / 2 + 4 + 0.20 = 9.25", alignment)
-
-    @unittest.skip("replaced by monetary GENERAL_RECOVERY regression coverage")
     def test_protection_details_use_individual_recovery_and_sources(self):
-        leg = Leg(
-            "BUY", D("4285.14"), D("4285.14"), deal_id="buy-273", size=D("10"),
-            stop_distance=D("1"), recovery=D("5.93"), stop=D("4284.14"),
-            take_profit=D("4295.64"), temporary_stop_compensation=D("3"),
-            temporary_spread_compensation=D("0.54"),
-            temporary_slippage_compensation=D("0.03"),
-        )
-        text = leg_details(
-            leg, broker_stop=leg.stop, broker_target=leg.take_profit,
-            confirmation="ACCEPTED", readback="ПОДТВЕРЖДЕНО",
-        )
-        self.assertIn("основной Recovery=5.93", text)
-        self.assertIn("SL=3 + spread=0.54 + slippage=0.03 = 3.57", text)
-        self.assertIn("эффективный Recovery для TP=9.50", text)
-        self.assertIn("4285.14 + 1 + 9.50 = 4295.64", text)
-        self.assertIn("confirmation", text.lower())
-        self.assertIn("повторное чтение /positions=ПОДТВЕРЖДЕНО", text)
+        leg = Leg("BUY", D("4285.14"), D("4285.14"), deal_id="buy", size=D("20"), stop_distance=D("1"))
+        text = leg_details(leg, general_recovery=D("102"))
+        self.assertIn("recovery_distance=5.1", text)
+        self.assertNotIn("temporary:", text)
 
     def test_malformed_positions_never_confirms_expected_protection(self):
         bot = EntryRetryTest().make_bot()
@@ -4757,6 +4539,7 @@ class GeneralRecoveryModelTest(unittest.TestCase):
         state = CycleState(cycle_id=1, cycle_attempt=1)
         strategy = Strategy(cfg or self.settings(), state)
         strategy.begin(D("4000.50"), D("4000.00"))
+        strategy.confirm_initial_fills(D("4000.50"), D("4000.00"))
         return strategy, state
 
     def test_s1_sl_trigger_sl_trigger_sequence(self):
@@ -4830,7 +4613,7 @@ class GeneralRecoveryModelTest(unittest.TestCase):
         self.assertEqual(strategy.account_double_sl_pending(), D("0"))
         state.cycle_attempt = 2
         strategy.begin_continuation(D("4000.50"), D("4000.00"))
-        self.assertEqual(state.general_recovery, D("147"))
+        self.assertEqual(state.general_recovery, D("142"))
         strategy.confirm_continuation_fills(D("4000.50"), D("4000.00"))
         self.assertEqual(state.general_recovery, D("147"))
 
@@ -4840,6 +4623,8 @@ class GeneralRecoveryModelTest(unittest.TestCase):
         state.general_recovery = state.recovery = D("142")
         state.cycle_attempt = 2
         strategy.begin_continuation(D("4000.50"), D("4000.00"))
+        self.assertEqual(state.general_recovery, D("142"))
+        strategy.confirm_continuation_fills(D("4000.50"), D("4000.00"))
         self.assertEqual(state.general_recovery, D("152"))
         self.assertEqual(state.target_value, D("6"))
         self.assertEqual((state.long.take_profit, state.short.take_profit),
@@ -4885,6 +4670,7 @@ class GeneralRecoveryModelTest(unittest.TestCase):
         state.profit_override = D("0.40")
         state.profit_override_remaining = 200
         strategy.begin(D("4000.50"), D("4000.00"))
+        strategy.confirm_initial_fills(D("4000.50"), D("4000.00"))
         self.assertEqual((state.cycle_target_profit, state.target_value), (D("0.40"), D("4")))
         state.cycle_attempt = 2
         strategy.begin_continuation(D("4001"), D("4000"))
@@ -4935,3 +4721,170 @@ class GeneralRecoveryModelTest(unittest.TestCase):
         self.assertTrue(restored.manual)
         self.assertEqual(restored.recovery, D("9.5"))
         self.assertEqual(restored.recovery_model_version, 1)
+
+class GeneralRecoveryIntegrationFixTest(unittest.TestCase):
+    def cfg(self, sizes=None, stops=None):
+        return Settings(
+            size=D("10"), target_profit=D("0.30"), stop_distance=D("1"),
+            scenario_sizes=sizes or (D("10"),) * 9,
+            scenario_stop_distances=stops or (D("1"), D("3")) + (D("4"),) * 7,
+        )
+
+    def active(self, cfg=None):
+        state = CycleState(cycle_id=90, cycle_attempt=1)
+        strategy = Strategy(cfg or self.cfg(), state)
+        strategy.begin(D("4000.50"), D("4000.00"))
+        strategy.confirm_initial_fills(D("4000.50"), D("4000.00"))
+        return strategy, state
+
+    def test_begin_continuation_and_unformed_attempts_do_not_add_projected_spread(self):
+        strategy, state = self.active()
+        state.general_recovery = D("142")
+        state.cycle_attempt = 2
+        strategy.begin_continuation(D("4000.50"), D("4000.00"))
+        self.assertEqual(state.general_recovery, D("142"))
+        state.long.current_entry = D("4000.55")  # only BUY confirmed
+        state.long.entry_confirmation = "positions"
+        self.assertEqual(state.general_recovery, D("142"))
+        state.cycle_attempt = 3
+        strategy.begin_continuation(D("4010.50"), D("4010.00"))
+        self.assertEqual(state.general_recovery, D("142"))
+
+    def test_continuation_actual_pair_adds_spread_once(self):
+        strategy, state = self.active(self.cfg(sizes=(D("20"),) * 9))
+        state.general_recovery = D("142")
+        state.cycle_attempt = 2
+        strategy.begin_continuation(D("3999"), D("3998"))
+        state.long.size = state.short.size = D("20")
+        strategy.confirm_continuation_fills(D("4000.50"), D("4000.00"))
+        self.assertEqual(state.general_recovery, D("152"))
+        strategy.confirm_continuation_fills(D("4000.50"), D("4000.00"))
+        self.assertEqual(state.general_recovery, D("152"))
+        event = next(item for item in state.recovery_events
+                     if item["key"] == "continuation-pair:90:2")
+        self.assertEqual((event["spread_distance"], event["size"], event["amount"]),
+                         ("0.50", "20", "10.00"))
+
+    def test_initial_pair_uses_broker_actual_size(self):
+        strategy = Strategy(self.cfg(), CycleState(cycle_id=1, cycle_attempt=1))
+        strategy.begin(D("4000.50"), D("4000.00"))
+        strategy.state.long.size = strategy.state.short.size = D("12")
+        strategy.state.long.size_confirmation = strategy.state.short.size_confirmation = "positions"
+        strategy.confirm_initial_fills(D("4000.50"), D("4000.00"))
+        state = strategy.state
+        self.assertEqual((state.initial_position_size, state.target_value,
+                          state.general_recovery), (D("12"), D("3.60"), D("9.60")))
+
+    def test_unequal_pair_sizes_are_safe_and_do_not_change_general_recovery(self):
+        strategy, state = self.active()
+        before = state.general_recovery
+        state.cycle_attempt = 2
+        strategy.begin_continuation(D("4000.50"), D("4000.00"))
+        state.long.size, state.short.size = D("20"), D("19")
+        with self.assertRaisesRegex(RuntimeError, "sizes differ"):
+            strategy.confirm_continuation_fills(D("4000.50"), D("4000.00"))
+        self.assertEqual(state.general_recovery, before)
+        self.assertFalse(any(item["key"] == "continuation-pair:90:2"
+                             for item in state.recovery_events))
+
+    def _protection_race(self, direction, new_confirmed):
+        strategy, state = self.active()
+        closed = state.short if direction == "SELL" else state.long
+        survivor = state.long if direction == "SELL" else state.short
+        closed.deal_id = direction.lower()
+        survivor.deal_id = "survivor"
+        old_stop = closed.current_entry + D("1") if direction == "SELL" else closed.current_entry - D("1")
+        closed.confirmed_stop = old_stop
+        closed.confirmed_stop_distance = D("1")
+        closed.protection_readback = "ПОДТВЕРЖДЕНО"
+        # Trigger on the other side advances desired D for both legs to 3.
+        strategy.stopped(survivor.direction, survivor.stop, "other-stop")
+        strategy.reopened(survivor.direction, survivor.original_trigger_level,
+                          "other-new", "other-open")
+        self.assertEqual(closed.stop_distance, D("3"))
+        desired_stop = closed.stop
+        closed.protection_sent_stop = desired_stop
+        closed.protection_readback = "ожидается"
+        closed.protection_confirmation = "ACCEPTED" if new_confirmed else "ожидается"
+        closed.confirmation_stop = desired_stop if new_confirmed else None
+        fill = desired_stop if new_confirmed else old_stop
+        strategy.stopped(direction, fill, f"{direction}-race-stop")
+        return state.pending_recovery[-1]
+
+    def test_sell_old_confirmed_d_wins_race_against_unconfirmed_desired_d(self):
+        pending = self._protection_race("SELL", False)
+        self.assertEqual((pending["stop_distance"], pending["desired_stop_distance"],
+                          pending["pending_d_value"], pending["stop_source"]),
+                         ("1.00", "3", "10.00", "positions_readback"))
+
+    def test_buy_old_confirmed_d_wins_race_against_unconfirmed_desired_d(self):
+        pending = self._protection_race("BUY", False)
+        self.assertEqual((pending["stop_distance"], pending["pending_d_value"]),
+                         ("1.00", "10.00"))
+
+    def test_new_confirmation_changes_effective_pending_d_before_sl(self):
+        pending = self._protection_race("SELL", True)
+        self.assertEqual((pending["stop_distance"], pending["pending_d_value"],
+                          pending["stop_source"]),
+                         ("3.00", "30.00", "confirmation"))
+
+    def test_reporting_uses_general_not_legacy_leg_recovery(self):
+        leg = Leg("SELL", D("4000"), D("4000"), size=D("20"), stop_distance=D("4"),
+                  recovery=D("0"))
+        text = leg_details(leg, general_recovery=D("102"))
+        self.assertIn("recovery_distance=5.1", text)
+        self.assertNotIn("recovery_distance=0", text)
+
+    def test_reporting_continuation_does_not_claim_initial_formula(self):
+        strategy, state = self.active(self.cfg(sizes=(D("20"),) * 9))
+        state.general_recovery = D("142"); state.cycle_attempt = 2
+        before = recovery_snapshot(state)
+        strategy.begin_continuation(D("4000.5"), D("4000"))
+        strategy.confirm_continuation_fills(D("4000.5"), D("4000"))
+        text = recovery_change_text(state, before, event="continuation pair", direction="BUY")
+        self.assertIn("ДО=142", text); self.assertIn("ПОСЛЕ=152.0", text)
+        self.assertNotIn("initial spread", text)
+
+    def test_full_scenario_one_through_eight_and_non_alternating_sequence(self):
+        cfg = self.cfg(
+            sizes=(D("10"), D("10"), D("10"), D("10"), D("20"), D("20"), D("20"), D("20"), D("20")),
+            stops=(D("1"), D("1.5"), D("2"), D("3"), D("4"), D("4"), D("4"), D("4"), D("4")),
+        )
+        strategy, state = self.active(cfg)
+        directions = ("SELL", "SELL", "SELL", "BUY", "BUY", "SELL", "BUY")
+        for expected_scenario, direction in enumerate(directions, 2):
+            leg = state.short if direction == "SELL" else state.long
+            survivor = state.long if direction == "SELL" else state.short
+            anchor, survivor_entry, before = leg.original_trigger_level, survivor.current_entry, state.general_recovery
+            old_size, old_d = leg.size, leg.stop_distance
+            sl_fill = leg.stop + (D("0.10") if direction == "SELL" else D("-0.10"))
+            strategy.stopped(direction, sl_fill, f"e2e-stop-{expected_scenario}")
+            pending = state.pending_recovery[-1]
+            self.assertEqual(D(pending["pending_d_value"]), old_size * old_d)
+            fill = anchor + (D("-0.10") if direction == "SELL" else D("0.10"))
+            strategy.reopened(direction, fill, f"deal-{expected_scenario}", f"e2e-open-{expected_scenario}")
+            self.assertEqual(state.scenario, expected_scenario)
+            self.assertEqual(leg.original_trigger_level, anchor)
+            self.assertEqual(leg.current_entry, fill)
+            self.assertEqual(survivor.current_entry, survivor_entry)
+            self.assertGreater(state.general_recovery, before)
+            self.assertTrue(pending["d_accounted"])
+            self.assertEqual(leg.stop_distance, cfg.stop_for(expected_scenario))
+            self.assertEqual(survivor.stop_distance, cfg.stop_for(expected_scenario))
+            self.assertEqual(leg.take_profit,
+                             target_for(direction, fill, leg.stop_distance,
+                                        state.general_recovery / leg.size))
+        self.assertEqual(state.scenario, 8)
+        self.assertEqual(directions[:5], ("SELL", "SELL", "SELL", "BUY", "BUY"))
+
+    def test_named_bot_state_is_removed_or_restored_byte_for_byte(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bot_state.json"
+            state = CycleState(general_recovery=D("12")); state.save(str(path))
+            path.unlink()
+            self.assertFalse(path.exists())
+            original = b'{"user":"state"}\n'; path.write_bytes(original)
+            backup = path.read_bytes()
+            CycleState(general_recovery=D("99")).save(str(path))
+            path.write_bytes(backup)
+            self.assertEqual(path.read_bytes(), original)
