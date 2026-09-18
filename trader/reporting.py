@@ -16,83 +16,53 @@ def cycle_heading(state: CycleState, event: str, *, next_scenario: int | None = 
     )
 
 
-def recovery_snapshot(state: CycleState) -> dict[str, dict[str, Decimal | str | bool | None]]:
-    result = {}
+def recovery_snapshot(state: CycleState) -> dict:
+    result = {"_general": {
+        "general_recovery": state.general_recovery,
+        "target_value": state.target_value,
+        "event_count": len(state.recovery_events),
+    }}
     for leg in (state.long, state.short):
         if leg:
             result[leg.direction] = {
                 "open": leg.open, "size": leg.size, "entry": leg.current_entry,
                 "trigger": leg.original_trigger_level, "distance": leg.stop_distance,
-                "base": leg.recovery, "temp_stop": leg.temporary_stop_compensation,
-                "temp_spread": leg.temporary_spread_compensation,
-                "temp_slippage": leg.temporary_slippage_compensation,
-                "effective": leg.effective_recovery, "stop": leg.stop,
-                "target": leg.take_profit, "trigger_id": leg.trigger_id,
+                "recovery_distance": (state.general_recovery / leg.size if leg.size > 0 else None),
+                "stop": leg.stop, "target": leg.take_profit, "trigger_id": leg.trigger_id,
             }
     return result
 
 
 def leg_details(
     leg: Leg, *, broker_stop=None, broker_target=None, confirmation: str | None = None,
-    readback: str | None = None,
+    readback: str | None = None, general_recovery: Decimal | None = None,
 ) -> str:
     if broker_stop is None:
         broker_stop = leg.confirmed_stop
     if broker_target is None:
         broker_target = leg.confirmed_take_profit
-    if leg.open:
-        status = "ОТКРЫТА (подтверждённый dealId)" if leg.deal_id else "ГОТОВИТСЯ/УТОЧНЯЕТСЯ"
-    elif leg.trigger_id:
-        status = f"ЗАКРЫТА; Trigger ожидает исполнения ({leg.trigger_id})"
-    else:
-        status = "ЗАКРЫТА; следующий Trigger ещё не подтверждён"
-    confirmation = confirmation if confirmation is not None else (
-        leg.protection_confirmation or "не отправлено"
-    )
-    readback = readback if readback is not None else (
-        leg.protection_readback or "не выполнено"
-    )
-    sent_stop, sent_tp = leg.protection_sent_stop, leg.protection_sent_take_profit
-    accepted_stop, accepted_tp = leg.confirmation_stop, leg.confirmation_take_profit
-    read_stop, read_tp = broker_stop, broker_target
-    read_label = (
-        "фактически прочитанные SL/TP"
-        if str(readback).upper() == "ПОДТВЕРЖДЕНО" else
-        "последние сохранённые read-back SL/TP (источник/ревизия не подтверждают новый расчёт)"
-    )
-    if leg.open:
-        levels = (
-            f"  расчётные SL/TP={leg.stop} / {leg.take_profit}\n"
-            f"  отправленные SL/TP={sent_stop if sent_stop is not None else 'не отправлено'} / "
-            f"{sent_tp if sent_tp is not None else 'не отправлено'}\n"
-            f"  confirmation={confirmation}; принятые SL/TP="
-            f"{accepted_stop if accepted_stop is not None else 'не подтверждено'} / "
-            f"{accepted_tp if accepted_tp is not None else 'не подтверждено'}\n"
-            f"  повторное чтение /positions={readback}; {read_label}="
-            f"{read_stop if read_stop is not None else 'не подтверждено'} / "
-            f"{read_tp if read_tp is not None else 'не подтверждено'}\n"
-            f"  принадлежность: dealId={leg.deal_id or 'не подтверждён'}; "
-            "старое подтверждение не подтверждает вновь рассчитанный уровень\n"
-            f"  формула TP: {leg.current_entry} "
-            f"{'+' if leg.direction == 'BUY' else '−'} {leg.stop_distance} "
-            f"{'+' if leg.direction == 'BUY' else '−'} {leg.effective_recovery} "
-            f"= {leg.take_profit}"
-        )
-    else:
-        levels = (
-            f"  исторические последние SL/TP={leg.stop} / {leg.take_profit}; "
-            "позиция закрыта, эти уровни не являются расчётом от нового Recovery"
-        )
+    status = ("ОТКРЫТА (подтверждённый dealId)" if leg.open and leg.deal_id else
+              "ГОТОВИТСЯ/УТОЧНЯЕТСЯ" if leg.open else
+              f"ЗАКРЫТА; Trigger={leg.trigger_id}" if leg.trigger_id else "ЗАКРЫТА")
+    confirmation = confirmation if confirmation is not None else (leg.protection_confirmation or "не отправлено")
+    readback = readback if readback is not None else (leg.protection_readback or "не выполнено")
+    distance = (general_recovery / leg.size if general_recovery is not None and leg.size > 0
+                else leg.recovery if leg.size > 0 else None)
+    levels = (f"  расчётные SL/TP={leg.stop} / {leg.take_profit}\n"
+              f"  отправленные SL/TP={leg.protection_sent_stop} / {leg.protection_sent_take_profit}\n"
+              f"  confirmation={confirmation}; принятые SL/TP={leg.confirmation_stop} / {leg.confirmation_take_profit}\n"
+              f"  повторное чтение /positions={readback}; последние сохранённые read-back SL/TP="
+              f"{broker_stop} / {broker_target}"
+              if leg.open else
+              f"  исторические последние SL/TP={leg.stop} / {leg.take_profit}; "
+              "не являются расчётом от нового Recovery")
     return (
         f"{leg.direction}: {status}\n"
-        f"  dealId={leg.deal_id or 'ещё не подтверждён'}; объём={leg.size}; "
-        f"current_entry={leg.current_entry}; "
-        f"original_trigger={leg.original_trigger_level}\n"
-        f"  SL distance={leg.stop_distance}; основной Recovery={leg.recovery}\n"
-        f"  temporary: SL={leg.temporary_stop_compensation} + spread="
-        f"{leg.temporary_spread_compensation} + slippage={leg.temporary_slippage_compensation} "
-        f"= {leg.temporary_recovery}\n"
-        f"  эффективный Recovery для TP={leg.effective_recovery}\n{levels}"
+        f"  dealId={leg.deal_id or 'не подтверждён'}; size={leg.size}; "
+        f"current_entry={leg.current_entry}; original_trigger={leg.original_trigger_level}\n"
+        f"  действующий D={leg.stop_distance}; recovery_distance={distance}\n{levels}\n"
+        f"  формула TP: entry {'+' if leg.direction == 'BUY' else '−'} D "
+        f"{'+' if leg.direction == 'BUY' else '−'} GENERAL_RECOVERY/size"
     )
 
 
@@ -100,111 +70,42 @@ def recovery_change_text(
     state: CycleState, before: dict, *, event: str, direction: str,
     stop_slippage: Decimal | None = None, trigger_slippage: Decimal | None = None,
 ) -> str:
-    lines = [cycle_heading(state, event), "", "Изменение Recovery (ценовые расстояния, не P&L):"]
+    old_general = before.get("_general", {}).get("general_recovery", "?")
+    last = state.recovery_events[-1] if state.recovery_events else {}
+    lines = [
+        cycle_heading(state, event), "", "Изменение денежного GENERAL_RECOVERY:",
+        f"ДО={old_general}; событие={last.get('kind', 'без нового компонента')}; "
+        f"добавка={last.get('amount', '0')}; ПОСЛЕ={state.general_recovery}",
+        f"target_value={state.target_value}; фактический P&L учитывается отдельно.",
+    ]
     for leg in (state.long, state.short):
         if not leg:
             continue
-        old = before.get(leg.direction, {})
-        old_base = old.get("base")
-        old_temp = (old.get("temp_stop", D("0")) + old.get("temp_spread", D("0"))
-                    + old.get("temp_slippage", D("0")))
-        lines.extend([
-            f"{leg.direction}:",
-            f"  ДО: объём={old.get('size', '?')}; основной={old_base}; temporary: "
-            f"SL={old.get('temp_stop', '?')} + spread={old.get('temp_spread', '?')} + "
-            f"slippage={old.get('temp_slippage', '?')} = {old_temp}; "
-            f"эффективный={old.get('effective', '?')}",
-        ])
-        if leg.direction == direction and stop_slippage is not None:
-            old_size = old.get("size", leg.size)
-            other = state.short if leg.direction == "BUY" else state.long
-            if other and old_size != other.size:
-                weighted = stop_slippage * old_size / other.size
-                lines.append(
-                    f"  SL slippage закрытой стороны={stop_slippage}; для survivor объёмов "
-                    f"{old_size}/{other.size}: {stop_slippage} × {old_size} / {other.size} "
-                    f"= {weighted}"
-                )
-            else:
-                lines.append(f"  SL slippage=|плановый SL − fill|={stop_slippage}")
-        elif stop_slippage is not None:
-            closed = before.get(direction, {})
-            closed_size = closed.get("size", leg.size)
-            weighted = stop_slippage * closed_size / leg.size
-            lines.append(
-                f"  пересчёт SL slippage закрытой {direction} для этой стороны: "
-                f"{stop_slippage} × {closed_size} / {leg.size} = {weighted}; "
-                f"основной {old_base} → {leg.recovery}"
-            )
-        if leg.direction == direction and trigger_slippage is not None:
-            old_size = old.get("size", leg.size)
-            other_old = before.get("SELL" if leg.direction == "BUY" else "BUY", {})
-            if leg.size == old_size * 2:
-                if other_old.get("size") == leg.size:
-                    lines.extend([
-                        f"  второе увеличение {old_size} → {leg.size}: temporary до={old_temp} "
-                        "удаляется перед выравниванием",
-                        f"  ({old.get('effective')} − {old_temp}) / 2 + "
-                        f"{leg.stop_distance} + {trigger_slippage} = {leg.recovery}",
-                        "  объёмы сравнялись: основной Recovery противоположной стороны "
-                        f"синхронизирован до {leg.recovery}; все temporary обнулены",
-                    ])
-                else:
-                    lines.append(
-                        f"  первое увеличение {old_size} → {leg.size}: "
-                        f"({old_base} + {leg.stop_distance}) / 2 + {trigger_slippage} "
-                        f"= {leg.recovery}"
-                    )
-            else:
-                lines.append(
-                    f"  объём остаётся {leg.size}: {old_base} + новая SL distance "
-                    f"{leg.stop_distance} + Trigger slippage {trigger_slippage} = {leg.recovery}"
-                )
-        elif trigger_slippage is not None:
-            changed = state.long if direction == "BUY" else state.short
-            changed_old = before.get(direction, {})
-            if changed and changed.size == changed_old.get("size", changed.size) * 2 \
-                    and old.get("size") == changed.size:
-                lines.append(
-                    f"  объёмы сравнялись с {direction}: основной синхронизирован "
-                    f"{old_base} → {leg.recovery}; temporary {old_temp} → 0"
-                )
-            else:
-                base_delta = leg.recovery - old_base
-                lines.append(
-                    f"  компенсация переоткрытия {direction}: основной {old_base} + "
-                    f"{base_delta} = {leg.recovery}; изменения temporary: "
-                    f"SL {old.get('temp_stop', 0)} → {leg.temporary_stop_compensation}, "
-                    f"spread {old.get('temp_spread', 0)} → {leg.temporary_spread_compensation}, "
-                    f"slippage {old.get('temp_slippage', 0)} → "
-                    f"{leg.temporary_slippage_compensation}"
-                )
-        lines.extend([
-            f"  ПОСЛЕ: основной={leg.recovery}",
-            f"  temporary: SL={leg.temporary_stop_compensation} + spread="
-            f"{leg.temporary_spread_compensation} + slippage="
-            f"{leg.temporary_slippage_compensation} = {leg.temporary_recovery}",
-            f"  эффективный Recovery={leg.recovery} + {leg.temporary_recovery} "
-            f"= {leg.effective_recovery}",
-            (f"  собственный TP: {leg.current_entry} "
-             f"{'+' if leg.direction == 'BUY' else '−'} {leg.stop_distance} "
-             f"{'+' if leg.direction == 'BUY' else '−'} {leg.effective_recovery} "
-             f"= {leg.take_profit}" if leg.open else
-             f"  позиция закрыта; последние SL/TP {leg.stop}/{leg.take_profit} исторические"),
-        ])
+        distance = state.general_recovery / leg.size if leg.size > 0 else "НЕИЗВЕСТНО"
+        lines.append(
+            f"{leg.direction}: size={leg.size}; D={leg.stop_distance}; "
+            f"recovery_distance={state.general_recovery}/{leg.size}={distance}; "
+            f"entry={leg.current_entry}; SL={leg.stop}; TP={leg.take_profit}"
+        )
+    pending = [item for item in state.pending_recovery if not item.get("d_accounted")]
+    for item in pending:
+        lines.append(
+            f"pending D: dealId={item.get('deal_id')}; {item.get('stop_distance')} × "
+            f"{item.get('size')} = {item.get('pending_d_value')} денег; ещё не перенесён"
+        )
     return "\n".join(lines)
 
 
 def status_text(state: CycleState) -> str:
     legs = ", ".join(
         f"{leg.direction}(size={leg.size}, sl_distance={leg.stop_distance}, "
-        f"recovery={leg.recovery}, temporary="
-        f"{leg.temporary_recovery})"
+        f"recovery_distance="
+        f"{state.general_recovery / leg.size if leg.size > 0 else 'НЕИЗВЕСТНО'})"
         for leg in (state.long, state.short) if leg
     ) or "-"
     return (
         f"active={state.active}, armed={state.armed}, phase={state.phase}, "
-        f"scenario={state.scenario}, recovery={state.recovery}, "
+        f"scenario={state.scenario}, GENERAL_RECOVERY={state.general_recovery}, "
         f"paused={state.paused}, manual={state.manual}, "
         f"attempt={state.active_attempt_id or '-'}, attempts_total={state.attempt_counter}, "
         f"cycle_id={state.cycle_id or '-'}, cycle_attempt={state.cycle_attempt or '-'}, "
@@ -214,7 +115,7 @@ def status_text(state: CycleState) -> str:
         f"continuation_stage={state.continuation_stage or '-'}, "
         f"completed_cycles={state.completed_cycles}, all_attempts_result={state.attempt_result_total}, "
         f"attempt_statistics={'УТОЧНЯЕТСЯ' if state.pending_actual_attempt_id else 'ПОЛНАЯ'}, "
-        f"cycle_target={state.cycle_target_profit}, "
+        f"cycle_target_distance={state.cycle_target_profit}, target_value={state.target_value}, "
         f"profit200={state.profit_override}, remaining={state.profit_override_remaining}, "
         f"legs={legs}"
     )
@@ -261,7 +162,8 @@ def pnl_text(state: CycleState, positions: list[dict], transactions: list[dict])
     currencies = {_value(item, "currency") for item in positions + transactions if _value(item, "currency")}
     currency = ",".join(sorted(str(value) for value in currencies)) or "account currency"
     return (
-        f"Сценарий: {state.scenario}\nRecovery: {state.recovery}\n"
+        f"Сценарий: {state.scenario}\nGENERAL_RECOVERY: {state.general_recovery} денег\n"
+        f"target_value: {state.target_value} денег\n"
         f"Закрытый P&L за период истории: {realized} {currency}\n"
         f"Нереализованный P&L: {unrealized} {currency}\n"
         f"Суммарно: {realized + unrealized} {currency} (по истории брокера)\n"

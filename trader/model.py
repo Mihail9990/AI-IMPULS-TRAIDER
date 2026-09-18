@@ -71,6 +71,15 @@ class CycleState:
     manual: bool = False
     scenario: int = 0
     recovery: Decimal = D("0")
+    # Recovery model v2: one monetary balance for the complete logical cycle. ``recovery`` and
+    # the per-leg recovery fields are retained only as serialized legacy input/display mirrors.
+    recovery_model_version: int = 2
+    general_recovery: Decimal = D("0")
+    target_value: Decimal = D("0")
+    initial_position_size: Decimal = D("0")
+    recovery_events: list[dict] = field(default_factory=list)
+    pending_recovery: list[dict] = field(default_factory=list)
+    recovery_migration_error: str = ""
     entry_spread: Decimal = D("0")
     realized_losses: Decimal = D("0")
     realized_loss_money: Decimal = D("0")
@@ -197,6 +206,9 @@ class CycleState:
     def save(self, path: str) -> None:
         payload = asdict(self)
         payload["recovery"] = str(self.recovery)
+        payload["general_recovery"] = str(self.general_recovery)
+        payload["target_value"] = str(self.target_value)
+        payload["initial_position_size"] = str(self.initial_position_size)
         payload["entry_spread"] = str(self.entry_spread)
         payload["realized_losses"] = str(self.realized_losses)
         payload["realized_loss_money"] = str(self.realized_loss_money)
@@ -236,6 +248,8 @@ class CycleState:
         if not file.exists():
             return cls()
         raw = json.loads(file.read_text(encoding="utf-8"))
+        if "recovery_model_version" not in raw:
+            raw["recovery_model_version"] = 1
         # A permanent transport classification applies only to that process/request.  On a later
         # launch every non-delivered report part is eligible for recovery; acknowledged parts stay
         # delivered and are never repeated.
@@ -266,6 +280,8 @@ class CycleState:
                 leg.setdefault("legacy_missing_fields", missing)
                 raw[name] = Leg(**leg)
         raw["recovery"] = D(str(raw.get("recovery", "0")))
+        for name in ("general_recovery", "target_value", "initial_position_size"):
+            raw[name] = D(str(raw.get(name, "0")))
         for name in (
             "entry_spread", "realized_losses", "realized_loss_money", "gross_take_profit", "net_cycle_result",
             "net_cycle_money",
@@ -291,6 +307,11 @@ class CycleState:
         self.paused = self.manual = False
         self.scenario = 0
         self.recovery = self.entry_spread = D("0")
+        self.general_recovery = self.target_value = self.initial_position_size = D("0")
+        self.recovery_model_version = 2
+        self.recovery_events.clear()
+        self.pending_recovery.clear()
+        self.recovery_migration_error = ""
         self.realized_losses = self.realized_loss_money = D("0")
         self.gross_take_profit = self.net_cycle_result = self.net_cycle_money = D("0")
         self.scenario_nine_prior_losses = self.scenario_nine_close_gap = D("0")
@@ -327,6 +348,23 @@ def target_for(direction: str, entry: Decimal, distance: Decimal, recovery: Deci
     """Return strategic TP from this position's own confirmed/projected entry."""
     total = distance + recovery
     return entry + total if direction == "BUY" else entry - total
+
+
+def recovery_distance(general_recovery: Decimal, size: Decimal) -> Decimal:
+    """Convert the single monetary recovery balance to a position-specific price distance."""
+    if size <= 0:
+        raise RuntimeError("Cannot calculate Recovery distance for an unknown or zero size")
+    return general_recovery / size
+
+
+def protection_levels(direction: str, entry: Decimal, stop_distance: Decimal,
+                      general_recovery: Decimal, size: Decimal) -> tuple[Decimal, Decimal]:
+    """Central monetary-Recovery SL/TP formula used by every execution path."""
+    stop = stop_for(direction, entry, stop_distance)
+    target = target_for(
+        direction, entry, stop_distance, recovery_distance(general_recovery, size)
+    )
+    return stop, target
 
 
 def stop_slippage(direction: str, expected: Decimal, actual: Decimal) -> Decimal:

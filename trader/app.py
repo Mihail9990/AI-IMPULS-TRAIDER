@@ -253,8 +253,20 @@ class Bot:
         attempt_id = self.state.active_attempt_id
         self.strategy.complete(direction, fill)
         self._get_continuation().release()
+        # Attempt history is incremental; the cycle aggregate already includes earlier attempts.
+        # Recording the full cycle result here would count previous double-SL attempts twice.
+        current_attempt_losses = (
+            self.state.realized_loss_money - self.state.cycle_attempt_start_loss_money
+        )
+        winner = self.state.long if direction == "BUY" else self.state.short
+        current_attempt_profit = D("0")
+        if fill is not None and winner is not None:
+            move = (fill - winner.current_entry if direction == "BUY"
+                    else winner.current_entry - fill)
+            current_attempt_profit = max(D("0"), move) * winner.size
+        current_attempt_result = current_attempt_profit - current_attempt_losses
         self.state.remember_attempt(
-            "COMPLETED_CYCLE", self.state.net_cycle_money,
+            "COMPLETED_CYCLE", current_attempt_result,
             scenario=self.state.scenario, completed_cycle=self.state.completed_cycles,
         )
         LOG.info(
@@ -808,8 +820,9 @@ class Bot:
             "установлены и прочитаны обратно из Capital.com.\n"
             f"Фактический spread=|{self.state.long.current_entry} − "
             f"{self.state.short.current_entry}|={self.state.entry_spread}\n"
-            f"Начальный Recovery={self.state.entry_spread} (spread) + "
-            f"{self.state.cycle_target_profit} (цель) = {self.state.recovery}\n\n"
+            f"GENERAL_RECOVERY={self.state.entry_spread} × {self.state.initial_position_size} "
+            f"(spread value) + {self.state.target_value} (зафиксированная денежная цель) "
+            f"= {self.state.general_recovery}\n\n"
             f"{leg_details(self.state.long, broker_stop=self.state.long.stop, broker_target=self.state.long.take_profit)}\n\n"
             f"{leg_details(self.state.short, broker_stop=self.state.short.stop, broker_target=self.state.short.take_profit)}\n\n"
             "Следующее действие: сопровождать обе позиции; изменение сценария возможно только "
@@ -872,8 +885,8 @@ class Bot:
             f"Вход: {closed.current_entry}\n"
             f"Плановый SL: {closed.stop}\n"
             f"Фактическое закрытие: {fill}\n"
-            f"Закрытая сторона: основной Recovery={closed.recovery}; effective="
-            f"{closed.effective_recovery}.\n"
+            f"GENERAL_RECOVERY={self.state.general_recovery} денег; pending D закрытой сделки "
+            "перенесётся только после подтверждённого переоткрытия.\n"
             f"Осталась сторона: {survivor.direction}\n"
             f"Новый TP: {survivor.take_profit}\n"
             f"Trigger {closed.direction}: {closed.original_trigger_level}\n"
@@ -1947,8 +1960,8 @@ class Bot:
             f"Фактический вход: {reopened_fill}\n"
             f"SL {survivor.direction}: {stop_fill}\n"
             f"Сценарий: {self.state.scenario}\n"
-            f"Recovery оставшейся {stopped.direction}: основной={stopped.recovery}; "
-            f"temporary={stopped.temporary_recovery}; effective={stopped.effective_recovery}\n"
+            f"GENERAL_RECOVERY={self.state.general_recovery}; recovery_distance оставшейся "
+            f"{stopped.direction}={self.state.general_recovery / stopped.size}\n"
             f"Осталась сторона: {stopped.direction}\n"
             f"Новый TP: {stopped.take_profit}\n"
             f"Новый trigger {survivor.direction}: {survivor.original_trigger_level}\n"
@@ -2053,8 +2066,8 @@ class Bot:
                 "🔁 Trigger-позиция открылась и закрылась по SL между опросами\n"
                 f"Вход: {opened.level}\nSL: {reopened_sl.level}\n"
                 f"Сценарий: {self.state.scenario}\n"
-                f"Recovery survivor {survivor.direction}: основной={survivor.recovery}; "
-                f"temporary={survivor.temporary_recovery}; effective={survivor.effective_recovery}\n"
+                f"GENERAL_RECOVERY={self.state.general_recovery}; recovery_distance survivor "
+                f"{survivor.direction}={self.state.general_recovery / survivor.size}\n"
                 f"Следующий trigger: {survivor.direction} "
                 f"на {survivor.original_trigger_level}\n"
                 "Поздний SL будет применён после подтверждения следующего trigger-входа."
@@ -2426,6 +2439,7 @@ class Bot:
                     for leg, fill, result in details],
             completed_cycle=None,
         )
+        pending_d_added = self.strategy.account_double_sl_pending()
         self.state.active = True
         self.state.armed = False
         self.state.paused = True
@@ -2447,6 +2461,8 @@ class Bot:
             f"попытка {self.state.cycle_attempt}\n{lines}\n"
             f"Последние закрытия: {close_money}; результат попытки: {money}; "
             f"накопленные убытки цикла: {self.state.realized_loss_money}\n"
+            f"GENERAL_RECOVERY: {self.state.general_recovery}; перенос pending D после "
+            f"подтверждённого flat: +{pending_d_added}\n"
             "Trigger: отменён или отсутствует; связанных позиций и ордеров нет.\n"
             f"Пауза до {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.state.continuation_pause_until))}. "
             "Затем бот перейдёт к обычному входному фильтру этого же цикла."
@@ -2649,6 +2665,7 @@ class Bot:
 
     def _recover_active_cycle(self, positions: dict[str, dict], orders: list[dict]) -> None:
         """Replay unambiguous stop/TP/trigger events that happened while the bot was offline."""
+        self._migrate_recovery_model()
         if self.state.pending_tp_direction and self.state.pending_tp_fill is not None:
             self._finish_reached_take_profit()
             return
@@ -2750,6 +2767,27 @@ class Bot:
                 "старое состояние не содержит однозначных параметров позиции; "
                 "автоматика заблокирована: " + "; ".join(unresolved)
             )
+
+    def _migrate_recovery_model(self) -> None:
+        """Refuse an ambiguous active per-leg Recovery conversion instead of guessing money."""
+        if self.state.recovery_model_version >= self.strategy.MODEL_VERSION:
+            return
+        if not self.state.active:
+            self.state.recovery_model_version = self.strategy.MODEL_VERSION
+            self.state.general_recovery = self.state.target_value = D("0")
+            self.state.initial_position_size = D("0")
+            self.state.recovery_migration_error = ""
+            self.state.save(self.cfg.state_file)
+            return
+        self.state.recovery_migration_error = (
+            "Активное состояние использует прежнюю per-leg Recovery-модель. В нём нет "
+            "однозначных денежных снимков spread/target/pending D/slippage; автоматический "
+            "пересчёт запрещён. Исходные значения сохранены."
+        )
+        self.state.manual = True
+        self.state.paused = True
+        self.state.save(self.cfg.state_file)
+        raise RuntimeError(self.state.recovery_migration_error)
 
     def _enter_manual_nine(self) -> None:
         """Automatically flatten scenario 9 using actual fills from both sides.
@@ -3261,10 +3299,9 @@ class Bot:
         self._send_report(
             f"✅ Цикл восстановлен\nСценарий: {self.state.scenario}\n"
             f"BUY dealId: {self.state.long.deal_id}\nSELL dealId: {self.state.short.deal_id}\n"
-            f"BUY Recovery: основной={self.state.long.recovery}; temporary="
-            f"{self.state.long.temporary_recovery}; effective={self.state.long.effective_recovery}\n"
-            f"SELL Recovery: основной={self.state.short.recovery}; temporary="
-            f"{self.state.short.temporary_recovery}; effective={self.state.short.effective_recovery}\n"
+            f"GENERAL_RECOVERY={self.state.general_recovery}; target_value={self.state.target_value}\n"
+            f"BUY recovery_distance={self.state.general_recovery / self.state.long.size}; "
+            f"SELL recovery_distance={self.state.general_recovery / self.state.short.size}\n"
             "Текущий цикл продолжает контролироваться. "
             f"Следующий цикл на паузе до /start."
         )
