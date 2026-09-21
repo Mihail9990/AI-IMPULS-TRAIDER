@@ -1,91 +1,123 @@
-# Фактическая денежная модель сценариев 1–9
+# Фактическая денежная модель сценариев 1–9 (version 3)
 
-## Единственный источник Recovery
+## Термины и единый ledger
 
-`CycleState.general_recovery` — единый денежный баланс логического recovery-цикла. Его нельзя
-масштабировать при изменении объёма. Для позиции с фактическим объёмом `size` используется
-производное расстояние `general_recovery / size`; при нулевом или неизвестном размере автоматика
-останавливается.
+`DISTANCE_SCENARIO` — настроенная stop-геометрия текущего сценария. `D_VALUE` — стоимость
+фактически действовавшей stop-distance закрытой позиции:
 
 ```text
-BUY_SL  = current_entry - stop_distance
-SELL_SL = current_entry + stop_distance
-BUY_TP  = current_entry + stop_distance + general_recovery / size
-SELL_TP = current_entry - stop_distance - general_recovery / size
+D_VALUE = effective_stop_distance_at_close * actual_closed_size
 ```
 
-Единая реализация формул находится в `trader/model.py:protection_levels`; переходы и однократный
-денежный журнал — в `trader/engine.py:Strategy`.
+`CycleState.general_recovery` — единый денежный стратегический ledger логического цикла, а не
+broker P&L. Он никогда не масштабируется при смене size. Size используется только в стоимости
+конкретного события и при переводе денежного Recovery в расстояние TP.
 
-## Начальная пара и денежная цель
+## Initial Scenario 1
 
-После двух подтверждённых fills один раз фиксируются:
+После двух подтверждённых fills одинакового фактического размера один раз фиксируются:
 
 ```text
-target_value = cycle_target_profit * initial_position_size
-spread_value = abs(BUY_fill - SELL_fill) * initial_position_size
-general_recovery = target_value + spread_value
+spread_value = abs(BUY_fill - SELL_fill) * initial_actual_size
+target_value = cycle_target_profit * initial_actual_size
+GENERAL_RECOVERY = spread_value + target_value
 ```
 
-Предварительные котировки заменяются фактическими fills согласованно; повтор того же подтверждения
-ничего не добавляет. `/profit200` влияет на `cycle_target_profit` только при начале цикла.
-Окончательный `initial_position_size` берётся из подтверждённой пары. Если Capital вернул размер
-12 вместо requested 10, target и spread умножаются на 12. Неравные фактические sizes двух сторон
-не имеют приблизительной формулы: денежный компонент не создаётся, а пара передаётся безопасной
-сверке.
+Quotes до fills ничего не начисляют. Target больше не добавляется ни при reentry, ни при
+continuation pair.
 
-## SL, pending D и переоткрытие
-
-При подтверждённом SL фактический P&L сразу учитывается отдельно. В GENERAL_RECOVERY немедленно
-добавляется только `abs(confirmed_SL - close_fill) * closed_size`. Неизменяемый снимок содержит
-`dealId`, entry, old size, действовавшие D/SL, close fill, оба представления slippage и
-`pending_D_value = old_D * old_size`.
-
-`old_D` — не новый локально рассчитанный `Leg.stop_distance`, а расстояние между фактическим entry
-и последним broker-confirmed SL. Confirmation принятого PUT и read-back `/positions` хранятся
-отдельно. Пока новый PUT ожидает подтверждения, прежний подтверждённый SL остаётся источником
-pending D; после подтверждения нового уровня источником становится новый D.
-
-До исполнения Trigger сценарий и D survivor не меняются. После подтверждённого Trigger или
-эквивалентного MARKET fallback ровно один раз добавляются:
+Для Scenario 1 действует специальная TP-формула:
 
 ```text
-pending_D_value + abs(original_trigger_level - actual_reentry_fill) * new_actual_size
+BUY_TP  = current_entry + DISTANCE_SCENARIO + GENERAL_RECOVERY / actual_size
+SELL_TP = current_entry - DISTANCE_SCENARIO - GENERAL_RECOVERY / actual_size
 ```
 
-Затем сценарий увеличивается, новый D применяется к обеим фактически открытым позициям, но новый
-объём и `current_entry` получает только переоткрытая сторона. Якорь `original_trigger_level` не
-заменяется reentry fill. Это допускает любую последовательность BUY/SELL, включая повторные
-переоткрытия одной стороны.
+При SL S1 сразу добавляется только
+`abs(effective_broker_SL - actual_fill) * actual_closed_size`. `D_VALUE` сохраняется в durable
+closure snapshot с `d_accounted=false`. Если survivor раньше Trigger достигает TP, cycle
+завершается и этот pending D не переносится.
 
-`projected_reopen()` использует `general_recovery + pending_D_value` только для предварительной
-защиты. Проекция не изменяет баланс, pending-снимок или сценарий и не придумывает будущее
-slippage.
+## Linked closure и reentry
 
-`begin_continuation()` также является чистой проекцией: BID/ASK не считаются fills и не меняют
-GENERAL_RECOVERY. `confirm_continuation_fills()` добавляет spread лишь при двух фактических fills
-и одинаковом подтверждённом размере. Ключ `continuation-pair:<cycle_id>:<cycle_attempt>` делает
-операцию однократной после REST/history/restart.
+Каждый confirmed SL сохраняет stable identity, direction, broker chronology, `scenario_at_close`,
+entry/fill/size, effective stop/distance, slippage, `D_VALUE`, original Trigger anchor и два
+независимых флага `d_accounted`/`reentry_accounted`.
 
-## Double-SL и continuation
+Для любого confirmed Trigger либо MARKET reentry:
 
-Перед признанием flat разрешаются связанные working orders, уже исполненные Trigger и pending
-MARKET. После доказанного flat все неучтённые pending D попытки переносятся один раз. Пятиминутная
-пауза, фильтр, preflight и формирование новой пары остаются под владельцем `CycleContinuation`.
-Новая подтверждённая пара добавляет только `abs(BUY_fill-SELL_fill) * pair_size`; target повторно
-не добавляется.
+```text
+D_TO_ADD = closure.D_VALUE if not closure.d_accounted else 0
+TRIGGER_SLIPPAGE_VALUE =
+    abs(closure.original_trigger_anchor - actual_reentry_fill) * actual_new_size
+GENERAL_RECOVERY += D_TO_ADD + TRIGGER_SLIPPAGE_VALUE
+```
 
-## Scenario 9 и фактический результат
+Критерий — связанный closure snapshot, а не текущий номер Scenario. Поэтому поздно найденный S1
+closure не теряет D даже после локального перехода к S2. D и Trigger slippage имеют независимые
+stable recovery-event keys. Replay не меняет ledger и не повторяет Scenario transition.
 
-Переход 8→9 использует ту же формулу pending D + Trigger slippage, после чего запускается
-существующее специальное закрытие без Scenario 10. GENERAL_RECOVERY не является фактическим
-убытком. P&L вычисляется по реальным entry, close и size; результаты попыток и всего логического
-цикла сохраняются отдельно.
+`original_trigger_level` неизменяем в пределах attempt; `current_entry` заменяется actual fill.
+Broker execution chronology, а не arrival order REST/history, определяет `scenario_at_close`.
+Неоднозначная chronology блокируется reconciliation/manual без приблизительного D.
 
-## Восстановление
+## Scenario 2–8
 
-Версия денежной модели и все денежные компоненты сохраняются в `bot_state.json`. Повтор REST,
-history, confirmation, WebSocket или restart не применяет событие второй раз благодаря стабильным
-ключам `recovery_events` и снимкам `pending_recovery`. Фоновый history worker остаётся read-only.
-Активное состояние старой per-leg модели без достаточных денежных доказательств не конвертируется
-приблизительно: оно сохраняется и блокируется в manual с объяснением.
+При confirmed SL немедленно начисляются два независимых компонента:
+
+```text
+D_VALUE = effective_stop_distance_at_close * actual_closed_size
+SL_SLIPPAGE_VALUE = abs(effective_broker_SL - actual_SL_fill) * actual_closed_size
+GENERAL_RECOVERY += D_VALUE + SL_SLIPPAGE_VALUE
+```
+
+Closure остаётся pending для reentry, но уже имеет `d_accounted=true`. Поэтому обычный S2–S8
+reentry добавляет только Trigger slippage. Scenario увеличивается лишь после actual confirmed fill.
+Survivor сохраняет dealId, current entry и actual size; новый `DISTANCE_SCENARIO` применяется к
+обеим открытым legs, но size одной стороны не масштабирует другую.
+
+TP для каждой открытой leg рассчитывается независимо:
+
+```text
+BASE_VALUE = DISTANCE_SCENARIO * actual_leg_size
+REMAINING_RECOVERY = max(0, GENERAL_RECOVERY - BASE_VALUE)
+BUY_TP  = current_entry + DISTANCE_SCENARIO + REMAINING_RECOVERY / actual_leg_size
+SELL_TP = current_entry - DISTANCE_SCENARIO - REMAINING_RECOVERY / actual_leg_size
+TP_PROFIT_VALUE = max(GENERAL_RECOVERY, BASE_VALUE)
+```
+
+Вычисление TP и `refresh_targets()` не уменьшают и вообще не изменяют ledger.
+
+## Projection, double-SL и continuation
+
+Projection использует тот же linked closure:
+
+```text
+projected_GENERAL = stored_GENERAL + (closure.D_VALUE if not closure.d_accounted else 0)
+```
+
+Она не меняет flags, events, Scenario или stored GENERAL и не придумывает future slippage.
+После broker-flat double-SL S1 pending D переносится один раз. В S2–S8 D уже учтён на SL и снова
+не добавляется; судьба Trigger/reentry при этом всё равно должна быть разрешена отдельно.
+
+`CycleContinuation` сохраняет exclusive ownership, reconciliation, паузу 300 секунд, filter,
+preflight и pair formation. Только две actual equal-size fills добавляют ровно один раз:
+
+```text
+continuation_spread_value = abs(BUY_fill - SELL_fill) * actual_pair_size
+```
+
+Target не повторяется, а actual fills новой pair становятся anchors новой attempt.
+
+## Scenario 9, actual P&L и migration
+
+S8 SL начисляет D + SL slippage; linked S8→S9 reentry обычно начисляет только Trigger slippage и
+переводит state в `SCENARIO_9_CLOSING`. Ordinary Recovery TP и S10 отсутствуют. Существующие
+Trigger cancellation/race, concurrent close, actual-fill и restart-защиты сохраняются.
+
+Actual P&L независимо суммируется по broker entry, close, direction и собственному actual size
+каждого deal; GENERAL_RECOVERY его не заменяет.
+
+Новые циклы имеют `recovery_model_version=3`. Inactive old state начинает следующий cycle в v3.
+Active v1/v2 не мигрируется приблизительно: если точная deterministic continuation не доказуема,
+состояние сохраняется и automation безопасно блокируется в manual.

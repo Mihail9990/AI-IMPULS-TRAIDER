@@ -11,20 +11,26 @@
 
 `SCENARIO_POSITION_SIZES` и `SCENARIO_STOP_DISTANCES` задают фактический объём нового
 исполнения и дистанцию защиты сценария. После подтверждённого перехода сценария новая дистанция
-D применяется к обеим ещё открытым позициям, но объём и `current_entry` survivor не меняются.
+`DISTANCE_SCENARIO` применяется к обеим ещё открытым позициям, но объём и `current_entry`
+survivor не меняются. Термин `D_VALUE` ниже означает только денежную стоимость фактически
+действовавшей stop-distance закрытой позиции.
 
 Стратегия хранит один `GENERAL_RECOVERY` в денежном эквиваленте всего логического цикла.
 Расстояние каждой позиции является только производным значением:
 
 ```text
-recovery_distance = GENERAL_RECOVERY / position_size
-BUY_SL  = current_entry - D
-SELL_SL = current_entry + D
-BUY_TP  = current_entry + D + GENERAL_RECOVERY / size
-SELL_TP = current_entry - D - GENERAL_RECOVERY / size
+S1 recovery_distance = GENERAL_RECOVERY / position_size
+BUY_SL  = current_entry - DISTANCE_SCENARIO
+SELL_SL = current_entry + DISTANCE_SCENARIO
+S1 BUY_TP  = current_entry + DISTANCE_SCENARIO + GENERAL_RECOVERY / size
+S1 SELL_TP = current_entry - DISTANCE_SCENARIO - GENERAL_RECOVERY / size
+S2–S8 REMAINING_RECOVERY = max(0, GENERAL_RECOVERY - DISTANCE_SCENARIO * size)
+S2–S8 BUY_TP  = current_entry + DISTANCE_SCENARIO + REMAINING_RECOVERY / size
+S2–S8 SELL_TP = current_entry - DISTANCE_SCENARIO - REMAINING_RECOVERY / size
 ```
 
-Новый D при открытии не добавляется в баланс. Для первой подтверждённой пары:
+Новая `DISTANCE_SCENARIO` при открытии сама по себе не добавляется в баланс. Для первой
+подтверждённой пары:
 
 ```text
 target_value = cycle_target_profit * initial_position_size
@@ -42,12 +48,13 @@ GENERAL_RECOVERY = abs(BUY_fill - SELL_fill) * initial_position_size + target_va
 такой пары нет: GENERAL_RECOVERY остаётся прежним, позиции сохраняются под защитой, а бот
 переходит в безопасную сверку/manual.
 
-При подтверждённом SL сразу добавляется только
-`abs(confirmed_SL - close_fill) * closed_size`. Одновременно сохраняется неизменяемый снимок
-закрытой сделки и `pending_D = действовавший D * closed_size`. Pending D переносится ровно один
-раз после подтверждённого Trigger либо эквивалентного MARKET fallback; тогда же добавляется
-`abs(original_trigger_level - actual_reentry_fill) * new_size`. Создание ордера, пересечение цены
-и неопределённый POST баланс не меняют.
+При подтверждённом SL S1 сразу добавляется только
+`abs(confirmed_SL - close_fill) * closed_size`, а `D_VALUE` остаётся pending. Для S2–S8 сразу
+добавляются `effective_stop_distance * closed_size` и SL slippage. Durable closure независимо
+хранит `d_accounted` и `reentry_accounted`. При связанном Trigger/MARKET reentry D добавляется,
+только если именно у этого closure он ещё не учтён; Trigger slippage
+`abs(original_trigger_level - actual_reentry_fill) * new_size` добавляется отдельно. Создание
+ордера, пересечение цены и неопределённый POST баланс не меняют.
 
 Desired `stop_distance` и рассчитанный SL не считаются действующей защитой сразу после локального
 перехода Scenario. Для снимка закрытия используется последний SL, подтверждённый через PUT
@@ -66,7 +73,8 @@ confirmation либо `/positions` read-back; pending D вычисляется �
 Старые per-leg `recovery` и temporary-поля больше не участвуют в торговой формуле. Активное
 состояние старой модели автоматически не переводится приблизительным умножением: при отсутствии
 полных денежных снимков бот сохраняет исходные данные и включает безопасный manual. Неактивное
-состояние начинает модель v2 со следующего штатного цикла.
+состояние начинает модель v3 со следующего штатного цикла. Активная v1/v2 модель не
+пересчитывается приблизительно и переводится в безопасную ручную сверку.
 
 ## Безопасность и восстановление
 

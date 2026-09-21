@@ -5,14 +5,14 @@ from decimal import Decimal
 from .config import Settings
 from .model import (
     CycleState, Leg, protection_levels, recovery_distance, stop_for, stop_slippage,
-    trigger_slippage,
+    remaining_recovery_distance, trigger_slippage,
 )
 
 
 class Strategy:
     """Deterministic bookkeeping for the monetary GENERAL_RECOVERY model."""
 
-    MODEL_VERSION = 2
+    MODEL_VERSION = 3
 
     def __init__(self, settings: Settings, state: CycleState):
         self.cfg, self.state = settings, state
@@ -164,7 +164,9 @@ class Strategy:
         self._targets_from_entries()
         self.state.phase = "BOTH_OPEN"
 
-    def stopped(self, direction: str, fill: Decimal, event_id: str = "") -> Leg:
+    def stopped(self, direction: str, fill: Decimal, event_id: str = "", *,
+                scenario_at_close: int | None = None,
+                broker_execution_time: str = "") -> Leg:
         leg = self._leg(direction)
         if event_id and event_id in self.state.processed_events:
             return leg
@@ -201,6 +203,15 @@ class Strategy:
             f"slippage:{close_key}", "SL_SLIPPAGE", slip_value, deal_id=leg.deal_id,
             distance=slip_distance, size=leg.size,
         )
+        close_scenario = self.state.scenario if scenario_at_close is None else scenario_at_close
+        d_value = confirmed_distance * leg.size
+        d_accounted = close_scenario >= 2
+        if d_accounted:
+            self._record_recovery(
+                f"stop-distance:{close_key}", "STOP_DISTANCE_VALUE", d_value,
+                deal_id=leg.deal_id, scenario_at_close=close_scenario,
+                distance=confirmed_distance, size=leg.size,
+            )
         if not any(item.get("close_key") == close_key for item in self.state.pending_recovery):
             self.state.pending_recovery.append({
                 "close_key": close_key, "deal_id": leg.deal_id, "direction": direction,
@@ -210,14 +221,19 @@ class Strategy:
                 "stop_source": stop_source,
                 "close_fill": str(fill), "sl_slippage_distance": str(slip_distance),
                 "sl_slippage_value": str(slip_value),
-                "pending_d_value": str(confirmed_distance * leg.size),
-                "d_accounted": False, "reopen_event_id": "", "trigger_slippage_accounted": False,
+                "pending_d_value": str(d_value), "d_value": str(d_value),
+                "scenario_at_close": close_scenario,
+                "broker_execution_time": broker_execution_time,
+                "original_trigger_anchor": str(leg.original_trigger_level),
+                "d_accounted": d_accounted, "reentry_accounted": False,
+                "reopen_event_id": "", "trigger_slippage_accounted": False,
             })
         survivor = self._leg("SELL" if direction == "BUY" else "BUY")
         if survivor.open:
             survivor.stop, survivor.take_profit = protection_levels(
                 survivor.direction, survivor.current_entry, survivor.stop_distance,
                 self.state.general_recovery, survivor.size,
+                scenario=self.state.scenario,
             )
         self._clear_legacy_leg_components()
         self.state.phase = "LONG_ONLY" if survivor.direction == "BUY" else "SHORT_ONLY"
@@ -227,7 +243,8 @@ class Strategy:
 
     def _pending_for(self, direction: str) -> dict:
         candidates = [item for item in self.state.pending_recovery
-                      if item.get("direction") == direction and not item.get("d_accounted")]
+                      if item.get("direction") == direction
+                      and not item.get("reentry_accounted", bool(item.get("reopen_event_id")))]
         if not candidates:
             raise RuntimeError(f"No unaccounted pending D snapshot for {direction}")
         return candidates[-1]
@@ -246,19 +263,30 @@ class Strategy:
         new_distance = self.cfg.stop_for(next_scenario)
         if new_size <= 0:
             raise RuntimeError("Reopened position size is unknown")
-        slip_distance = trigger_slippage(direction, leg.original_trigger_level, fill)
+        anchor = Decimal(str(pending.get("original_trigger_anchor", leg.original_trigger_level)))
+        slip_distance = trigger_slippage(direction, anchor, fill)
         slip_value = slip_distance * new_size
         reopen_key = event_id or f"reopen:{pending['close_key']}:{deal_id}:{fill}"
-        amount = Decimal(pending["pending_d_value"]) + slip_value
-        if self._record_recovery(
-            f"reopen:{reopen_key}", "PENDING_D_AND_TRIGGER_SLIPPAGE", amount,
+        d_to_add = (Decimal(str(pending.get("d_value", pending["pending_d_value"])))
+                    if not pending.get("d_accounted") else Decimal("0"))
+        if d_to_add and self._record_recovery(
+            f"reopen-d:{reopen_key}", "PENDING_STOP_DISTANCE_VALUE", d_to_add,
             closed_deal_id=pending["deal_id"], reopened_deal_id=deal_id,
-            pending_d=Decimal(pending["pending_d_value"]), trigger_slippage_distance=slip_distance,
-            trigger_slippage_value=slip_value, new_size=new_size,
         ):
             pending["d_accounted"] = True
+        slippage_added = self._record_recovery(
+            f"reopen-slippage:{reopen_key}", "TRIGGER_SLIPPAGE", slip_value,
+            closed_deal_id=pending["deal_id"], reopened_deal_id=deal_id,
+            d_to_add=d_to_add, trigger_slippage_distance=slip_distance,
+            trigger_slippage_value=slip_value, new_size=new_size,
+        )
+        if slippage_added or any(
+            item.get("key") == f"reopen-slippage:{reopen_key}"
+            for item in self.state.recovery_events
+        ):
             pending["reopen_event_id"] = reopen_key
             pending["trigger_slippage_accounted"] = True
+            pending["reentry_accounted"] = True
         self.state.scenario = next_scenario
         # New scenario D applies to every position that is actually still open; survivor size and
         # entry never change merely because the scenario advanced.
@@ -351,18 +379,36 @@ class Strategy:
             leg.stop, leg.take_profit = protection_levels(
                 leg.direction, leg.current_entry, leg.stop_distance,
                 self.state.general_recovery, leg.size,
+                scenario=self.state.scenario,
             )
         self._clear_legacy_leg_components()
 
     def refresh_targets(self) -> None:
         self._targets_from_entries()
 
+    def recovery_distance_for(self, leg: Leg) -> Decimal | None:
+        """Return the displayed/current TP recovery component for this scenario."""
+        if self.state.scenario >= self.cfg.max_scenarios:
+            return None
+        if self.state.scenario == 1:
+            return recovery_distance(self.state.general_recovery, leg.size)
+        return remaining_recovery_distance(
+            self.state.general_recovery, leg.size, leg.stop_distance
+        )
+
     def projected_reopen(self, direction: str) -> tuple[Decimal, Decimal, Decimal]:
         pending = self._pending_for(direction)
         scenario = self.state.scenario + 1
         size, distance = self.cfg.size_for(scenario), self.cfg.stop_for(scenario)
-        projected_general = self.state.general_recovery + Decimal(str(pending["pending_d_value"]))
-        return size, distance, recovery_distance(projected_general, size)
+        d_to_add = (Decimal(str(pending.get("d_value", pending["pending_d_value"])))
+                    if not pending.get("d_accounted") else Decimal("0"))
+        projected_general = self.state.general_recovery + d_to_add
+        projected_distance = (
+            recovery_distance(projected_general, size)
+            if scenario == 1
+            else remaining_recovery_distance(projected_general, size, distance)
+        )
+        return size, distance, projected_distance
 
     def _leg(self, direction: str) -> Leg:
         leg = self.state.long if direction == "BUY" else self.state.short

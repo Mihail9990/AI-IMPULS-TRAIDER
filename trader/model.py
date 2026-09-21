@@ -74,9 +74,9 @@ class CycleState:
     manual: bool = False
     scenario: int = 0
     recovery: Decimal = D("0")
-    # Recovery model v2: one monetary balance for the complete logical cycle. ``recovery`` and
+    # Recovery model v3: one monetary balance for the complete logical cycle. ``recovery`` and
     # the per-leg recovery fields are retained only as serialized legacy input/display mirrors.
-    recovery_model_version: int = 2
+    recovery_model_version: int = 3
     general_recovery: Decimal = D("0")
     target_value: Decimal = D("0")
     initial_position_size: Decimal = D("0")
@@ -260,6 +260,12 @@ class CycleState:
             for part in report.get("parts", []):
                 if part.get("status") != "delivered":
                     part["status"] = "pending"
+        for closure in raw.get("pending_recovery", []):
+            closure.setdefault("d_value", closure.get("pending_d_value", "0"))
+            closure.setdefault("scenario_at_close", 1)
+            closure.setdefault("broker_execution_time", "")
+            closure.setdefault("original_trigger_anchor", closure.get("entry", "0"))
+            closure.setdefault("reentry_accounted", bool(closure.get("reopen_event_id")))
         for name in ("long", "short"):
             leg = raw.get(name)
             if leg:
@@ -312,7 +318,7 @@ class CycleState:
         self.scenario = 0
         self.recovery = self.entry_spread = D("0")
         self.general_recovery = self.target_value = self.initial_position_size = D("0")
-        self.recovery_model_version = 2
+        self.recovery_model_version = 3
         self.recovery_events.clear()
         self.pending_recovery.clear()
         self.recovery_migration_error = ""
@@ -361,13 +367,27 @@ def recovery_distance(general_recovery: Decimal, size: Decimal) -> Decimal:
     return general_recovery / size
 
 
+def remaining_recovery_distance(
+    general_recovery: Decimal, size: Decimal, scenario_distance: Decimal
+) -> Decimal:
+    """Return the v3 S2-S8 recovery remainder without mutating the monetary ledger."""
+    if size <= 0:
+        raise RuntimeError("Cannot calculate Recovery distance for an unknown or zero size")
+    base_value = scenario_distance * size
+    return max(D("0"), general_recovery - base_value) / size
+
+
 def protection_levels(direction: str, entry: Decimal, stop_distance: Decimal,
-                      general_recovery: Decimal, size: Decimal) -> tuple[Decimal, Decimal]:
+                      general_recovery: Decimal, size: Decimal, *,
+                      scenario: int = 1) -> tuple[Decimal, Decimal]:
     """Central monetary-Recovery SL/TP formula used by every execution path."""
     stop = stop_for(direction, entry, stop_distance)
-    target = target_for(
-        direction, entry, stop_distance, recovery_distance(general_recovery, size)
+    recovery = (
+        recovery_distance(general_recovery, size)
+        if scenario == 1
+        else remaining_recovery_distance(general_recovery, size, stop_distance)
     )
+    target = target_for(direction, entry, stop_distance, recovery)
     return stop, target
 
 

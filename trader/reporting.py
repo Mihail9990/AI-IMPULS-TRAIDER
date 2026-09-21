@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from .model import CycleState, Leg
+from .model import CycleState, Leg, recovery_distance, remaining_recovery_distance
 
 D = Decimal
 
@@ -27,7 +27,13 @@ def recovery_snapshot(state: CycleState) -> dict:
             result[leg.direction] = {
                 "open": leg.open, "size": leg.size, "entry": leg.current_entry,
                 "trigger": leg.original_trigger_level, "distance": leg.stop_distance,
-                "recovery_distance": (state.general_recovery / leg.size if leg.size > 0 else None),
+                "recovery_distance": (
+                    recovery_distance(state.general_recovery, leg.size)
+                    if state.scenario == 1 and leg.size > 0 else
+                    remaining_recovery_distance(
+                        state.general_recovery, leg.size, leg.stop_distance
+                    ) if 2 <= state.scenario <= 8 and leg.size > 0 else None
+                ),
                 "stop": leg.stop, "target": leg.take_profit, "trigger_id": leg.trigger_id,
             }
     return result
@@ -36,6 +42,7 @@ def recovery_snapshot(state: CycleState) -> dict:
 def leg_details(
     leg: Leg, *, broker_stop=None, broker_target=None, confirmation: str | None = None,
     readback: str | None = None, general_recovery: Decimal | None = None,
+    scenario: int = 1,
 ) -> str:
     if broker_stop is None:
         broker_stop = leg.confirmed_stop
@@ -46,8 +53,16 @@ def leg_details(
               f"ЗАКРЫТА; Trigger={leg.trigger_id}" if leg.trigger_id else "ЗАКРЫТА")
     confirmation = confirmation if confirmation is not None else (leg.protection_confirmation or "не отправлено")
     readback = readback if readback is not None else (leg.protection_readback or "не выполнено")
-    distance = (general_recovery / leg.size
-                if general_recovery is not None and leg.size > 0 else "НЕИЗВЕСТНО")
+    if scenario >= 9:
+        distance = "НЕТ: Scenario 9 закрывается без ordinary Recovery TP"
+    elif general_recovery is None or leg.size <= 0:
+        distance = "НЕИЗВЕСТНО"
+    elif scenario == 1:
+        distance = recovery_distance(general_recovery, leg.size)
+    else:
+        distance = remaining_recovery_distance(
+            general_recovery, leg.size, leg.stop_distance
+        )
     levels = (f"  расчётные SL/TP={leg.stop} / {leg.take_profit}\n"
               f"  отправленные SL/TP={leg.protection_sent_stop} / {leg.protection_sent_take_profit}\n"
               f"  confirmation={confirmation}; принятые SL/TP={leg.confirmation_stop} / {leg.confirmation_take_profit}\n"
@@ -62,8 +77,13 @@ def leg_details(
         f"current_entry={leg.current_entry}; original_trigger={leg.original_trigger_level}\n"
         f"  desired D={leg.stop_distance}; broker-confirmed D={leg.confirmed_stop_distance}; "
         f"recovery_distance={distance}\n{levels}\n"
-        f"  формула TP: entry {'+' if leg.direction == 'BUY' else '−'} D "
-        f"{'+' if leg.direction == 'BUY' else '−'} GENERAL_RECOVERY/size"
+        f"  формула TP: " + (
+            "ordinary Recovery TP отсутствует"
+            if scenario >= 9 else
+            f"entry {'+' if leg.direction == 'BUY' else '−'} DISTANCE_SCENARIO "
+            f"{'+' if leg.direction == 'BUY' else '−'} "
+            f"{'GENERAL_RECOVERY/size' if scenario == 1 else 'REMAINING_RECOVERY/size'}"
+        )
     )
 
 
@@ -82,26 +102,45 @@ def recovery_change_text(
     for leg in (state.long, state.short):
         if not leg:
             continue
-        distance = state.general_recovery / leg.size if leg.size > 0 else "НЕИЗВЕСТНО"
+        distance = (
+            recovery_distance(state.general_recovery, leg.size)
+            if state.scenario == 1 and leg.size > 0 else
+            remaining_recovery_distance(
+                state.general_recovery, leg.size, leg.stop_distance
+            ) if 2 <= state.scenario <= 8 and leg.size > 0 else "НЕТ"
+        )
         lines.append(
-            f"{leg.direction}: size={leg.size}; D={leg.stop_distance}; "
+            f"{leg.direction}: size={leg.size}; DISTANCE_SCENARIO={leg.stop_distance}; "
             f"recovery_distance={state.general_recovery}/{leg.size}={distance}; "
             f"entry={leg.current_entry}; SL={leg.stop}; TP={leg.take_profit}"
         )
-    pending = [item for item in state.pending_recovery if not item.get("d_accounted")]
+    pending = [item for item in state.pending_recovery
+               if not item.get("reentry_accounted", bool(item.get("reopen_event_id")))]
     for item in pending:
         lines.append(
-            f"pending D: dealId={item.get('deal_id')}; {item.get('stop_distance')} × "
-            f"{item.get('size')} = {item.get('pending_d_value')} денег; ещё не перенесён"
+            f"pending D/reentry closure: dealId={item.get('deal_id')}; scenario_at_close="
+            f"{item.get('scenario_at_close', '?')}; D_VALUE={item.get('pending_d_value')} денег; "
+            f"D {'учтён' if item.get('d_accounted') else 'ожидает linked reentry'}; "
+            "reentry ожидается"
         )
     return "\n".join(lines)
 
 
 def status_text(state: CycleState) -> str:
+    def displayed_distance(leg: Leg):
+        if leg.size <= 0:
+            return "НЕИЗВЕСТНО"
+        if state.scenario == 1:
+            return recovery_distance(state.general_recovery, leg.size)
+        if 2 <= state.scenario <= 8:
+            return remaining_recovery_distance(
+                state.general_recovery, leg.size, leg.stop_distance
+            )
+        return "НЕТ"
+
     legs = ", ".join(
-        f"{leg.direction}(size={leg.size}, sl_distance={leg.stop_distance}, "
-        f"recovery_distance="
-        f"{state.general_recovery / leg.size if leg.size > 0 else 'НЕИЗВЕСТНО'})"
+        f"{leg.direction}(size={leg.size}, scenario_distance={leg.stop_distance}, "
+        f"recovery_distance={displayed_distance(leg)})"
         for leg in (state.long, state.short) if leg
     ) or "-"
     return (

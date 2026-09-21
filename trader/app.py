@@ -110,7 +110,10 @@ class Bot:
             )
 
     def _leg_details(self, leg: Leg, **kwargs) -> str:
-        return leg_details(leg, general_recovery=self.state.general_recovery, **kwargs)
+        return leg_details(
+            leg, general_recovery=self.state.general_recovery,
+            scenario=self.state.scenario, **kwargs
+        )
 
     def _get_continuation(self) -> CycleContinuation:
         controller = getattr(self, "continuation", None)
@@ -2011,7 +2014,7 @@ class Bot:
             f"SL {survivor.direction}: {stop_fill}\n"
             f"Сценарий: {self.state.scenario}\n"
             f"GENERAL_RECOVERY={self.state.general_recovery}; recovery_distance оставшейся "
-            f"{stopped.direction}={self.state.general_recovery / stopped.size}\n"
+            f"{stopped.direction}={self.strategy.recovery_distance_for(stopped)}\n"
             f"Осталась сторона: {stopped.direction}\n"
             f"Новый TP: {stopped.take_profit}\n"
             f"Новый trigger {survivor.direction}: {survivor.original_trigger_level}\n"
@@ -2071,13 +2074,27 @@ class Bot:
         if survivor_sl is None or survivor_sl.level is None:
             return False
 
+        if survivor_sl is not None and survivor_sl.timestamp == opened.timestamp:
+            self._manual(
+                "Broker chronology Trigger/reentry и survivor SL неоднозначна; "
+                "scenario_at_close не угадан"
+            )
+            return True
         reopen_key = f"reopen:{opened.deal_id}"
         if reopen_key not in self.state.processed_events:
             self.strategy.reopened(stopped.direction, opened.level, opened.deal_id, reopen_key)
             stopped.deal_reference = opened.deal_reference or stopped.deal_reference
         survivor_stop_key = f"stop:{survivor.deal_id}:{survivor_sl.level}"
         if survivor_stop_key not in self.state.processed_events:
-            self.strategy.stopped(survivor.direction, survivor_sl.level, survivor_stop_key)
+            close_scenario = (
+                self.state.scenario - 1
+                if survivor_sl.timestamp < opened.timestamp else self.state.scenario
+            )
+            self.strategy.stopped(
+                survivor.direction, survivor_sl.level, survivor_stop_key,
+                scenario_at_close=close_scenario,
+                broker_execution_time=survivor_sl.timestamp.isoformat(),
+            )
 
         if reopened_tp is not None and reopened_tp.level is not None:
             self._complete_cycle(stopped.direction, reopened_tp.level)
@@ -2117,7 +2134,7 @@ class Bot:
                 f"Вход: {opened.level}\nSL: {reopened_sl.level}\n"
                 f"Сценарий: {self.state.scenario}\n"
                 f"GENERAL_RECOVERY={self.state.general_recovery}; recovery_distance survivor "
-                f"{survivor.direction}={self.state.general_recovery / survivor.size}\n"
+                f"{survivor.direction}={self.strategy.recovery_distance_for(survivor)}\n"
                 f"Следующий trigger: {survivor.direction} "
                 f"на {survivor.original_trigger_level}\n"
                 "Поздний SL будет применён после подтверждения следующего trigger-входа."
@@ -2831,7 +2848,7 @@ class Bot:
             self.state.save(self.cfg.state_file)
             return
         self.state.recovery_migration_error = (
-            "Активное состояние использует прежнюю per-leg Recovery-модель. В нём нет "
+            "Активное состояние использует прежнюю Recovery-модель. В нём нет "
             "однозначных денежных снимков spread/target/pending D/slippage; автоматический "
             "пересчёт запрещён. Исходные значения сохранены."
         )
@@ -3351,8 +3368,8 @@ class Bot:
             f"✅ Цикл восстановлен\nСценарий: {self.state.scenario}\n"
             f"BUY dealId: {self.state.long.deal_id}\nSELL dealId: {self.state.short.deal_id}\n"
             f"GENERAL_RECOVERY={self.state.general_recovery}; target_value={self.state.target_value}\n"
-            f"BUY recovery_distance={self.state.general_recovery / self.state.long.size}; "
-            f"SELL recovery_distance={self.state.general_recovery / self.state.short.size}\n"
+            f"BUY recovery_distance={self.strategy.recovery_distance_for(self.state.long)}; "
+            f"SELL recovery_distance={self.strategy.recovery_distance_for(self.state.short)}\n"
             "Текущий цикл продолжает контролироваться. "
             f"Следующий цикл на паузе до /start."
         )
