@@ -64,6 +64,14 @@ class CapitalClient:
             self.session_generation,
         )
 
+    def _auth_snapshot(self) -> tuple[int, dict[str, str]]:
+        """Atomically bind a generation to the exact tokens passed to one HTTP send."""
+        with self._login_lock:
+            return self.session_generation, {
+                "CST": str(self.http.headers.get("CST", "")),
+                "X-SECURITY-TOKEN": str(self.http.headers.get("X-SECURITY-TOKEN", "")),
+            }
+
     def _refresh_failed_session(self, failed_generation: int) -> None:
         """Refresh exactly the generation that produced a 401.
 
@@ -94,7 +102,9 @@ class CapitalClient:
         if time.time() - self.last_login > 540:
             self.login()
         request_id = next(self._request_ids)
-        request_generation = self.session_generation
+        request_generation, auth_headers = self._auth_snapshot()
+        supplied_headers = dict(kwargs.pop("headers", {}))
+        send_headers = {**supplied_headers, **auth_headers}
         safe_kwargs = {key: _redact(value) for key, value in kwargs.items()}
         LOG.info("CAPITAL REQUEST id=%s method=%s path=%s data=%s", request_id, method, path,
                  _json_text(safe_kwargs))
@@ -105,7 +115,9 @@ class CapitalClient:
         response = None
         for attempt in range(attempts):
             try:
-                response = self.http.request(method, self.base + path, timeout=20, **kwargs)
+                response = self.http.request(
+                    method, self.base + path, timeout=20, headers=send_headers, **kwargs
+                )
             except requests.RequestException as exc:
                 LOG.warning(
                     "CAPITAL transport failure id=%s attempt=%s/%s method=%s path=%s: %s",
@@ -128,7 +140,16 @@ class CapitalClient:
         if response.status_code == 401:
             LOG.warning("CAPITAL REQUEST id=%s received 401; refreshing session", request_id)
             self._refresh_failed_session(request_generation)
-            response = self.http.request(method, self.base + path, timeout=20, **kwargs)
+            _, retry_auth_headers = self._auth_snapshot()
+            try:
+                response = self.http.request(
+                    method, self.base + path, timeout=20,
+                    headers={**supplied_headers, **retry_auth_headers}, **kwargs
+                )
+            except requests.RequestException as exc:
+                raise CapitalError(
+                    f"Capital transport error after session refresh {method} {path}: {exc}"
+                ) from exc
         self._log_response(request_id, response, started, path=path)
         self._check(response)
         return response.json() if response.content else {}
@@ -351,10 +372,21 @@ class CapitalClient:
             params["dealId"] = deal_id
         return self.request("GET", "/history/activity", params=params).get("activities", [])
 
-    def transactions(self, last_period: int = 86400) -> list[dict]:
-        return self.request(
-            "GET", "/history/transactions", params={"lastPeriod": last_period, "type": "TRADE"}
-        ).get("transactions", [])
+    def transactions(self, last_period: int = 86400, *, from_date: str = "",
+                     to_date: str = "", all_types: bool = False) -> list[dict]:
+        params: dict = {}
+        if from_date or to_date:
+            if from_date:
+                params["from"] = from_date
+            if to_date:
+                params["to"] = to_date
+        else:
+            params["lastPeriod"] = last_period
+        # /pnl keeps its historical TRADE-only meaning. Attempt reconciliation deliberately omits
+        # the optional filter so documented swaps, commissions, corrections and adjustments arrive.
+        if not all_types:
+            params["type"] = "TRADE"
+        return self.request("GET", "/history/transactions", params=params).get("transactions", [])
 
     def candle_ranges(self, epic: str, minutes: int) -> tuple[Decimal, Decimal]:
         """Return ranges of the last closed candle and the forming candle."""

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from decimal import InvalidOperation
 
 from .model import CycleState, Leg, recovery_distance, remaining_recovery_distance
 
@@ -219,7 +220,15 @@ def broker_attempt_pnl(transactions: list[dict], deal_ids: set[str]) -> dict:
         currency = str(item.get("currency") or item.get("currencyIsoCode") or "")
         if deal_id not in deal_ids:
             continue
-        fingerprint = (deal_id, kind, str(amount), currency)
+        try:
+            numeric_amount = D(str(amount))
+        except (InvalidOperation, ValueError, TypeError):
+            return {"status": "UNAVAILABLE", "amount": None, "currency": "",
+                    "components": []}
+        if not numeric_amount.is_finite():
+            return {"status": "UNAVAILABLE", "amount": None, "currency": "",
+                    "components": []}
+        fingerprint = (deal_id, kind, str(numeric_amount), currency)
         if transaction_id in seen:
             if seen[transaction_id] != fingerprint:
                 return {"status": "UNAVAILABLE", "amount": None, "currency": "",
@@ -230,15 +239,23 @@ def broker_attempt_pnl(transactions: list[dict], deal_ids: set[str]) -> dict:
             return {"status": "UNAVAILABLE", "amount": None, "currency": "", "components": []}
         seen[transaction_id] = fingerprint
         correlated.append({"id": transaction_id, "deal_id": deal_id, "type": kind,
-                           "amount": str(_decimal(amount)), "currency": currency})
+                           "amount": str(numeric_amount), "currency": currency})
     if not correlated:
         return {"status": "PENDING", "amount": None, "currency": "", "components": []}
+    represented = {item["deal_id"] for item in correlated}
+    if represented != deal_ids:
+        currencies = {item["currency"] for item in correlated}
+        return {"status": "PARTIAL", "amount": None,
+                "currency": next(iter(currencies)) if len(currencies) == 1 else "",
+                "components": correlated}
     currencies = {item["currency"] for item in correlated}
     kinds = {item["type"] for item in correlated}
     if len(currencies) != 1 or ("TRADE" in kinds and kinds & (supported_types - {"TRADE"})):
         return {"status": "AMBIGUOUS", "amount": None, "currency": "",
                 "components": correlated}
-    return {"status": "CONFIRMED",
+    # Capital's schema has no finality marker for later corrections.  This is a complete snapshot
+    # for all expected deals, not a promise that the account ledger can never publish an update.
+    return {"status": "COMPLETE_SNAPSHOT",
             "amount": sum((_decimal(item["amount"]) for item in correlated), D("0")),
             "currency": next(iter(currencies)), "components": correlated}
 

@@ -25,14 +25,15 @@ from .events import (
     find_working_order_cancellation,
     find_working_order_execution,
     normalize_events,
-    normalize_event,
 )
 from .execution import ExecutionPolicy, is_crossed_level_rejection, trigger_level_passed
 from .model import CycleState, Leg, stop_for, target_for
-from .notifications import NotificationHistoryWorker, migrate_notification_jobs, split_report
+from .notifications import (
+    NotificationHistoryWorker, TransactionHistoryWorker, migrate_notification_jobs, split_report,
+)
 from .reconcile import RemoteSnapshot
 from .reporting import (
-    broker_attempt_pnl, cycle_heading, cycle_result_text, leg_details, pnl_text, recovery_change_text,
+    cycle_heading, cycle_result_text, leg_details, pnl_text, recovery_change_text,
     recovery_snapshot, scenario_nine_result_text, status_text,
 )
 from .streaming import PriceWatch, QuoteStream
@@ -70,6 +71,7 @@ class Bot:
         self.execution_policy = ExecutionPolicy()
         self.continuation = CycleContinuation(self)
         self.notification_worker = NotificationHistoryWorker(cfg)
+        self.transaction_worker = TransactionHistoryWorker(cfg)
         self._queued_report_parts: set[tuple[str, int]] = set()
         self._queued_log_parts: set[tuple[str, int]] = set()
         if (not self.state.continuation_managed and self.state.active
@@ -199,6 +201,47 @@ class Bot:
                 self.state.save(self.cfg.state_file)
             for job in self.state.pending_notification_jobs:
                 worker.submit(job)
+        transaction_worker = getattr(self, "transaction_worker", None)
+        if transaction_worker is not None:
+            for completed in transaction_worker.results():
+                job = next((item for item in self.state.pending_transaction_jobs
+                            if item.get("key") == completed["key"]), None)
+                if job is None:
+                    continue
+                result = completed["result"]
+                fingerprint = repr((
+                    result.get("status"), str(result.get("amount")), result.get("currency"),
+                    tuple((item.get("id"), item.get("amount"))
+                          for item in result.get("components", [])),
+                ))
+                if fingerprint != job.get("result_fingerprint"):
+                    job["status"] = result["status"]
+                    job["amount"] = (str(result["amount"])
+                                     if result.get("amount") is not None else None)
+                    job["currency"] = result.get("currency", "")
+                    job["components"] = result.get("components", [])
+                    job["observed_to_epoch"] = result.get("observed_to_epoch")
+                    job["result_fingerprint"] = fingerprint
+                    attempt = next((item for item in self.state.attempt_history
+                                    if item.get("attempt_id") == job.get("attempt_id")), None)
+                    if attempt is not None:
+                        attempt["broker_transaction_status"] = job["status"]
+                        attempt["broker_transaction_pnl"] = job["amount"]
+                        attempt["broker_transaction_currency"] = job["currency"]
+                        attempt["broker_transaction_components"] = list(job["components"])
+                    if job.get("attempt_id") == max(
+                        (int(item.get("attempt_id", 0) or 0)
+                         for item in self.state.pending_transaction_jobs), default=0
+                    ):
+                        self.state.broker_transaction_status = job["status"]
+                        self.state.broker_transaction_pnl = (
+                            D(job["amount"]) if job["amount"] is not None else None
+                        )
+                        self.state.broker_transaction_currency = job["currency"]
+                        self.state.broker_transaction_components = list(job["components"])
+                    changed = True
+            for job in self.state.pending_transaction_jobs:
+                transaction_worker.submit(job)
         if isinstance(self.telegram, Telegram):
             for ack in self.telegram.delivery_acks():
                 marker = (str(ack["report_id"]), int(ack["part"]))
@@ -248,22 +291,6 @@ class Bot:
             # tick or any later state mutation.
             self.state.save(self.cfg.state_file)
         self._queue_pending_reports()
-
-    def _refresh_broker_attempt_pnl(self) -> None:
-        if self.state.broker_transaction_status != "PENDING" or not self.state.attempt_deal_ids:
-            return
-        try:
-            result = broker_attempt_pnl(
-                self.capital.transactions(), set(self.state.attempt_deal_ids)
-            )
-        except Exception:
-            LOG.info("Broker transaction P&L is delayed", exc_info=True)
-            return
-        self.state.broker_transaction_status = result["status"]
-        self.state.broker_transaction_pnl = result["amount"]
-        self.state.broker_transaction_currency = result["currency"]
-        self.state.broker_transaction_components = result["components"]
-        self.state.save(self.cfg.state_file)
 
     def _dispatch_owned_cycle(self) -> None:
         """Return shared-operation follow-up to the exclusive current owner."""
@@ -365,6 +392,7 @@ class Bot:
     def run(self) -> None:
         self.telegram.start()
         self.notification_worker.start()
+        self.transaction_worker.start()
         # Durable Telegram reports are independent of Capital.com startup reconciliation.
         self._tick_notifications()
         self.telegram.install_commands()
@@ -623,8 +651,6 @@ class Bot:
     def tick(self) -> None:
         if self.state.pending_actual_attempt_id:
             self._refresh_actual_attempt_result()
-        if not self.state.active and self.state.broker_transaction_status == "PENDING":
-            self._refresh_broker_attempt_pnl()
         if self.state.continuation_managed:
             self._get_continuation().tick()
         elif self.state.armed and not self.state.active and not self.state.paused:
@@ -2051,6 +2077,20 @@ class Bot:
         later = [scenario for scenario, event in reentries if event.timestamp > close_event.timestamp]
         return min(later) - 1 if later else self.state.scenario
 
+    def _apply_confirmed_stop_event(self, leg: Leg, close_event, activity: list[dict]) -> Leg | None:
+        """Apply one exact SL using its deal's immutable opening scenario and broker chronology."""
+        if close_event is None or close_event.level is None:
+            return None
+        scenario = self._scenario_at_broker_close(leg, close_event, activity)
+        if scenario is None:
+            return None
+        return self.strategy.stopped(
+            leg.direction, close_event.level,
+            f"stop:{leg.deal_id}:{close_event.level}",
+            scenario_at_close=scenario,
+            broker_execution_time=close_event.timestamp.isoformat(),
+        )
+
     def _recover_trigger_fill_then_stop(
         self, positions: dict[str, dict], survivor: Leg, stopped: Leg
     ) -> bool:
@@ -2063,11 +2103,15 @@ class Bot:
         candidate = self._trigger_fill_candidate(positions, stopped)
         if candidate is None:
             return False
-        activity = self.capital.activity(survivor.deal_id)
+        activity = self.capital.activity()
         survivor_sl = find_close_event(activity, survivor.deal_id, "SL")
         if survivor_sl is None or survivor_sl.level is None:
             return False
-        opened_time = normalize_event(candidate).timestamp
+        opened = find_trigger_open_event(activity, stopped.trigger_id, stopped.direction)
+        if opened is None or opened.deal_id != str(candidate.get("dealId", "")):
+            LOG.info("Trigger opening activity is still synchronizing: %s", stopped.trigger_id)
+            return False
+        opened_time = opened.timestamp
         if (survivor_sl.timestamp == datetime.min.replace(tzinfo=timezone.utc)
                 or opened_time == datetime.min.replace(tzinfo=timezone.utc)
                 or survivor_sl.timestamp == opened_time):
@@ -2613,11 +2657,18 @@ class Bot:
 
     def _begin_double_sl_pause(self, closes: list[tuple[Leg, Decimal]]) -> None:
         """Account flat stops and start a durable non-blocking continuation pause."""
+        activity = self.capital.activity()
         attempt_id = self.state.active_attempt_id or self.state.diagnostic_cycle_number
         details = []
         for leg, fill in closes:
             if leg.open:
-                self.strategy.stopped(leg.direction, fill, f"stop:{leg.deal_id}:{fill}")
+                event = find_close_event(activity, leg.deal_id, "SL")
+                if event is None or event.level != fill \
+                        or self._apply_confirmed_stop_event(leg, event, activity) is None:
+                    self._manual(
+                        f"Double-SL chronology недостаточна для {leg.deal_id}"
+                    )
+                    return
             points = fill - leg.current_entry if leg.direction == "BUY" else leg.current_entry - fill
             size = leg.size if leg.size else self.cfg.size
             details.append((leg, fill, points * size))
@@ -2917,10 +2968,14 @@ class Bot:
                     assert survivor
                     if survivor.deal_id not in positions:
                         raise RuntimeError("обе ожидаемые позиции отсутствуют")
-                    fill = self._closing_fill(lost)
-                    if fill is None:
+                    activity = self.capital.activity()
+                    close_event = find_close_event(activity, lost.deal_id, "SL")
+                    if close_event is None or close_event.level is None:
                         raise RuntimeError(f"не найдена цена закрытия {lost.deal_id}")
-                    self.strategy.stopped(lost.direction, fill, f"stop:{lost.deal_id}:{fill}")
+                    if self._apply_confirmed_stop_event(lost, close_event, activity) is None:
+                        raise RuntimeError(
+                            f"broker chronology закрытия {lost.deal_id} недостаточна"
+                        )
                     if not self._apply_protection(survivor):
                         break
                     self._create_trigger(lost)
@@ -3113,6 +3168,16 @@ class Bot:
         self.state.broker_transaction_currency = ""
         self.state.broker_transaction_status = "PENDING"
         self.state.broker_transaction_components.clear()
+        transaction_key = f"transactions:{self.state.cycle_id}:{attempt_id}"
+        if not any(job.get("key") == transaction_key
+                   for job in self.state.pending_transaction_jobs):
+            self.state.pending_transaction_jobs.append({
+                "key": transaction_key, "cycle_id": self.state.cycle_id,
+                "attempt_id": attempt_id, "deal_ids": list(scenario_nine_deals),
+                "search_from_epoch": time.time() - 86400,
+                "status": "PENDING", "amount": None, "currency": "",
+                "components": [],
+            })
         self._refresh_actual_attempt_result()
         for leg in legs:
             leg.open = False
@@ -3419,7 +3484,16 @@ class Bot:
                 raise RuntimeError("Укажите цену trigger")
             level = D(args[1])
             if leg.trigger_id:
-                self.capital.delete_working_order(leg.trigger_id)
+                old_trigger = leg.trigger_id
+                if not self.capital.delete_working_order(old_trigger):
+                    if not self._resolve_trigger_for_double_stop(leg, self._cycle_positions()):
+                        raise RuntimeError(
+                            f"Исход прежнего Trigger {old_trigger} ещё не подтверждён"
+                        )
+                    if leg.open:
+                        raise RuntimeError(
+                            f"Прежний Trigger {old_trigger} уже исполнился; замена не создана"
+                        )
             projected_size, projected_distance, projected_recovery = self.strategy.projected_reopen(
                 leg.direction
             )
@@ -3438,6 +3512,7 @@ class Bot:
             leg.trigger_id = str(result["dealId"])
             if leg.trigger_id not in self.state.cycle_trigger_ids:
                 self.state.cycle_trigger_ids.append(leg.trigger_id)
+            self._link_pending_closure_trigger(leg)
         else:
             if command not in {"/removesl", "/removetp"} and len(args) != 2:
                 raise RuntimeError("Укажите цену")
@@ -4053,6 +4128,18 @@ class Bot:
             )
             return event.level
         return None
+
+    def _close_event_any_index(self, leg: Leg, expected_source: str,
+                               global_activity: list[dict]):
+        event = find_close_event(global_activity, leg.deal_id, expected_source)
+        if event is not None:
+            return event
+        try:
+            return find_close_event(
+                self.capital.activity(leg.deal_id), leg.deal_id, expected_source
+            )
+        except CapitalError:
+            return None
 
     def _wait_closing_fill(
         self, leg: Leg, expected_source: str = "SL", attempts: int = 16, delay: float = 0.5

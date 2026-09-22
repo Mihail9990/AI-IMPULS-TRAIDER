@@ -198,27 +198,29 @@ class CycleContinuation:
             sl = None if tp is not None else self.bot._closing_fill_any_index(leg, "SL", activity)
             if tp is None and sl is None:
                 return
-            closes.append((leg, "TP" if tp is not None else "SL", tp or sl))
+            source = "TP" if tp is not None else "SL"
+            event = self.bot._close_event_any_index(leg, source, activity)
+            closes.append((leg, source, tp or sl, event))
         winners = [item for item in closes if item[1] == "TP"]
         if winners:
-            winner, _, fill = winners[0]
+            winner, _, fill, _ = winners[0]
             if any(leg.deal_id in positions for leg in open_legs if leg is not winner):
                 # TP geometry implies the opposite SL, but visibility is not closure evidence.
                 return
-            for loser, source, loser_fill in closes:
+            for loser, source, loser_fill, event in closes:
                 if loser is not winner and source == "SL" and loser.open:
-                    self.bot.strategy.stopped(
-                        loser.direction, loser_fill, f"stop:{loser.deal_id}:{loser_fill}"
-                    )
+                    if self.bot._apply_confirmed_stop_event(loser, event, activity) is None:
+                        return
             self.state.pending_tp_direction = winner.direction
             self.state.pending_tp_fill = fill
             self.state.save(self.bot.cfg.state_file)
             self._finish_take_profit()
             return
-        for leg, _, fill in closes:
+        for leg, _, fill, event in closes:
             if leg.open:
                 before = recovery_snapshot(self.state)
-                self.bot.strategy.stopped(leg.direction, fill, f"stop:{leg.deal_id}:{fill}")
+                if self.bot._apply_confirmed_stop_event(leg, event, activity) is None:
+                    return
                 self.bot._send_report(recovery_change_text(
                     self.state, before,
                     event=(f"continuation: SL {leg.direction} dealId={leg.deal_id}; "
@@ -237,7 +239,7 @@ class CycleContinuation:
             if trigger_leg and trigger_leg.trigger_id:
                 if not self.bot._resolve_trigger_for_double_stop(trigger_leg, positions):
                     return
-        self.bot._begin_double_sl_pause([(leg, fill) for leg, _, fill in closes])
+        self.bot._begin_double_sl_pause([(leg, fill) for leg, _, fill, _ in closes])
 
     def _finish_take_profit(self) -> None:
         """Resolve every trigger race before releasing continuation ownership."""

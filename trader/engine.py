@@ -245,12 +245,17 @@ class Strategy:
 
     def _pending_for(self, direction: str, *, working_order_id: str = "",
                      close_key: str = "") -> dict:
+        def owner(item: dict) -> tuple[int, int]:
+            if "cycle_id" in item and "cycle_attempt" in item:
+                return int(item["cycle_id"] or 0), int(item["cycle_attempt"] or 0)
+            record = next((entry for entry in self.state.deal_history
+                           if entry.get("deal_id") == item.get("deal_id")), None)
+            return (int((record or {}).get("cycle_id", 0) or 0),
+                    int((record or {}).get("cycle_attempt", 0) or 0))
         candidates = [item for item in self.state.pending_recovery
                       if item.get("direction") == direction
                       and not item.get("reentry_accounted", bool(item.get("reopen_event_id")))
-                      and int(item.get("cycle_id", self.state.cycle_id)) == self.state.cycle_id
-                      and int(item.get("cycle_attempt", self.state.cycle_attempt))
-                      == self.state.cycle_attempt]
+                      and owner(item) == (self.state.cycle_id, self.state.cycle_attempt)]
         if close_key:
             candidates = [item for item in candidates if item.get("close_key") == close_key]
         if working_order_id:

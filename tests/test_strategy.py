@@ -30,7 +30,7 @@ from trader.model import (
     trigger_slippage,
 )
 from trader.notifications import (
-    NotificationHistoryWorker, migrate_notification_jobs, split_report,
+    NotificationHistoryWorker, TransactionHistoryWorker, migrate_notification_jobs, split_report,
 )
 from trader.reconcile import RemoteSnapshot
 from trader.reporting import (
@@ -1946,10 +1946,14 @@ class EntryRetryTest(unittest.TestCase):
             },
             "market": {"epic": "GOLD"},
         }]
-        bot.capital.activity.return_value = [{
-            "dealId": "long-old", "source": "SL", "status": "ACCEPTED", "level": 4635.42,
-            "dateUTC": "2026-09-21T10:00:01Z",
-        }]
+        bot.capital.activity.return_value = [
+            {"dealId": "short-new", "source": "USER", "status": "ACCEPTED",
+             "type": "POSITION", "dateUTC": "2026-09-21T10:00:00Z",
+             "details": {"workingOrderId": "buy-trigger", "direction": "SELL",
+                         "level": 4635.97}},
+            {"dealId": "long-old", "source": "SL", "status": "ACCEPTED",
+             "level": 4635.42, "dateUTC": "2026-09-21T10:00:01Z"},
+        ]
         bot.capital.update_position.return_value = "update-ref"
         bot.capital.working_orders.return_value = []
         bot.capital.working_stop.return_value = "next-trigger-ref"
@@ -1992,15 +1996,19 @@ class EntryRetryTest(unittest.TestCase):
         # The first snapshot still contains neither side.  Capital.com exposes the position
         # created by the trigger only while _retry_missing_positions is already running.
         bot.capital.positions.side_effect = [[], *([trigger_position] * 10)]
-        bot.capital.activity.return_value = [{
-            "dealId": "long-old", "source": "SL", "status": "ACCEPTED", "level": 4635.42,
-            "dateUTC": "2026-09-21T10:00:01Z",
-        }]
+        bot.capital.activity.return_value = [
+            {"dealId": "short-new", "source": "USER", "status": "ACCEPTED",
+             "type": "POSITION", "dateUTC": "2026-09-21T10:00:00Z",
+             "details": {"workingOrderId": "sell-trigger", "direction": "SELL",
+                         "level": 4635.97}},
+            {"dealId": "long-old", "source": "SL", "status": "ACCEPTED",
+             "level": 4635.42, "dateUTC": "2026-09-21T10:00:01Z"},
+        ]
         bot.capital.update_position.return_value = "update-ref"
         bot.capital.working_orders.return_value = []
         bot.capital.working_stop.return_value = "next-trigger-ref"
+        bot._apply_protection = Mock(return_value=True)
         bot.capital.wait_confirmation.side_effect = [
-            {"dealStatus": "ACCEPTED"},
             {"dealStatus": "ACCEPTED", "dealId": "next-trigger"},
         ]
 
@@ -2011,6 +2019,7 @@ class EntryRetryTest(unittest.TestCase):
         self.assertEqual(bot.state.scenario, 2)
         self.assertEqual(bot.state.phase, "SHORT_ONLY")
         self.assertEqual(bot.state.short.deal_id, "short-new")
+        bot._ensure_expected_trigger()
         self.assertEqual(bot.state.long.trigger_id, "next-trigger")
 
     def test_fast_positions_path_uses_broker_order_when_sl_precedes_reentry(self):
@@ -2022,10 +2031,14 @@ class EntryRetryTest(unittest.TestCase):
         position = {"dealId": "short-new", "workingOrderId": "sell-trigger",
                     "direction": "SELL", "level": "4010.00", "size": "10",
                     "createdDateUTC": "2026-09-21T10:00:02Z"}
-        bot.capital.activity.return_value = [{
-            "dateUTC": "2026-09-21T10:00:01Z", "dealId": "long-old",
-            "source": "SL", "status": "ACCEPTED", "type": "POSITION", "level": "4009.30",
-        }]
+        bot.capital.activity.return_value = [
+            {"dateUTC": "2026-09-21T10:00:02Z", "dealId": "short-new",
+             "source": "USER", "status": "ACCEPTED", "type": "POSITION",
+             "details": {"workingOrderId": "sell-trigger", "direction": "SELL",
+                         "level": "4010.00"}},
+            {"dateUTC": "2026-09-21T10:00:01Z", "dealId": "long-old",
+             "source": "SL", "status": "ACCEPTED", "type": "POSITION", "level": "4009.30"},
+        ]
         bot.capital.update_position.return_value = "update-ref"
         bot.capital.wait_confirmation.side_effect = [
             {"dealStatus": "ACCEPTED"},
@@ -2059,7 +2072,11 @@ class EntryRetryTest(unittest.TestCase):
                      "type": "POSITION", "level": "4009.30"}
             if close_time:
                 event["dateUTC"] = close_time
-            bot.capital.activity.return_value = [event]
+            opening = {"dealId": "short-new", "source": "USER", "status": "ACCEPTED",
+                       "type": "POSITION", "dateUTC": "2026-09-21T10:00:02Z",
+                       "details": {"workingOrderId": "sell-trigger", "direction": "SELL",
+                                   "level": "4010.00"}}
+            bot.capital.activity.return_value = [opening, event]
             self.assertTrue(bot._recover_trigger_fill_then_stop(
                 {"short-new": position}, bot.state.long, stopped
             ))
@@ -2647,6 +2664,12 @@ class EntryRetryTest(unittest.TestCase):
             object.__setattr__(
                 bot.cfg, "diagnostic_log_file", str(Path(directory) / "diagnostics.log")
             )
+            bot.capital.activity.return_value = [
+                {"dateUTC": "2026-09-21T00:00:01Z", "dealId": "buy-224",
+                 "source": "SL", "status": "ACCEPTED", "level": 4371.22},
+                {"dateUTC": "2026-09-21T00:00:02Z", "dealId": "sell-224",
+                 "source": "SL", "status": "ACCEPTED", "level": 4373.53},
+            ]
             with patch("trader.app.end_diagnostic_cycle"):
                 bot._begin_double_sl_pause([
                     (bot.state.long, D("4371.22")),
@@ -3574,6 +3597,12 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch("trader.app.time.time", return_value=1000):
             object.__setattr__(bot.cfg, "state_file", str(Path(directory) / "state.json"))
             object.__setattr__(bot.cfg, "diagnostic_log_file", str(Path(directory) / "diag.log"))
+            bot.capital.activity.return_value = [
+                {"dateUTC": "2026-09-21T00:00:01Z", "dealId": "buy",
+                 "source": "SL", "status": "ACCEPTED", "level": 99},
+                {"dateUTC": "2026-09-21T00:00:02Z", "dealId": "sell",
+                 "source": "SL", "status": "ACCEPTED", "level": 103},
+            ]
             bot._begin_double_sl_pause([(buy, D("99")), (sell, D("103"))])
             first_total = bot.state.attempt_result_total
             bot._begin_double_sl_pause([(buy, D("99")), (sell, D("103"))])
@@ -5279,6 +5308,173 @@ class GeneralRecoveryV3AcceptanceTest(unittest.TestCase):
 
 
 class BrokerEvidenceRegressionTest(unittest.TestCase):
+    @staticmethod
+    def recovery_bot(state_path: str):
+        cfg = Settings(
+            dry_run=False, api_key="key", identifier="id", password="password",
+            state_file=state_path, scenario_sizes=(D("10"),) * 9,
+            scenario_stop_distances=(D("1"),) * 9, target_profit=D("0.3"),
+        )
+        bot = Bot.__new__(Bot); bot.cfg = cfg; bot.capital = Mock(); bot.telegram = Mock()
+        bot.state = CycleState(cycle_id=1, cycle_attempt=1, active_attempt_id=1)
+        bot.strategy = Strategy(cfg, bot.state); bot.execution_policy = ExecutionPolicy()
+        bot._missing_exit_since = None; bot.continuation = CycleContinuation(bot)
+        bot.strategy.begin(D("4000.50"), D("4000.00"))
+        bot.strategy.confirm_initial_fills(D("4000.50"), D("4000.00"))
+        bot.state.long.deal_id, bot.state.short.deal_id = "buy-old", "sell-old"
+        bot.state.remember_deal(bot.state.long, 1); bot.state.remember_deal(bot.state.short, 1)
+        bot.strategy.stopped("SELL", D("4001.10"), "sell-s1")
+        bot.strategy.reopened("SELL", D("3999.90"), "sell-new", "sell-reentry",
+                              actual_size=D("10"))
+        return bot
+
+    @staticmethod
+    def chronology_activity(open_time="2026-09-21T00:00:02.000Z",
+                            close_time="2026-09-21T00:00:01.000Z"):
+        return [
+            {"dateUTC": open_time, "dealId": "sell-new", "source": "USER",
+             "type": "POSITION", "status": "ACCEPTED",
+             "details": {"workingOrderId": "sell-trigger", "direction": "SELL",
+                         "level": 3999.90, "size": 10}},
+            {"dateUTC": close_time, "dealId": "buy-old", "source": "SL",
+             "type": "POSITION", "status": "ACCEPTED", "level": 3999.40},
+        ]
+
+    def test_late_normal_tick_preserves_open_scenario_and_case_a_ledger(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self.recovery_bot(str(Path(directory) / "state.json"))
+            self.assertEqual(bot.state.general_recovery, D("20"))
+            activity = self.chronology_activity()
+            bot.capital.activity.return_value = activity
+            bot.capital.positions.return_value = [{
+                "position": {"dealId": "sell-new", "direction": "SELL", "level": 3999.90,
+                             "size": 10, "stopLevel": 4000.90, "profitLevel": 3997.80},
+                "market": {"epic": "GOLD"},
+            }]
+            bot._apply_protection = Mock(return_value=True)
+            bot._create_trigger = Mock()
+            bot._tick_cycle()
+            closure = next(item for item in bot.state.pending_recovery
+                           if item["deal_id"] == "buy-old")
+            self.assertEqual((closure["scenario_at_close"], closure["d_accounted"]), (1, False))
+            self.assertEqual(bot.state.general_recovery, D("21"))
+            before = (bot.state.general_recovery, dict(closure), bot.state.scenario)
+            self.assertEqual(bot.strategy.projected_reopen("BUY"), (D("10"), D("1"), D("2.1")))
+            self.assertEqual((bot.state.general_recovery, closure, bot.state.scenario), before)
+            bot.state.save(bot.cfg.state_file)
+            restored = CycleState.load(bot.cfg.state_file)
+            Strategy(bot.cfg, restored).reopened(
+                "BUY", D("4000.60"), "buy-new", "buy-reentry", actual_size=D("10")
+            )
+            self.assertEqual(restored.general_recovery, D("32"))
+            Strategy(bot.cfg, restored).reopened(
+                "BUY", D("4000.60"), "buy-new", "buy-reentry", actual_size=D("10")
+            )
+            self.assertEqual(restored.general_recovery, D("32"))
+
+    def test_late_stop_is_identical_in_startup_and_continuation_handlers(self):
+        for owner in ("startup", "continuation"):
+            with self.subTest(owner=owner), tempfile.TemporaryDirectory() as directory:
+                bot = self.recovery_bot(str(Path(directory) / "state.json"))
+                activity = self.chronology_activity()
+                bot.capital.activity.return_value = activity
+                position = {"dealId": "sell-new", "direction": "SELL", "level": 3999.90,
+                            "size": 10, "stopLevel": 4000.90, "profitLevel": 3997.80}
+                bot.capital.positions.return_value = [
+                    {"position": position, "market": {"epic": "GOLD"}}
+                ]
+                bot._apply_protection = Mock(return_value=True); bot._create_trigger = Mock()
+                if owner == "startup":
+                    bot._migrate_recovery_model = Mock()
+                    bot._recover_active_cycle({"sell-new": position}, [])
+                else:
+                    bot.state.continuation_managed = True
+                    bot.state.continuation_stage = "ACTIVE"
+                    bot.continuation.handle_active_scenario()
+                closure = next(item for item in bot.state.pending_recovery
+                               if item["deal_id"] == "buy-old")
+                self.assertEqual((closure["scenario_at_close"], closure["d_accounted"],
+                                  bot.state.general_recovery), (1, False, D("21")))
+
+    def test_fast_path_prefers_activity_open_over_later_position_creation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self.recovery_bot(str(Path(directory) / "state.json"))
+            # Rewind to the one-sided state immediately before SELL reentry accounting.
+            state = CycleState(cycle_id=1, cycle_attempt=1, active_attempt_id=1)
+            bot.state = state; bot.strategy = Strategy(bot.cfg, state)
+            bot.strategy.begin(D("4000.50"), D("4000.00"))
+            bot.strategy.confirm_initial_fills(D("4000.50"), D("4000.00"))
+            state.long.deal_id, state.short.deal_id = "buy-old", "sell-old"
+            state.remember_deal(state.long, 1); state.remember_deal(state.short, 1)
+            stopped = bot.strategy.stopped("SELL", D("4001.10"), "sell-s1")
+            stopped.trigger_id = "sell-trigger"
+            state.pending_recovery[-1]["trigger_id"] = "sell-trigger"
+            bot.capital.activity.return_value = self.chronology_activity(
+                "2026-09-21T00:00:02.000Z", "2026-09-21T00:00:02.030Z"
+            )
+            bot._apply_protection = Mock(return_value=True); bot._create_trigger = Mock()
+            candidate = {"dealId": "sell-new", "workingOrderId": "sell-trigger",
+                         "direction": "SELL", "level": 3999.90, "size": 10,
+                         "createdDateUTC": "2026-09-21T00:00:02.060Z"}
+            self.assertTrue(bot._recover_trigger_fill_then_stop(
+                {"sell-new": candidate}, state.long, stopped
+            ))
+            closure = next(item for item in state.pending_recovery
+                           if item["deal_id"] == "buy-old")
+            self.assertEqual((closure["scenario_at_close"], state.general_recovery), (2, D("31")))
+
+    def test_settrigger_relinks_closure_and_replacement_fill_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self.recovery_bot(str(Path(directory) / "state.json"))
+            leg = bot.state.long
+            # Use the unresolved BUY closure made by an explicit late S1 stop.
+            bot.strategy.stopped("BUY", D("3999.40"), "buy-late", scenario_at_close=1)
+            leg.trigger_id = "automatic-order"
+            bot.state.pending_recovery[-1]["trigger_id"] = "automatic-order"
+            bot.capital.delete_working_order.return_value = True
+            bot.capital.working_stop.return_value = "replacement-ref"
+            bot.capital.wait_confirmation.return_value = {
+                "dealStatus": "ACCEPTED", "dealId": "replacement-order"
+            }
+            bot._manual_command("/settrigger", ["long", "4000.50"])
+            closure = bot.state.pending_recovery[-1]
+            self.assertEqual((leg.trigger_id, closure["trigger_id"]),
+                             ("replacement-order", "replacement-order"))
+            bot._apply_protection = Mock(return_value=True)
+            candidate = {"dealId": "buy-new", "workingOrderId": "replacement-order",
+                         "direction": "BUY", "level": 4000.60, "size": 10}
+            before = bot.state.scenario
+            bot._detect_trigger_fill({"buy-new": candidate})
+            self.assertEqual((bot.state.scenario, leg.deal_id, leg.current_entry, leg.size),
+                             (before + 1, "buy-new", D("4000.60"), D("10")))
+            general = bot.state.general_recovery
+            bot._detect_trigger_fill({"buy-new": candidate})
+            self.assertEqual((bot.state.scenario, bot.state.general_recovery),
+                             (before + 1, general))
+
+    def test_previous_v3_closures_without_owner_do_not_shadow_continuation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "state.json")
+            bot = self.recovery_bot(path)
+            old = {"close_key": "old", "deal_id": "old-buy", "direction": "BUY",
+                   "d_value": "10", "pending_d_value": "10", "d_accounted": True,
+                   "reentry_accounted": False, "reopen_event_id": ""}
+            bot.state.pending_recovery.append(old)
+            bot.state.deal_history.append({"deal_id": "old-buy", "cycle_id": 1,
+                                           "cycle_attempt": 1, "scenario": 1})
+            bot.state.cycle_attempt = 2
+            bot.state.long = Leg("BUY", D("4100.5"), D("4100.5"), deal_id="new-buy",
+                                 size=D("10"), stop_distance=D("1"), stop=D("4099.5"))
+            bot.state.short = Leg("SELL", D("4100"), D("4100"), deal_id="new-sell",
+                                  size=D("10"), stop_distance=D("1"), stop=D("4101"))
+            bot.state.remember_deal(bot.state.long, bot.state.scenario)
+            bot.strategy.stopped("BUY", D("4099.4"), "new-stop")
+            bot.state.save(path)
+            restored = CycleState.load(path); strategy = Strategy(bot.cfg, restored)
+            current = strategy._pending_for("BUY")
+            self.assertEqual(current["deal_id"], "new-buy")
+            self.assertTrue(old["d_accounted"])
+
     def test_synthetic_event_identity_is_stable_across_indexes_and_reordering(self):
         first = {"dateUTC": "2026-09-21T10:00:00Z", "dealId": "a", "source": "SL",
                  "status": "ACCEPTED", "type": "POSITION", "details": {"level": 99}}
@@ -5323,6 +5519,25 @@ class BrokerEvidenceRegressionTest(unittest.TestCase):
         self.assertEqual(client.http.request.call_count, 2)
         self.assertEqual(client.http.post.call_count, 1)
 
+    def test_401_retry_timeout_has_no_third_send_and_refresh_failure_stops(self):
+        for second in (requests.ReadTimeout("retry unknown"),):
+            client = CapitalClient(Settings(api_key="key", identifier="id", password="password"))
+            client.last_login = 10**20
+            client.http.request = Mock(side_effect=[self.response(401), second])
+            client.http.post = Mock(return_value=self.response(200, headers={
+                "CST": "new", "X-SECURITY-TOKEN": "new-sec",
+            }))
+            with self.assertRaises(CapitalError):
+                client.request("DELETE", "/positions/deal")
+            self.assertEqual(client.http.request.call_count, 2)
+        failed = CapitalClient(Settings(api_key="key", identifier="id", password="password"))
+        failed.last_login = 10**20
+        failed.http.request = Mock(return_value=self.response(401))
+        failed.http.post = Mock(return_value=self.response(401))
+        with self.assertRaises(CapitalError):
+            failed.request("GET", "/positions")
+        self.assertEqual(failed.http.request.call_count, 1)
+
     def test_concurrent_failed_generation_refreshes_only_once(self):
         client = CapitalClient(Settings(api_key="key", identifier="id", password="password"))
         login = self.response(200, headers={"CST": "new-cst", "X-SECURITY-TOKEN": "new-sec"})
@@ -5344,6 +5559,63 @@ class BrokerEvidenceRegressionTest(unittest.TestCase):
         self.assertFalse(errors)
         self.assertEqual(client.http.post.call_count, 1)
         self.assertEqual(client.session_generation, 1)
+
+    def test_request_generation_is_bound_to_actual_token_headers(self):
+        client = CapitalClient(Settings(api_key="key", identifier="id", password="password"))
+        client.last_login = 10**20
+        client.http.headers.update({"CST": "old-cst", "X-SECURITY-TOKEN": "old-sec"})
+        sent = []
+        def request(method, url, **kwargs):
+            sent.append(dict(kwargs["headers"]))
+            if len(sent) == 1:
+                # Another worker refreshes after this request was prepared/sent.
+                client.http.headers.update({"CST": "new-cst", "X-SECURITY-TOKEN": "new-sec"})
+                client.session_generation = 1
+                return self.response(401)
+            return self.response(200)
+        client.http.request = Mock(side_effect=request)
+        client.http.post = Mock()
+        self.assertEqual(client.request("DELETE", "/positions/deal"), {})
+        self.assertEqual(sent, [
+            {"CST": "old-cst", "X-SECURITY-TOKEN": "old-sec"},
+            {"CST": "new-cst", "X-SECURITY-TOKEN": "new-sec"},
+        ])
+        client.http.post.assert_not_called()
+
+    def test_two_full_concurrent_401_requests_share_one_refresh(self):
+        threading = __import__("threading")
+        client = CapitalClient(Settings(api_key="key", identifier="id", password="password"))
+        client.last_login = 10**20
+        client.http.headers.update({"CST": "old-cst", "X-SECURITY-TOKEN": "old-sec"})
+        barrier = threading.Barrier(2); local = threading.local(); sent = []
+        lock = threading.Lock()
+        def request(method, url, **kwargs):
+            count = getattr(local, "count", 0); local.count = count + 1
+            with lock:
+                sent.append((count, dict(kwargs["headers"])))
+            if count == 0:
+                barrier.wait()
+                return self.response(401)
+            return self.response(200)
+        client.http.request = Mock(side_effect=request)
+        client.http.post = Mock(return_value=self.response(200, headers={
+            "CST": "new-cst", "X-SECURITY-TOKEN": "new-sec",
+        }))
+        errors = []
+        def run(method):
+            try:
+                client.request(method, "/positions", json={} if method != "GET" else None)
+            except Exception as exc:
+                errors.append(exc)
+        threads = [threading.Thread(target=run, args=(method,))
+                   for method in ("GET", "DELETE")]
+        for thread in threads: thread.start()
+        for thread in threads: thread.join(2)
+        self.assertFalse(errors)
+        self.assertEqual(client.http.post.call_count, 1)
+        self.assertEqual(sum(1 for count, _ in sent if count == 0), 2)
+        self.assertTrue(all(headers["CST"] == ("old-cst" if count == 0 else "new-cst")
+                            for count, headers in sent))
 
     def test_pending_closure_requires_unambiguous_broker_linkage(self):
         state = CycleState(active=True, scenario=1, cycle_id=7, cycle_attempt=2)
@@ -5436,7 +5708,7 @@ class BrokerEvidenceRegressionTest(unittest.TestCase):
         ]
         result = broker_attempt_pnl(linked + [linked[0]], {"deal"})
         self.assertEqual((result["status"], result["amount"], result["currency"]),
-                         ("CONFIRMED", D("-24"), "USD"))
+                         ("COMPLETE_SNAPSHOT", D("-24"), "USD"))
         ambiguous = broker_attempt_pnl(linked + [{
             "transactionId": "fee", "dealId": "deal", "type": "TRADE_COMMISSION",
             "amount": "-1", "currency": "USD",
@@ -5445,3 +5717,92 @@ class BrokerEvidenceRegressionTest(unittest.TestCase):
         self.assertIsNone(broker_attempt_pnl([{
             "transactionId": "time-only", "type": "SWAP", "amount": "-1", "currency": "USD",
         }], {"deal"})["amount"])
+
+    def test_transaction_snapshot_requires_every_expected_deal_and_finite_money(self):
+        partial = broker_attempt_pnl([{
+            "transactionId": "one", "dealId": "old-buy", "type": "TRADE",
+            "amount": "-24", "currency": "USD",
+        }], {"old-buy", "old-sell"})
+        self.assertEqual((partial["status"], partial["amount"]), ("PARTIAL", None))
+        complete = broker_attempt_pnl([
+            {"transactionId": "one", "dealId": "old-buy", "type": "TRADE",
+             "amount": "-24", "currency": "USD"},
+            {"transactionId": "two", "dealId": "old-sell", "type": "TRADE",
+             "amount": "-10", "currency": "USD"},
+        ], {"old-buy", "old-sell"})
+        self.assertEqual((complete["status"], complete["amount"]),
+                         ("COMPLETE_SNAPSHOT", D("-34")))
+        for invalid in ("invalid", "NaN", "Infinity", "-Infinity"):
+            result = broker_attempt_pnl([{
+                "transactionId": invalid, "dealId": "old-buy", "type": "TRADE",
+                "amount": invalid, "currency": "USD",
+            }], {"old-buy"})
+            self.assertEqual((result["status"], result["amount"]), ("UNAVAILABLE", None))
+        zero = broker_attempt_pnl([{
+            "transactionId": "zero", "dealId": "old-buy", "type": "TRADE",
+            "amount": "0", "currency": "USD",
+        }], {"old-buy"})
+        self.assertEqual((zero["status"], zero["amount"]),
+                         ("COMPLETE_SNAPSHOT", D("0")))
+
+    def test_transaction_worker_uses_owned_snapshot_and_all_documented_types(self):
+        client = Mock()
+        client.transactions.return_value = [
+            {"transactionId": "a", "dealId": "attempt-one", "type": "TRADE",
+             "amount": "-34", "currency": "USD"},
+            {"transactionId": "foreign", "dealId": "attempt-two", "type": "TRADE",
+             "amount": "3", "currency": "USD"},
+        ]
+        with patch("trader.notifications.time.time", return_value=200000):
+            result = TransactionHistoryWorker._resolve(client, {
+                "deal_ids": ["attempt-one"], "search_from_epoch": 100000,
+            })
+        self.assertEqual((result["status"], result["amount"]),
+                         ("COMPLETE_SNAPSHOT", D("-34")))
+        self.assertTrue(all(call.kwargs["all_types"] for call in client.transactions.call_args_list))
+        self.assertTrue(all("from_date" in call.kwargs and "to_date" in call.kwargs
+                            for call in client.transactions.call_args_list))
+
+    def test_tick_never_performs_transaction_network_io(self):
+        bot = Bot.__new__(Bot); bot.state = CycleState(); bot.capital = Mock()
+        bot.state.broker_transaction_status = "PENDING"
+        bot.state.pending_transaction_jobs = [{"key": "old", "deal_ids": ["old"]}]
+        bot.tick()
+        bot.capital.transactions.assert_not_called()
+
+    def test_main_owner_applies_two_transaction_jobs_to_their_attempts_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = Bot.__new__(Bot)
+            bot.cfg = Settings(state_file=str(Path(directory) / "state.json"))
+            bot.state = CycleState(
+                attempt_history=[{"attempt_id": 1}, {"attempt_id": 2}],
+                pending_transaction_jobs=[
+                    {"key": "one", "attempt_id": 1, "deal_ids": ["old"],
+                     "search_from_epoch": 1},
+                    {"key": "two", "attempt_id": 2, "deal_ids": ["new"],
+                     "search_from_epoch": 2},
+                ],
+            )
+            bot.notification_worker = None
+            bot.transaction_worker = Mock()
+            bot.transaction_worker.results.return_value = [
+                {"key": "one", "result": {"status": "COMPLETE_SNAPSHOT",
+                 "amount": D("-34"), "currency": "USD", "components": [],
+                 "observed_to_epoch": 3}},
+                {"key": "two", "result": {"status": "COMPLETE_SNAPSHOT",
+                 "amount": D("3"), "currency": "USD", "components": [],
+                 "observed_to_epoch": 4}},
+            ]
+            bot.telegram = Mock(); bot._queue_pending_reports = Mock()
+            bot._tick_notifications()
+            self.assertEqual(
+                [item["broker_transaction_pnl"] for item in bot.state.attempt_history],
+                ["-34", "3"],
+            )
+            self.assertEqual([call.args[0]["key"]
+                              for call in bot.transaction_worker.submit.call_args_list],
+                             ["one", "two"])
+            # Replaying the same worker result does not create another accounting entry.
+            snapshot = json.dumps(bot.state.attempt_history, sort_keys=True)
+            bot._tick_notifications()
+            self.assertEqual(json.dumps(bot.state.attempt_history, sort_keys=True), snapshot)

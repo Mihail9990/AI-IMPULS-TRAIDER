@@ -228,6 +228,32 @@ class NotificationHistoryWorker:
         return None
 
 
+class TransactionHistoryWorker(NotificationHistoryWorker):
+    """Background account-ledger snapshots; CycleState remains owned by the main thread."""
+
+    @staticmethod
+    def _resolve(client: CapitalClient, job: dict) -> dict | None:
+        from .reporting import broker_attempt_pnl
+
+        started = float(job["search_from_epoch"])
+        ended = max(started + 1, time.time())
+
+        def formatted(value: float) -> str:
+            return datetime.fromtimestamp(value, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+        transactions: list[dict] = []
+        window_start = started
+        while window_start < ended:
+            window_end = min(window_start + 86400, ended)
+            transactions.extend(client.transactions(
+                from_date=formatted(window_start), to_date=formatted(window_end), all_types=True,
+            ))
+            window_start = window_end
+        result = broker_attempt_pnl(transactions, set(job["deal_ids"]))
+        result["observed_to_epoch"] = ended
+        return result
+
+
 def split_report(text: str, limit: int = 3500) -> list[str]:
     """Return stable chunks so delivered part numbers survive process restarts."""
     if len(text) <= limit:

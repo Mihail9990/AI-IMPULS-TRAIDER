@@ -133,6 +133,7 @@ class CycleState:
     broker_transaction_currency: str = ""
     broker_transaction_status: str = "UNAVAILABLE"
     broker_transaction_components: list[dict] = field(default_factory=list)
+    pending_transaction_jobs: list[dict] = field(default_factory=list)
     # Durable notification state is deliberately separate from processed trading events.  A
     # broker event may be fully accounted while its human-readable report is still waiting for
     # history or Telegram delivery.
@@ -171,6 +172,10 @@ class CycleState:
         if record is None:
             self.deal_history.append(values)
         else:
+            # A history read may discover an old close after a later reentry advanced the local
+            # scenario.  Updating broker evidence must not rewrite when this deal was opened.
+            for key in ("scenario", "attempt_id", "cycle_id", "cycle_attempt"):
+                values[key] = record.get(key, values[key])
             # Preserve close information already learned from activity history.
             values["close_source"] = record.get("close_source", "")
             values["close_level"] = record.get("close_level")
@@ -274,6 +279,11 @@ class CycleState:
             closure.setdefault("broker_execution_time", "")
             closure.setdefault("original_trigger_anchor", closure.get("entry", "0"))
             closure.setdefault("reentry_accounted", bool(closure.get("reopen_event_id")))
+            record = next((item for item in raw.get("deal_history", [])
+                           if item.get("deal_id") == closure.get("deal_id")), None)
+            if record:
+                closure.setdefault("cycle_id", record.get("cycle_id", 0))
+                closure.setdefault("cycle_attempt", record.get("cycle_attempt", 0))
         for name in ("long", "short"):
             leg = raw.get(name)
             if leg:
