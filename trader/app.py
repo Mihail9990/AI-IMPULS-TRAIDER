@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 import hashlib
+from datetime import datetime, timezone
 from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -24,13 +25,14 @@ from .events import (
     find_working_order_cancellation,
     find_working_order_execution,
     normalize_events,
+    normalize_event,
 )
 from .execution import ExecutionPolicy, is_crossed_level_rejection, trigger_level_passed
 from .model import CycleState, Leg, stop_for, target_for
 from .notifications import NotificationHistoryWorker, migrate_notification_jobs, split_report
 from .reconcile import RemoteSnapshot
 from .reporting import (
-    cycle_heading, cycle_result_text, leg_details, pnl_text, recovery_change_text,
+    broker_attempt_pnl, cycle_heading, cycle_result_text, leg_details, pnl_text, recovery_change_text,
     recovery_snapshot, scenario_nine_result_text, status_text,
 )
 from .streaming import PriceWatch, QuoteStream
@@ -246,6 +248,22 @@ class Bot:
             # tick or any later state mutation.
             self.state.save(self.cfg.state_file)
         self._queue_pending_reports()
+
+    def _refresh_broker_attempt_pnl(self) -> None:
+        if self.state.broker_transaction_status != "PENDING" or not self.state.attempt_deal_ids:
+            return
+        try:
+            result = broker_attempt_pnl(
+                self.capital.transactions(), set(self.state.attempt_deal_ids)
+            )
+        except Exception:
+            LOG.info("Broker transaction P&L is delayed", exc_info=True)
+            return
+        self.state.broker_transaction_status = result["status"]
+        self.state.broker_transaction_pnl = result["amount"]
+        self.state.broker_transaction_currency = result["currency"]
+        self.state.broker_transaction_components = result["components"]
+        self.state.save(self.cfg.state_file)
 
     def _dispatch_owned_cycle(self) -> None:
         """Return shared-operation follow-up to the exclusive current owner."""
@@ -605,6 +623,8 @@ class Bot:
     def tick(self) -> None:
         if self.state.pending_actual_attempt_id:
             self._refresh_actual_attempt_result()
+        if not self.state.active and self.state.broker_transaction_status == "PENDING":
+            self._refresh_broker_attempt_pnl()
         if self.state.continuation_managed:
             self._get_continuation().tick()
         elif self.state.armed and not self.state.active and not self.state.paused:
@@ -1629,7 +1649,30 @@ class Bot:
         # A missing leg while both were open is a stop. A missing survivor while a trigger
         # is pending is handled by the branch below before this state can be mutated.
         recovery_before = recovery_snapshot(self.state)
-        stopped = self.strategy.stopped(lost.direction, fill, f"stop:{lost.deal_id}:{fill}")
+        scenario_at_close = self.state.scenario
+        broker_execution_time = ""
+        opened_record = next((item for item in reversed(self.state.deal_history)
+                              if item.get("deal_id") == lost.deal_id), None)
+        if opened_record and int(opened_record.get("scenario", self.state.scenario)) < self.state.scenario:
+            chronology = self.capital.activity()
+            close_event = find_close_event(chronology, lost.deal_id, "SL")
+            if close_event is None or close_event.level != fill:
+                self._manual("Поздний SL не связан с broker chronology")
+                return
+            resolved = self._scenario_at_broker_close(lost, close_event, chronology)
+            if resolved is None:
+                self._manual(
+                    "Broker chronology позднего SL/reentry недостаточна; "
+                    "scenario_at_close не угадан"
+                )
+                return
+            scenario_at_close = resolved
+            broker_execution_time = close_event.timestamp.isoformat()
+        stopped = self.strategy.stopped(
+            lost.direction, fill, f"stop:{lost.deal_id}:{fill}",
+            scenario_at_close=scenario_at_close,
+            broker_execution_time=broker_execution_time,
+        )
         # Queue the broker event before follow-up actions. Previously protection/trigger helpers
         # queued their messages first, making Telegram appear to show trigger before the SL.
         slippage = abs(lost.stop - fill) if lost.stop is not None else D("0")
@@ -1933,6 +1976,7 @@ class Bot:
             self.strategy.reopened(
                 leg.direction, fill, str(candidate["dealId"]),
                 f"reopen:{candidate['dealId']}", actual_size=actual_size,
+                working_order_id=executed_trigger_id,
             )
             if self.state.scenario == self.cfg.max_scenarios:
                 self._enter_manual_nine()
@@ -1970,6 +2014,43 @@ class Bot:
             None,
         )
 
+    def _scenario_at_broker_close(self, leg: Leg, close_event, activity: list[dict]) -> int | None:
+        """Resolve a late close against already-accounted reentries using broker UTC only."""
+        opened_record = next(
+            (item for item in reversed(self.state.deal_history)
+             if item.get("deal_id") == leg.deal_id), None,
+        )
+        opened_scenario = int((opened_record or {}).get("scenario", self.state.scenario))
+        if self.state.scenario <= opened_scenario:
+            return self.state.scenario
+        unknown = datetime.min.replace(tzinfo=timezone.utc)
+        if close_event.timestamp == unknown:
+            return None
+        normalized = normalize_events(activity)
+        reentries: list[tuple[int, object]] = []
+        for record in self.state.deal_history:
+            scenario = int(record.get("scenario", 0) or 0)
+            if scenario <= opened_scenario or scenario > self.state.scenario:
+                continue
+            if int(record.get("cycle_id", self.state.cycle_id) or 0) != self.state.cycle_id:
+                continue
+            if int(record.get("cycle_attempt", self.state.cycle_attempt) or 0) != self.state.cycle_attempt:
+                continue
+            matches = [event for event in normalized
+                       if event.deal_id == record.get("deal_id")
+                       and event.event_type == "POSITION" and event.source == "USER"
+                       and event.status == "ACCEPTED"]
+            if len(matches) != 1 or matches[0].timestamp == unknown:
+                return None
+            reentries.append((scenario, matches[0]))
+        if not reentries:
+            return None
+        same_time = [event for _, event in reentries if event.timestamp == close_event.timestamp]
+        if same_time:
+            return None
+        later = [scenario for scenario, event in reentries if event.timestamp > close_event.timestamp]
+        return min(later) - 1 if later else self.state.scenario
+
     def _recover_trigger_fill_then_stop(
         self, positions: dict[str, dict], survivor: Leg, stopped: Leg
     ) -> bool:
@@ -1982,23 +2063,42 @@ class Bot:
         candidate = self._trigger_fill_candidate(positions, stopped)
         if candidate is None:
             return False
-        stop_fill = self._wait_closing_fill(survivor, "SL")
-        if stop_fill is None:
+        activity = self.capital.activity(survivor.deal_id)
+        survivor_sl = find_close_event(activity, survivor.deal_id, "SL")
+        if survivor_sl is None or survivor_sl.level is None:
             return False
+        opened_time = normalize_event(candidate).timestamp
+        if (survivor_sl.timestamp == datetime.min.replace(tzinfo=timezone.utc)
+                or opened_time == datetime.min.replace(tzinfo=timezone.utc)
+                or survivor_sl.timestamp == opened_time):
+            self._manual(
+                "Broker chronology Trigger/reentry и survivor SL недостаточна; "
+                "scenario_at_close не угадан"
+            )
+            return True
+        stop_fill = survivor_sl.level
         reopened_fill = D(str(candidate["level"]))
         reopened_id = str(candidate["dealId"])
+        previous_scenario = self.state.scenario
+        close_scenario = (
+            previous_scenario if survivor_sl.timestamp < opened_time
+            else previous_scenario + 1
+        )
         self.strategy.reopened(
             stopped.direction,
             reopened_fill,
             reopened_id,
             f"reopen:{reopened_id}",
             actual_size=(D(str(candidate["size"])) if candidate.get("size") is not None else None),
+            working_order_id=stopped.trigger_id,
         )
         stopped.deal_reference = str(candidate.get("dealReference") or stopped.deal_reference)
         self.strategy.stopped(
             survivor.direction,
             stop_fill,
             f"stop:{survivor.deal_id}:{stop_fill}",
+            scenario_at_close=close_scenario,
+            broker_execution_time=survivor_sl.timestamp.isoformat(),
         )
         if self.state.scenario == self.cfg.max_scenarios:
             self._enter_manual_nine()
@@ -2074,7 +2174,9 @@ class Bot:
         if survivor_sl is None or survivor_sl.level is None:
             return False
 
-        if survivor_sl is not None and survivor_sl.timestamp == opened.timestamp:
+        unknown_time = datetime.min.replace(tzinfo=timezone.utc)
+        if (survivor_sl.timestamp == unknown_time or opened.timestamp == unknown_time
+                or survivor_sl.timestamp == opened.timestamp):
             self._manual(
                 "Broker chronology Trigger/reentry и survivor SL неоднозначна; "
                 "scenario_at_close не угадан"
@@ -2082,7 +2184,10 @@ class Bot:
             return True
         reopen_key = f"reopen:{opened.deal_id}"
         if reopen_key not in self.state.processed_events:
-            self.strategy.reopened(stopped.direction, opened.level, opened.deal_id, reopen_key)
+            self.strategy.reopened(
+                stopped.direction, opened.level, opened.deal_id, reopen_key,
+                actual_size=opened.size, working_order_id=stopped.trigger_id,
+            )
             stopped.deal_reference = opened.deal_reference or stopped.deal_reference
         survivor_stop_key = f"stop:{survivor.deal_id}:{survivor_sl.level}"
         if survivor_stop_key not in self.state.processed_events:
@@ -2177,6 +2282,7 @@ class Bot:
             existing = self._find_order(leg)
             if existing:
                 leg.trigger_id = str(existing["dealId"])
+                self._link_pending_closure_trigger(leg)
                 if leg.trigger_id not in self.state.cycle_trigger_ids:
                     self.state.cycle_trigger_ids.append(leg.trigger_id)
                 return
@@ -2189,6 +2295,7 @@ class Bot:
                 if result.get("dealStatus") == "ACCEPTED" and result.get("dealId"):
                     leg.trigger_reference = reference
                     leg.trigger_id = str(result["dealId"])
+                    self._link_pending_closure_trigger(leg)
                     if leg.trigger_id not in self.state.cycle_trigger_ids:
                         self.state.cycle_trigger_ids.append(leg.trigger_id)
                     self._send_report(
@@ -2215,6 +2322,24 @@ class Bot:
                     self._open_passed_trigger_at_market(leg, projected_target, last_error)
                     return
         self._manual(f"Trigger {leg.direction} не создан после 4 попыток: {last_error}")
+
+    def _link_pending_closure_trigger(self, leg: Leg) -> None:
+        """Attach broker order ownership to its one unresolved closure."""
+        matches = [
+            item for item in self.state.pending_recovery
+            if item.get("deal_id") == leg.deal_id
+            and item.get("direction") == leg.direction
+            and not item.get("reentry_accounted", bool(item.get("reopen_event_id")))
+        ]
+        if len(matches) != 1:
+            if len(matches) > 1:
+                raise RuntimeError(
+                    f"Ambiguous closure ownership for trigger {leg.trigger_id}"
+                )
+            return
+        matches[0]["trigger_id"] = leg.trigger_id
+        matches[0]["trigger_reference"] = leg.trigger_reference
+        self.state.save(self.cfg.state_file)
 
     def _trigger_level_passed(self, leg: Leg) -> bool:
         bid, ask = self.capital.quote(self.cfg.epic)
@@ -2984,6 +3109,10 @@ class Bot:
         )
         self.state.pending_actual_attempt_id = attempt_id
         self.state.pending_actual_deal_ids = scenario_nine_deals
+        self.state.broker_transaction_pnl = None
+        self.state.broker_transaction_currency = ""
+        self.state.broker_transaction_status = "PENDING"
+        self.state.broker_transaction_components.clear()
         self._refresh_actual_attempt_result()
         for leg in legs:
             leg.open = False

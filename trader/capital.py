@@ -64,10 +64,37 @@ class CapitalClient:
             self.session_generation,
         )
 
+    def _refresh_failed_session(self, failed_generation: int) -> None:
+        """Refresh exactly the generation that produced a 401.
+
+        Concurrent callers which failed on the same generation share the first caller's refresh.
+        """
+        with self._login_lock:
+            if self.session_generation != failed_generation:
+                return
+            LOG.info("CAPITAL LOGIN request url=%s/session credentials=<redacted>", self.base)
+            started = time.monotonic()
+            response = self.http.post(
+                self.base + "/session",
+                json={"identifier": self.settings.identifier,
+                      "password": self.settings.password, "encryptedPassword": False},
+                timeout=20,
+            )
+            self._log_response("LOGIN", response, started)
+            self._check(response)
+            self.http.headers.update({
+                "CST": response.headers["CST"],
+                "X-SECURITY-TOKEN": response.headers["X-SECURITY-TOKEN"],
+            })
+            self.last_login = time.time()
+            self.session_generation += 1
+            LOG.info("CAPITAL SESSION ready generation=%s", self.session_generation)
+
     def request(self, method: str, path: str, **kwargs) -> dict:
         if time.time() - self.last_login > 540:
             self.login()
         request_id = next(self._request_ids)
+        request_generation = self.session_generation
         safe_kwargs = {key: _redact(value) for key, value in kwargs.items()}
         LOG.info("CAPITAL REQUEST id=%s method=%s path=%s data=%s", request_id, method, path,
                  _json_text(safe_kwargs))
@@ -100,7 +127,7 @@ class CapitalClient:
         assert response is not None
         if response.status_code == 401:
             LOG.warning("CAPITAL REQUEST id=%s received 401; refreshing session", request_id)
-            self.login()
+            self._refresh_failed_session(request_generation)
             response = self.http.request(method, self.base + path, timeout=20, **kwargs)
         self._log_response(request_id, response, started, path=path)
         self._check(response)

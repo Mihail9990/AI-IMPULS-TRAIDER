@@ -225,6 +225,8 @@ class Strategy:
                 "scenario_at_close": close_scenario,
                 "broker_execution_time": broker_execution_time,
                 "original_trigger_anchor": str(leg.original_trigger_level),
+                "trigger_id": leg.trigger_id, "trigger_reference": leg.trigger_reference,
+                "cycle_id": self.state.cycle_id, "cycle_attempt": self.state.cycle_attempt,
                 "d_accounted": d_accounted, "reentry_accounted": False,
                 "reopen_event_id": "", "trigger_slippage_accounted": False,
             })
@@ -241,22 +243,47 @@ class Strategy:
             self.state.processed_events.append(event_id)
         return leg
 
-    def _pending_for(self, direction: str) -> dict:
+    def _pending_for(self, direction: str, *, working_order_id: str = "",
+                     close_key: str = "") -> dict:
         candidates = [item for item in self.state.pending_recovery
                       if item.get("direction") == direction
-                      and not item.get("reentry_accounted", bool(item.get("reopen_event_id")))]
+                      and not item.get("reentry_accounted", bool(item.get("reopen_event_id")))
+                      and int(item.get("cycle_id", self.state.cycle_id)) == self.state.cycle_id
+                      and int(item.get("cycle_attempt", self.state.cycle_attempt))
+                      == self.state.cycle_attempt]
+        if close_key:
+            candidates = [item for item in candidates if item.get("close_key") == close_key]
+        if working_order_id:
+            linked = [item for item in candidates if item.get("trigger_id") == working_order_id]
+            if not linked and len(candidates) == 1 and not candidates[0].get("trigger_id"):
+                # Compatible persisted state from before trigger ownership was stored.  The sole
+                # same-attempt closure is already an invariant-backed link; make it explicit now.
+                candidates[0]["trigger_id"] = working_order_id
+                linked = candidates
+            if not linked:
+                raise RuntimeError(
+                    f"No broker-linked pending D snapshot for {direction} order {working_order_id}"
+                )
+            candidates = linked
         if not candidates:
             raise RuntimeError(f"No unaccounted pending D snapshot for {direction}")
-        return candidates[-1]
+        if len(candidates) != 1:
+            raise RuntimeError(
+                f"Ambiguous pending D snapshots for {direction}; broker linkage is required"
+            )
+        return candidates[0]
 
     def reopened(self, direction: str, fill: Decimal, deal_id: str = "", event_id: str = "",
-                 actual_size: Decimal | None = None) -> None:
+                 actual_size: Decimal | None = None, *, working_order_id: str = "",
+                 close_key: str = "") -> None:
         if self.state.scenario >= self.cfg.max_scenarios:
             raise RuntimeError("Scenario limit reached")
         leg = self._leg(direction)
         if event_id and event_id in self.state.processed_events:
             return
-        pending = self._pending_for(direction)
+        pending = self._pending_for(
+            direction, working_order_id=working_order_id, close_key=close_key
+        )
         next_scenario = self.state.scenario + 1
         requested_size = self.cfg.size_for(next_scenario)
         new_size = actual_size if actual_size is not None else requested_size

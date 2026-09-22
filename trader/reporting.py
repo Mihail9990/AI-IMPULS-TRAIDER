@@ -155,6 +155,9 @@ def status_text(state: CycleState) -> str:
         f"continuation_stage={state.continuation_stage or '-'}, "
         f"completed_cycles={state.completed_cycles}, all_attempts_result={state.attempt_result_total}, "
         f"attempt_statistics={'УТОЧНЯЕТСЯ' if state.pending_actual_attempt_id else 'ПОЛНАЯ'}, "
+        f"broker_transactions={state.broker_transaction_status}:"
+        f"{state.broker_transaction_pnl if state.broker_transaction_pnl is not None else '-'}:"
+        f"{state.broker_transaction_currency or '-'}, "
         f"cycle_target_distance={state.cycle_target_profit}, target_value={state.target_value}, "
         f"profit200={state.profit_override}, remaining={state.profit_override_remaining}, "
         f"legs={legs}"
@@ -190,9 +193,54 @@ def scenario_nine_result_text(state: CycleState, long_fill: Decimal, short_fill:
         f"Trigger-ордера текущего цикла отменены и проверены: "
         f"{'ДА' if state.scenario_nine_triggers_verified else 'НЕТ'}\n"
         f"Расчёт по фактическим entry/close и size доступных сделок: {calculated_money}. "
-        "Broker P&L в валюте счёта уточняется отдельно.\n"
+        f"Broker transactions P&L: {state.broker_transaction_status}; "
+        f"{state.broker_transaction_pnl if state.broker_transaction_pnl is not None else '-'} "
+        f"{state.broker_transaction_currency or '-'} (separate account-currency ledger).\n"
         "Обе позиции закрыты. Автоматика продолжит обычные циклы."
     )
+
+
+def broker_attempt_pnl(transactions: list[dict], deal_ids: set[str]) -> dict:
+    """Correlate account transactions only by an explicit position deal identifier.
+
+    Capital's bundled documentation does not publish the expanded response schema.  Missing
+    transaction IDs, amounts, currencies, or explicit deal linkage therefore stay unavailable;
+    time/epic/reference proximity is deliberately not used.
+    """
+    supported_types = {"TRADE", "SWAP", "TRADE_COMMISSION", "TRADE_COMMISSION_GSL",
+                       "TRADE_CORRECTION", "ADJUSTMENT", "FX_COMMISSION"}
+    correlated, seen = [], {}
+    for item in transactions:
+        deal_id = str(item.get("dealId") or item.get("positionDealId")
+                      or item.get("affectedDealId") or "")
+        transaction_id = str(item.get("transactionId") or item.get("id") or "")
+        kind = str(item.get("type") or "").upper()
+        amount = item.get("amount", item.get("profitLoss", item.get("value")))
+        currency = str(item.get("currency") or item.get("currencyIsoCode") or "")
+        if deal_id not in deal_ids:
+            continue
+        fingerprint = (deal_id, kind, str(amount), currency)
+        if transaction_id in seen:
+            if seen[transaction_id] != fingerprint:
+                return {"status": "UNAVAILABLE", "amount": None, "currency": "",
+                        "components": []}
+            continue
+        if not transaction_id or kind not in supported_types \
+                or amount is None or not currency:
+            return {"status": "UNAVAILABLE", "amount": None, "currency": "", "components": []}
+        seen[transaction_id] = fingerprint
+        correlated.append({"id": transaction_id, "deal_id": deal_id, "type": kind,
+                           "amount": str(_decimal(amount)), "currency": currency})
+    if not correlated:
+        return {"status": "PENDING", "amount": None, "currency": "", "components": []}
+    currencies = {item["currency"] for item in correlated}
+    kinds = {item["type"] for item in correlated}
+    if len(currencies) != 1 or ("TRADE" in kinds and kinds & (supported_types - {"TRADE"})):
+        return {"status": "AMBIGUOUS", "amount": None, "currency": "",
+                "components": correlated}
+    return {"status": "CONFIRMED",
+            "amount": sum((_decimal(item["amount"]) for item in correlated), D("0")),
+            "currency": next(iter(currencies)), "components": correlated}
 
 
 def pnl_text(state: CycleState, positions: list[dict], transactions: list[dict]) -> str:

@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
+import hashlib
+import json
 from typing import Any, Iterable
 
 
@@ -53,7 +55,16 @@ def normalize_event(item: dict, index: int = 0) -> BrokerEvent:
     size = _decimal(_first(containers, "size"))
     event_id = _text(_first(containers, "id", "activityId", "transactionId"))
     if not event_id:
-        event_id = f"{timestamp.isoformat()}:{source}:{status}:{deal_id}:{reference}:{level}:{index}"
+        # Capital activity records do not always carry an ID.  Response order is not broker
+        # identity (and may change between eventually-consistent reads), so derive the fallback
+        # solely from the complete broker payload in canonical form.  Equal insufficient records
+        # intentionally remain indistinguishable; callers must obtain more broker evidence rather
+        # than manufacture an execution count or chronology from array indexes.
+        del index
+        canonical = json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                               default=str)
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        event_id = f"synthetic:{digest}"
     return BrokerEvent(
         event_id, timestamp, source, status, event_type, deal_id, reference,
         working_order_id, direction, level, size, item,

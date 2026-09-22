@@ -129,6 +129,10 @@ class CycleState:
     attempt_deal_ids: list[str] = field(default_factory=list)
     pending_actual_attempt_id: int = 0
     pending_actual_deal_ids: list[str] = field(default_factory=list)
+    broker_transaction_pnl: Decimal | None = None
+    broker_transaction_currency: str = ""
+    broker_transaction_status: str = "UNAVAILABLE"
+    broker_transaction_components: list[dict] = field(default_factory=list)
     # Durable notification state is deliberately separate from processed trading events.  A
     # broker event may be fully accounted while its human-readable report is still waiting for
     # history or Telegram delivery.
@@ -238,6 +242,10 @@ class CycleState:
         payload["pending_tp_fill"] = (
             str(self.pending_tp_fill) if self.pending_tp_fill is not None else None
         )
+        payload["broker_transaction_pnl"] = (
+            str(self.broker_transaction_pnl)
+            if self.broker_transaction_pnl is not None else None
+        )
         payload["long"] = self.long.json() if self.long else None
         payload["short"] = self.short.json() if self.short else None
         destination = Path(path)
@@ -302,10 +310,11 @@ class CycleState:
             "scenario_nine_total_loss", "scenario_nine_extra_loss",
             "cycle_target_profit", "profit_override", "pending_tp_fill",
             "scenario_nine_long_fill", "scenario_nine_short_fill",
+            "broker_transaction_pnl",
         ):
             if name in {
                 "profit_override", "pending_tp_fill", "scenario_nine_long_fill",
-                "scenario_nine_short_fill",
+                "scenario_nine_short_fill", "broker_transaction_pnl",
             } and raw.get(name) is None:
                 continue
             raw[name] = D(str(raw.get(name, "0")))
@@ -331,6 +340,10 @@ class CycleState:
         self.pending_tp_direction = ""
         self.pending_tp_fill = None
         self.pending_close_direction = self.pending_close_reference = self.pending_close_reason = ""
+        self.broker_transaction_pnl = None
+        self.broker_transaction_currency = ""
+        self.broker_transaction_status = "UNAVAILABLE"
+        self.broker_transaction_components.clear()
         self.last_trigger_resolution = "Нет связанного Trigger."
         self.long = self.short = None
         self.phase = "IDLE"
