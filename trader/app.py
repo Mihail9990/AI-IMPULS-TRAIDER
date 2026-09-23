@@ -34,7 +34,7 @@ from .notifications import (
 from .reconcile import RemoteSnapshot
 from .reporting import (
     cycle_heading, cycle_result_text, leg_details, pnl_text, recovery_change_text,
-    recovery_snapshot, scenario_nine_result_text, status_text,
+    recovery_snapshot, scenario_nine_result_text, status_text, transaction_result_fingerprint,
 )
 from .streaming import PriceWatch, QuoteStream
 from .telegram import Telegram
@@ -182,7 +182,8 @@ class Bot:
                 ):
                     self._queued_report_parts.add(marker)
 
-    def _tick_notifications(self) -> None:
+    def _tick_notifications(self, *, now: float | None = None) -> None:
+        now = time.time() if now is None else now
         changed = False
         worker = getattr(self, "notification_worker", None)
         if worker is not None:
@@ -208,12 +209,13 @@ class Bot:
                             if item.get("key") == completed["key"]), None)
                 if job is None:
                     continue
+                if completed.get("error"):
+                    job["retry_count"] = int(job.get("retry_count", 0) or 0) + 1
+                    job["next_check_at"] = now + min(300, 5 * 2 ** (job["retry_count"] - 1))
+                    changed = True
+                    continue
                 result = completed["result"]
-                fingerprint = repr((
-                    result.get("status"), str(result.get("amount")), result.get("currency"),
-                    tuple((item.get("id"), item.get("amount"))
-                          for item in result.get("components", [])),
-                ))
+                fingerprint = transaction_result_fingerprint(result)
                 if fingerprint != job.get("result_fingerprint"):
                     job["status"] = result["status"]
                     job["amount"] = (str(result["amount"])
@@ -240,8 +242,16 @@ class Bot:
                         self.state.broker_transaction_currency = job["currency"]
                         self.state.broker_transaction_components = list(job["components"])
                     changed = True
+                job["retry_count"] = 0
+                job["next_check_at"] = now + (
+                    3600 if result.get("status") == "COMPLETE_SNAPSHOT" else 30
+                )
+                changed = True
             for job in self.state.pending_transaction_jobs:
-                transaction_worker.submit(job)
+                job.setdefault("next_check_at", 0)
+                job.setdefault("retry_count", 0)
+                if float(job["next_check_at"] or 0) <= now:
+                    transaction_worker.submit(job)
         if isinstance(self.telegram, Telegram):
             for ack in self.telegram.delivery_acks():
                 marker = (str(ack["report_id"]), int(ack["part"]))
@@ -416,7 +426,7 @@ class Bot:
                 commands = self.telegram.commands()
                 # Persist consumed update IDs before a broker-mutating command can run. If
                 # Android kills Pydroid immediately after that command, Telegram will not replay
-                # the same /settrigger, /start, or /recover on restart.
+                # the same /settrigger or /start on restart.
                 self.state.telegram_offset = self.telegram.offset
                 self.state.save(self.cfg.state_file)
                 self._process_commands(commands)
@@ -466,7 +476,6 @@ class Bot:
             self.telegram.send(
                 "/status /start /startcycle /pause /stop /resume /positions /orders /pnl /cycleinfo\n"
                 "/menu — показать клавиатуру /hidemenu — свернуть клавиатуру\n"
-                "/recover — повторно связать позиции и установить точные SL/TP\n"
                 "/automode — безопасно выйти из ручного режима\n"
                 "/profit200 VALUE — личный profit следующих 200 завершённых циклов\n"
                 "/dealhistory [DEAL_ID] — история сохранённых сделок или точного ID\n"
@@ -496,8 +505,6 @@ class Bot:
             ))
         elif command == "/dealhistory":
             self._deal_history(args)
-        elif command == "/recover":
-            self._recover_manual_positions()
         elif command == "/automode":
             self._exit_manual_mode()
         elif command == "/sendlog":
@@ -1393,6 +1400,8 @@ class Bot:
         return False
 
     def _tick_cycle(self) -> None:
+        if self._resume_pending_trigger_replacement():
+            return
         if self.state.phase == "DOUBLE_SL_RECONCILING":
             self._tick_double_sl_reconciling()
             return
@@ -1565,10 +1574,16 @@ class Bot:
                             loser, "SL", global_activity
                         )
                         if stop_fill is not None and loser.open:
-                            self.strategy.stopped(
-                                loser.direction, stop_fill,
-                                f"stop:{loser.deal_id}:{stop_fill}",
+                            stop_event = self._close_event_any_index(
+                                loser, "SL", global_activity
                             )
+                            if self._apply_confirmed_stop_event(
+                                loser, stop_event, global_activity
+                            ) is None:
+                                self._manual(
+                                    f"TP/SL chronology недостаточна для {loser.deal_id}"
+                                )
+                                return
                     self._complete_cycle(winner.direction, fill)
                     self.state.armed = not self.state.paused
                     self.state.phase = "FILTER" if self.state.armed else "PAUSED"
@@ -1646,11 +1661,16 @@ class Bot:
                     f"стороны {survivor.direction} по SL ещё не подтверждено"
                 )
                 return
-            self.strategy.stopped(
-                survivor.direction,
-                stop_fill,
-                f"stop:{survivor.deal_id}:{stop_fill}",
-            )
+            chronology = self.capital.activity()
+            stop_event = self._close_event_any_index(survivor, "SL", chronology)
+            if (stop_event is None or stop_event.level != stop_fill
+                    or self._apply_confirmed_stop_event(
+                        survivor, stop_event, chronology
+                    ) is None):
+                self._manual(
+                    f"TP/SL chronology недостаточна для {survivor.deal_id}"
+                )
+                return
             self._complete_cycle(lost.direction, tp_fill)
             self.state.armed = not self.state.paused
             self.state.phase = "FILTER" if self.state.armed else "PAUSED"
@@ -2108,10 +2128,19 @@ class Bot:
         if survivor_sl is None or survivor_sl.level is None:
             return False
         opened = find_trigger_open_event(activity, stopped.trigger_id, stopped.direction)
-        if opened is None or opened.deal_id != str(candidate.get("dealId", "")):
-            LOG.info("Trigger opening activity is still synchronizing: %s", stopped.trigger_id)
-            return False
-        opened_time = opened.timestamp
+        if opened is not None and opened.deal_id == str(candidate.get("dealId", "")):
+            opened_time = opened.timestamp
+        else:
+            executed = find_working_order_execution(activity, stopped.trigger_id)
+            if (executed is None
+                    or str(candidate.get("workingOrderId", "")) != stopped.trigger_id
+                    or str(candidate.get("direction", "")) != stopped.direction
+                    or not str(candidate.get("dealId", ""))):
+                LOG.info("Trigger execution activity is still synchronizing: %s", stopped.trigger_id)
+                return False
+            # WORKING_ORDER/EXECUTED is the broker execution clock. Position.createdDateUTC is a
+            # later publication/creation field and is deliberately not used as a substitute.
+            opened_time = executed.timestamp
         if (survivor_sl.timestamp == datetime.min.replace(tzinfo=timezone.utc)
                 or opened_time == datetime.min.replace(tzinfo=timezone.utc)
                 or survivor_sl.timestamp == opened_time):
@@ -2662,7 +2691,7 @@ class Bot:
         details = []
         for leg, fill in closes:
             if leg.open:
-                event = find_close_event(activity, leg.deal_id, "SL")
+                event = self._close_event_any_index(leg, "SL", activity)
                 if event is None or event.level != fill \
                         or self._apply_confirmed_stop_event(leg, event, activity) is None:
                     self._manual(
@@ -3177,6 +3206,7 @@ class Bot:
                 "search_from_epoch": time.time() - 86400,
                 "status": "PENDING", "amount": None, "currency": "",
                 "components": [],
+                "next_check_at": 0, "retry_count": 0,
             })
         self._refresh_actual_attempt_result()
         for leg in legs:
@@ -3462,6 +3492,49 @@ class Bot:
                 time.sleep(delay)
         return None
 
+    def _submit_replacement_trigger(self, leg: Leg, level: Decimal) -> None:
+        projected_size, projected_distance, projected_recovery = self.strategy.projected_reopen(
+            leg.direction
+        )
+        reference = self.capital.working_stop(
+            self.cfg.epic, leg.direction, projected_size, level,
+            stop_for(leg.direction, level, projected_distance),
+            target_for(leg.direction, level, projected_distance, projected_recovery),
+        )
+        result = self.capital.wait_confirmation(reference)
+        if result.get("dealStatus") != "ACCEPTED" or not result.get("dealId"):
+            raise CapitalError(result.get("reason") or "Ручной trigger отклонён")
+        leg.trigger_reference = reference
+        leg.trigger_id = str(result["dealId"])
+        leg.pending_trigger_replacement_level = None
+        leg.pending_trigger_cancel_unknown = False
+        if leg.trigger_id not in self.state.cycle_trigger_ids:
+            self.state.cycle_trigger_ids.append(leg.trigger_id)
+        self._link_pending_closure_trigger(leg)
+
+    def _resume_pending_trigger_replacement(self) -> bool:
+        leg = next((item for item in (self.state.long, self.state.short)
+                    if item and item.pending_trigger_cancel_unknown), None)
+        if leg is None:
+            return False
+        self._detect_trigger_fill(self._cycle_positions())
+        if leg.open:
+            leg.pending_trigger_replacement_level = None
+            leg.pending_trigger_cancel_unknown = False
+            self.state.save(self.cfg.state_file)
+            return False
+        activity = self.capital.activity()
+        if find_working_order_cancellation(activity, leg.trigger_id) is not None:
+            level = leg.pending_trigger_replacement_level
+            leg.trigger_id = leg.trigger_reference = ""
+            if level is not None:
+                self._submit_replacement_trigger(leg, level)
+            self.state.save(self.cfg.state_file)
+            return False
+        # EXECUTED without a published position, or no final event yet: retain ownership and let
+        # the next tick reconcile. No conflicting STOP/MARKET mutation is sent.
+        return True
+
     def _manual_command(self, command: str, args: list[str]) -> None:
         if not args or args[0] not in {"long", "short"}:
             raise RuntimeError("Укажите long или short")
@@ -3485,34 +3558,20 @@ class Bot:
             level = D(args[1])
             if leg.trigger_id:
                 old_trigger = leg.trigger_id
-                if not self.capital.delete_working_order(old_trigger):
-                    if not self._resolve_trigger_for_double_stop(leg, self._cycle_positions()):
-                        raise RuntimeError(
-                            f"Исход прежнего Trigger {old_trigger} ещё не подтверждён"
-                        )
-                    if leg.open:
-                        raise RuntimeError(
-                            f"Прежний Trigger {old_trigger} уже исполнился; замена не создана"
-                        )
-            projected_size, projected_distance, projected_recovery = self.strategy.projected_reopen(
-                leg.direction
-            )
-            projected_stop = stop_for(leg.direction, level, projected_distance)
-            projected_target = target_for(
-                leg.direction, level, projected_distance, projected_recovery,
-            )
-            reference = self.capital.working_stop(
-                self.cfg.epic, leg.direction, projected_size, level,
-                projected_stop, projected_target,
-            )
-            result = self.capital.wait_confirmation(reference)
-            if result.get("dealStatus") != "ACCEPTED" or not result.get("dealId"):
-                raise CapitalError(result.get("reason") or "Ручной trigger отклонён")
-            leg.trigger_reference = reference
-            leg.trigger_id = str(result["dealId"])
-            if leg.trigger_id not in self.state.cycle_trigger_ids:
-                self.state.cycle_trigger_ids.append(leg.trigger_id)
-            self._link_pending_closure_trigger(leg)
+                leg.pending_trigger_replacement_level = level
+                try:
+                    cancelled = self.capital.delete_working_order(old_trigger)
+                except CapitalError:
+                    cancelled = False
+                if not cancelled:
+                    leg.pending_trigger_cancel_unknown = True
+                    self.state.save(self.cfg.state_file)
+                    raise RuntimeError(
+                        f"Исход прежнего Trigger {old_trigger} ещё не подтверждён; "
+                        "survivor остаётся под автосопровождением"
+                    )
+                leg.trigger_id = leg.trigger_reference = ""
+            self._submit_replacement_trigger(leg, level)
         else:
             if command not in {"/removesl", "/removetp"} and len(args) != 2:
                 raise RuntimeError("Укажите цену")
@@ -3528,56 +3587,6 @@ class Bot:
         self.state.save(self.cfg.state_file)
         self.telegram.send("Команда выполнена и подтверждена Capital.com")
 
-    def _recover_manual_positions(self) -> None:
-        if not self.state.active or not self.state.long or not self.state.short:
-            raise RuntimeError("Нет сохранённого активного цикла для восстановления")
-        positions = list(self._cycle_positions().values())
-        buys = [position for position in positions if position.get("direction") == "BUY"]
-        sells = [position for position in positions if position.get("direction") == "SELL"]
-        if len(buys) != 1 or len(sells) != 1:
-            raise RuntimeError(
-                f"Ожидалась одна BUY и одна SELL позиция; найдено BUY={len(buys)}, SELL={len(sells)}"
-            )
-        for leg, position in ((self.state.long, buys[0]), (self.state.short, sells[0])):
-            remote_ids = {
-                str(position.get("dealId", "")), str(position.get("dealReference", "")),
-                str(position.get("workingOrderId", "")),
-            }
-            owned_ids = {
-                leg.deal_id, leg.deal_reference, leg.trigger_id, leg.trigger_reference,
-                *self.state.cycle_trigger_ids,
-            }
-            if not (remote_ids & {item for item in owned_ids if item}):
-                raise RuntimeError(
-                    f"Позиция {leg.direction} не связана с сохранённым циклом; "
-                    "автоматическое изменение защиты запрещено"
-                )
-            leg.deal_id = str(position["dealId"])
-            if position.get("dealReference"):
-                leg.deal_reference = str(position["dealReference"])
-            if position.get("level") is not None:
-                leg.current_entry = D(str(position["level"]))
-            leg.open = True
-        if self.state.scenario == 1:
-            self.strategy.confirm_initial_fills(
-                self.state.long.current_entry, self.state.short.current_entry
-            )
-        self._apply_protection(self.state.long)
-        self._apply_protection(self.state.short)
-        self.state.manual = False
-        self.state.paused = True
-        self.state.phase = "BOTH_OPEN"
-        self.state.save(self.cfg.state_file)
-        self._send_report(
-            f"✅ Цикл восстановлен\nСценарий: {self.state.scenario}\n"
-            f"BUY dealId: {self.state.long.deal_id}\nSELL dealId: {self.state.short.deal_id}\n"
-            f"GENERAL_RECOVERY={self.state.general_recovery}; target_value={self.state.target_value}\n"
-            f"BUY recovery_distance={self.strategy.recovery_distance_for(self.state.long)}; "
-            f"SELL recovery_distance={self.strategy.recovery_distance_for(self.state.short)}\n"
-            "Текущий цикл продолжает контролироваться. "
-            f"Следующий цикл на паузе до /start."
-        )
-
     def _exit_manual_mode(self) -> None:
         if not self.state.manual:
             self.telegram.send("ℹ️ Автоматика уже не находится в ручном режиме.")
@@ -3588,7 +3597,7 @@ class Bot:
         if positions or orders:
             raise RuntimeError(
                 f"Нельзя выйти из ручного режима: позиции={len(positions)}, ордера={len(orders)}. "
-                "Используйте /recover или сначала разберите их вручную."
+                "Сначала сверьте и разберите их вручную."
             )
         self._clear_stale_cycle("Пользователь подтвердил выход командой /automode")
 
@@ -4219,7 +4228,7 @@ class Bot:
             f"Причина: {reason}\n"
             f"Состояние: phase=MANUAL; active={self.state.active}; новые заявки запрещены.\n"
             "Следующее действие: проверить /positions, /orders и /dealhistory; затем использовать "
-            "/recover либо /automode только после однозначной сверки брокера."
+            "/automode только после однозначной сверки брокера."
         )
 
 

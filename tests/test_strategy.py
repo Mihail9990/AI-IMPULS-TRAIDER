@@ -35,7 +35,7 @@ from trader.notifications import (
 from trader.reconcile import RemoteSnapshot
 from trader.reporting import (
     broker_attempt_pnl, cycle_result_text, leg_details, pnl_text, recovery_change_text,
-    recovery_snapshot,
+    recovery_snapshot, transaction_result_fingerprint,
 )
 from trader.streaming import PriceWatch, QuoteStream
 from trader.telegram import Telegram
@@ -907,6 +907,11 @@ class EntryRetryTest(unittest.TestCase):
 
     def test_take_profit_during_initial_protection_completes_cycle(self):
         bot = self.make_bot()
+        bot.capital.activity.return_value = [{
+            "dateUTC": "2026-09-23T00:00:01Z", "dealId": "short-1",
+            "source": "SL", "type": "POSITION", "status": "ACCEPTED",
+            "details": {"level": 4011.05},
+        }]
         bot.state.long.deal_id = "long-1"
         bot.state.short.deal_id = "short-1"
         bot.capital.positions.side_effect = [
@@ -3317,44 +3322,17 @@ class BrokerInfrastructureTest(unittest.TestCase):
             bot.command("/settrigger long 4020.50")
         bot.capital.working_stop.assert_not_called()
 
-    def test_recover_rebinds_permanent_ids_and_reapplies_protection(self):
+    def test_removed_recover_command_does_not_mutate_trading_state(self):
         bot = EntryRetryTest().make_bot()
         bot.state.manual = True
         bot.state.paused = True
-        bot.state.long.deal_reference = "accepted-buy-reference"
-        bot.state.short.deal_reference = "accepted-sell-reference"
-        bot.capital.positions.return_value = [
-            {"position": {"dealId": "permanent-buy", "dealReference": "accepted-buy-reference",
-                          "direction": "BUY", "level": 4010.30},
-             "market": {"epic": "GOLD"}},
-            {"position": {"dealId": "permanent-sell", "dealReference": "accepted-sell-reference",
-                          "direction": "SELL", "level": 4010.00},
-             "market": {"epic": "GOLD"}},
-        ]
-        bot.capital.update_position.side_effect = ["update-buy", "update-sell"]
-        bot.capital.wait_confirmation.side_effect = [
-            {"dealStatus": "ACCEPTED"}, {"dealStatus": "ACCEPTED"},
-        ]
-
+        before = (bot.state.manual, bot.state.paused, bot.state.scenario,
+                  bot.state.long.deal_id, bot.state.short.deal_id,
+                  bot.state.general_recovery)
         bot.command("/recover")
-
-        self.assertFalse(bot.state.manual)
-        self.assertTrue(bot.state.paused)
-        self.assertEqual(bot.state.long.deal_id, "permanent-buy")
-        self.assertEqual(bot.state.short.deal_id, "permanent-sell")
-        self.assertEqual(bot.capital.update_position.call_count, 2)
-
-    def test_recover_refuses_unrelated_positions_with_matching_directions(self):
-        bot = EntryRetryTest().make_bot()
-        bot.state.manual = True
-        bot.capital.positions.return_value = [
-            {"position": {"dealId": "foreign-buy", "direction": "BUY", "level": 4010},
-             "market": {"epic": "GOLD"}},
-            {"position": {"dealId": "foreign-sell", "direction": "SELL", "level": 4009},
-             "market": {"epic": "GOLD"}},
-        ]
-        with self.assertRaisesRegex(RuntimeError, "не связана"):
-            bot.command("/recover")
+        self.assertEqual((bot.state.manual, bot.state.paused, bot.state.scenario,
+                          bot.state.long.deal_id, bot.state.short.deal_id,
+                          bot.state.general_recovery), before)
         bot.capital.update_position.assert_not_called()
 
     def test_automode_clears_stale_manual_cycle_when_broker_is_empty(self):
@@ -5423,6 +5401,41 @@ class BrokerEvidenceRegressionTest(unittest.TestCase):
                            if item["deal_id"] == "buy-old")
             self.assertEqual((closure["scenario_at_close"], state.general_recovery), (2, D("31")))
 
+    def test_attempt_281_working_order_execution_proves_reentry_before_sell_sl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self.recovery_bot(str(Path(directory) / "state.json"))
+            bot.cfg = Settings(**{**bot.cfg.__dict__,
+                                  "scenario_stop_distances": (D("1"),) + (D("2"),) * 8})
+            state = CycleState(cycle_id=281, cycle_attempt=1, active_attempt_id=281)
+            bot.state = state; bot.strategy = Strategy(bot.cfg, state)
+            bot.strategy.begin(D("4340.18"), D("4339.40"))
+            bot.strategy.confirm_initial_fills(D("4340.18"), D("4339.40"))
+            state.long.deal_id, state.short.deal_id = "buy-old", "sell-old"
+            state.remember_deal(state.long, 1); state.remember_deal(state.short, 1)
+            stopped = bot.strategy.stopped("BUY", D("4339.08"), "buy-s1")
+            stopped.trigger_id = "buy-order"
+            state.pending_recovery[-1]["trigger_id"] = "buy-order"
+            bot.capital.activity.return_value = [
+                {"dateUTC": "2026-09-22T03:31:46.204Z", "dealId": "buy-order",
+                 "type": "WORKING_ORDER", "status": "EXECUTED"},
+                {"dateUTC": "2026-09-22T03:41:12.182Z", "dealId": "sell-old",
+                 "type": "POSITION", "status": "ACCEPTED", "source": "SL",
+                 "details": {"level": 4341.40}},
+            ]
+            candidate = {"dealId": "buy-new", "workingOrderId": "buy-order",
+                         "direction": "BUY", "level": 4340.18, "size": 10,
+                         "createdDateUTC": "2026-09-22T03:31:46.284Z"}
+            bot._apply_protection = Mock(return_value=True); bot._create_trigger = Mock()
+            self.assertTrue(bot._recover_trigger_fill_then_stop(
+                {"buy-new": candidate}, state.short, stopped
+            ))
+            closure = next(item for item in state.pending_recovery
+                           if item["deal_id"] == "sell-old")
+            self.assertEqual((closure["scenario_at_close"], state.general_recovery,
+                              state.scenario), (2, D("41.80"), 2))
+            self.assertEqual((state.long.deal_id, state.long.current_entry, state.long.size),
+                             ("buy-new", D("4340.18"), D("10")))
+
     def test_settrigger_relinks_closure_and_replacement_fill_once(self):
         with tempfile.TemporaryDirectory() as directory:
             bot = self.recovery_bot(str(Path(directory) / "state.json"))
@@ -5763,6 +5776,50 @@ class BrokerEvidenceRegressionTest(unittest.TestCase):
         self.assertTrue(all("from_date" in call.kwargs and "to_date" in call.kwargs
                             for call in client.transactions.call_args_list))
 
+    def test_transaction_fingerprint_is_order_independent_and_content_complete(self):
+        base = {"status": "COMPLETE_SNAPSHOT", "amount": D("-24.0"), "currency": "usd",
+                "components": [
+                    {"id": "a", "deal_id": "d1", "type": "TRADE",
+                     "amount": "-23.00", "currency": "USD"},
+                    {"id": "b", "deal_id": "d1", "type": "SWAP",
+                     "amount": "-1", "currency": "USD"},
+                ]}
+        expected = transaction_result_fingerprint(base)
+        reordered = {**base, "amount": "-24.000",
+                     "components": list(reversed(base["components"]))}
+        self.assertEqual(expected, transaction_result_fingerprint(reordered))
+        for field, value in (("deal_id", "d2"), ("type", "CORRECTION"),
+                             ("amount", "-2"), ("currency", "EUR")):
+            changed = {**base, "components": [dict(item) for item in base["components"]]}
+            changed["components"][0][field] = value
+            self.assertNotEqual(expected, transaction_result_fingerprint(changed))
+
+    def test_transaction_jobs_are_durably_scheduled_and_backed_off(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = Bot.__new__(Bot); bot.cfg = Settings(state_file=str(Path(directory) / "s.json"))
+            bot.state = CycleState(pending_transaction_jobs=[{
+                "key": "one", "attempt_id": 1, "deal_ids": ["d"],
+                "search_from_epoch": 1, "next_check_at": 0,
+            }])
+            bot.notification_worker = None; bot.telegram = Mock(); bot._queue_pending_reports = Mock()
+            bot.transaction_worker = Mock(); bot.transaction_worker.results.return_value = []
+            bot._tick_notifications(now=100)
+            bot._tick_notifications(now=101)
+            # The real worker de-duplicates in-flight keys; scheduling does not create a later
+            # request after a completed snapshot until its explicit interval.
+            bot.transaction_worker.results.return_value = [{"key": "one", "result": {
+                "status": "COMPLETE_SNAPSHOT", "amount": D("0"), "currency": "USD",
+                "components": [], "observed_to_epoch": 101,
+            }}]
+            bot._tick_notifications(now=101)
+            bot.transaction_worker.reset_mock(); bot.transaction_worker.results.return_value = []
+            bot._tick_notifications(now=102)
+            bot.transaction_worker.submit.assert_not_called()
+            self.assertEqual(bot.state.pending_transaction_jobs[0]["next_check_at"], 3701)
+            bot.transaction_worker.results.return_value = [{"key": "one", "error": "temporary"}]
+            bot._tick_notifications(now=3701)
+            self.assertEqual(bot.state.pending_transaction_jobs[0]["next_check_at"], 3706)
+
     def test_tick_never_performs_transaction_network_io(self):
         bot = Bot.__new__(Bot); bot.state = CycleState(); bot.capital = Mock()
         bot.state.broker_transaction_status = "PENDING"
@@ -5799,9 +5856,7 @@ class BrokerEvidenceRegressionTest(unittest.TestCase):
                 [item["broker_transaction_pnl"] for item in bot.state.attempt_history],
                 ["-34", "3"],
             )
-            self.assertEqual([call.args[0]["key"]
-                              for call in bot.transaction_worker.submit.call_args_list],
-                             ["one", "two"])
+            bot.transaction_worker.submit.assert_not_called()
             # Replaying the same worker result does not create another accounting entry.
             snapshot = json.dumps(bot.state.attempt_history, sort_keys=True)
             bot._tick_notifications()

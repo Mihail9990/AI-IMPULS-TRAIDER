@@ -231,6 +231,26 @@ class NotificationHistoryWorker:
 class TransactionHistoryWorker(NotificationHistoryWorker):
     """Background account-ledger snapshots; CycleState remains owned by the main thread."""
 
+    def _run(self) -> None:
+        """Perform one lookup per submission; durable scheduling belongs to CycleState."""
+        client = self.client_factory(self.cfg)
+        while not self._stop.is_set():
+            self._wake.wait(1.0)
+            self._wake.clear()
+            with self._lock:
+                job = self._jobs.popleft() if self._jobs else None
+            if job is None:
+                continue
+            key = str(job["key"])
+            try:
+                completed = {"key": key, "result": self._resolve(client, job)}
+            except Exception as exc:
+                LOG.warning("Transaction history lookup delayed key=%s: %s", key, exc)
+                completed = {"key": key, "error": str(exc)}
+            with self._lock:
+                self._keys.discard(key)
+                self._results.append(completed)
+
     @staticmethod
     def _resolve(client: CapitalClient, job: dict) -> dict | None:
         from .reporting import broker_attempt_pnl

@@ -19,6 +19,8 @@ class Leg:
     open: bool = True
     trigger_id: str = ""
     trigger_reference: str = ""
+    pending_trigger_replacement_level: Decimal | None = None
+    pending_trigger_cancel_unknown: bool = False
     # A MARKET fallback with a known dealReference but delayed confirmation is durable state, not
     # permission to submit another order. Subsequent ticks resolve this same reference first.
     pending_market_reference: str = ""
@@ -284,6 +286,9 @@ class CycleState:
             if record:
                 closure.setdefault("cycle_id", record.get("cycle_id", 0))
                 closure.setdefault("cycle_attempt", record.get("cycle_attempt", 0))
+        for job in raw.get("pending_transaction_jobs", []):
+            job.setdefault("next_check_at", 0)
+            job.setdefault("retry_count", 0)
         for name in ("long", "short"):
             leg = raw.get(name)
             if leg:
@@ -300,7 +305,7 @@ class CycleState:
                             "confirmed_stop", "confirmed_take_profit", "protection_sent_stop",
                             "confirmed_stop_distance",
                             "protection_sent_take_profit", "confirmation_stop",
-                            "confirmation_take_profit",
+                            "confirmation_take_profit", "pending_trigger_replacement_level",
                             "size", "stop_distance", "recovery", "temporary_stop_compensation",
                             "temporary_spread_compensation", "temporary_slippage_compensation"):
                     if leg.get(key) is not None:

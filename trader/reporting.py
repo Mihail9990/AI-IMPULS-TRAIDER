@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 from decimal import InvalidOperation
+import hashlib
+import json
 
 from .model import CycleState, Leg, recovery_distance, remaining_recovery_distance
 
@@ -93,13 +95,18 @@ def recovery_change_text(
     stop_slippage: Decimal | None = None, trigger_slippage: Decimal | None = None,
 ) -> str:
     old_general = before.get("_general", {}).get("general_recovery", "?")
-    last = state.recovery_events[-1] if state.recovery_events else {}
+    event_count = int(before.get("_general", {}).get("event_count", 0) or 0)
+    added = state.recovery_events[event_count:]
+    added_total = sum((D(str(item.get("amount", "0"))) for item in added), D("0"))
     lines = [
         cycle_heading(state, event), "", "Изменение денежного GENERAL_RECOVERY:",
-        f"ДО={old_general}; событие={last.get('kind', 'без нового компонента')}; "
-        f"добавка={last.get('amount', '0')}; ПОСЛЕ={state.general_recovery}",
+        f"ДО={old_general}; сумма добавок={added_total}; ПОСЛЕ={state.general_recovery}",
         f"target_value={state.target_value}; фактический P&L учитывается отдельно.",
     ]
+    if added:
+        lines.extend(f"  компонент={item.get('kind', '?')}; добавка={item.get('amount', '0')}" for item in added)
+    else:
+        lines.append("  новых Recovery components нет")
     for leg in (state.long, state.short):
         if not leg:
             continue
@@ -110,9 +117,18 @@ def recovery_change_text(
                 state.general_recovery, leg.size, leg.stop_distance
             ) if 2 <= state.scenario <= 8 and leg.size > 0 else "НЕТ"
         )
+        if state.scenario == 1:
+            formula = f"GENERAL_RECOVERY/size={state.general_recovery}/{leg.size}={distance}"
+        elif 2 <= state.scenario <= 8:
+            base = leg.stop_distance * leg.size
+            remaining = max(D("0"), state.general_recovery - base)
+            formula = (f"REMAINING_RECOVERY/size=max(0, {state.general_recovery}-"
+                       f"{base})/{leg.size}={remaining}/{leg.size}={distance}")
+        else:
+            formula = "НЕТ"
         lines.append(
             f"{leg.direction}: size={leg.size}; DISTANCE_SCENARIO={leg.stop_distance}; "
-            f"recovery_distance={state.general_recovery}/{leg.size}={distance}; "
+            f"recovery_distance={formula}; "
             f"entry={leg.current_entry}; SL={leg.stop}; TP={leg.take_profit}"
         )
     pending = [item for item in state.pending_recovery
@@ -125,6 +141,28 @@ def recovery_change_text(
             "reentry ожидается"
         )
     return "\n".join(lines)
+
+
+def transaction_result_fingerprint(result: dict) -> str:
+    """Canonical identity for a ledger snapshot, independent of API ordering."""
+    def money(value) -> str | None:
+        if value is None:
+            return None
+        number = D(str(value))
+        if not number.is_finite():
+            raise InvalidOperation
+        return "0" if number == 0 else format(number.normalize(), "f")
+
+    components = sorted((
+        str(item.get("id", "")), str(item.get("deal_id", "")),
+        str(item.get("type", "")).upper(), money(item.get("amount")),
+        str(item.get("currency", "")).upper(),
+    ) for item in result.get("components", []))
+    canonical = {
+        "status": str(result.get("status", "")), "amount": money(result.get("amount")),
+        "currency": str(result.get("currency", "")).upper(), "components": components,
+    }
+    return hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def status_text(state: CycleState) -> str:

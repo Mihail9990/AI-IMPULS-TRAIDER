@@ -157,6 +157,8 @@ class CycleContinuation:
 
     def handle_active_scenario(self) -> None:
         """Continuation-owned scenario dispatcher for the current scenario (1 through 9)."""
+        if self.bot._resume_pending_trigger_replacement():
+            return
         if self.state.pending_close_reference:
             self.bot._resume_pending_close()
             return
