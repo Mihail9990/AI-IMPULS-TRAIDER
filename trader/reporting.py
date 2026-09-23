@@ -156,7 +156,7 @@ def transaction_result_fingerprint(result: dict) -> str:
     components = sorted((
         str(item.get("id", "")), str(item.get("deal_id", "")),
         str(item.get("type", "")).upper(), money(item.get("amount")),
-        str(item.get("currency", "")).upper(),
+        str(item.get("currency", "")).upper(), str(item.get("status", "")).upper(),
     ) for item in result.get("components", []))
     canonical = {
         "status": str(result.get("status", "")), "amount": money(result.get("amount")),
@@ -252,9 +252,13 @@ def broker_attempt_pnl(transactions: list[dict], deal_ids: set[str]) -> dict:
     for item in transactions:
         deal_id = str(item.get("dealId") or item.get("positionDealId")
                       or item.get("affectedDealId") or "")
-        transaction_id = str(item.get("transactionId") or item.get("id") or "")
-        kind = str(item.get("type") or "").upper()
+        explicit_id = str(item.get("transactionId") or item.get("id") or "")
+        kind = str(item.get("type") or item.get("transactionType") or "").upper()
         amount = item.get("amount", item.get("profitLoss", item.get("value")))
+        # Real Capital transaction payloads name the monetary result ``size`` for TRADE records.
+        # That field is not assumed monetary for fees/swaps without an explicit documented amount.
+        if amount is None and kind == "TRADE":
+            amount = item.get("size")
         currency = str(item.get("currency") or item.get("currencyIsoCode") or "")
         if deal_id not in deal_ids:
             continue
@@ -266,22 +270,36 @@ def broker_attempt_pnl(transactions: list[dict], deal_ids: set[str]) -> dict:
         if not numeric_amount.is_finite():
             return {"status": "UNAVAILABLE", "amount": None, "currency": "",
                     "components": []}
-        fingerprint = (deal_id, kind, str(numeric_amount), currency)
+        status = str(item.get("status") or "").upper()
+        if status and status != "PROCESSED":
+            continue
+        identity_payload = {
+            "reference": str(item.get("reference") or ""), "deal_id": deal_id,
+            "kind": kind, "amount": str(numeric_amount), "currency": currency,
+            "status": status, "date": str(item.get("dateUtc") or item.get("dateUTC")
+                                           or item.get("date") or ""),
+        }
+        transaction_id = explicit_id or "broker:" + hashlib.sha256(
+            json.dumps(identity_payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        fingerprint = (deal_id, kind, str(numeric_amount), currency, status)
         if transaction_id in seen:
             if seen[transaction_id] != fingerprint:
                 return {"status": "UNAVAILABLE", "amount": None, "currency": "",
                         "components": []}
             continue
-        if not transaction_id or kind not in supported_types \
+        if kind not in supported_types \
                 or amount is None or not currency:
             return {"status": "UNAVAILABLE", "amount": None, "currency": "", "components": []}
         seen[transaction_id] = fingerprint
         correlated.append({"id": transaction_id, "deal_id": deal_id, "type": kind,
-                           "amount": str(numeric_amount), "currency": currency})
+                           "amount": str(numeric_amount), "currency": currency,
+                           "status": status})
     if not correlated:
         return {"status": "PENDING", "amount": None, "currency": "", "components": []}
     represented = {item["deal_id"] for item in correlated}
-    if represented != deal_ids:
+    trade_deals = {item["deal_id"] for item in correlated if item["type"] == "TRADE"}
+    if represented != deal_ids or trade_deals != deal_ids:
         currencies = {item["currency"] for item in correlated}
         return {"status": "PARTIAL", "amount": None,
                 "currency": next(iter(currencies)) if len(currencies) == 1 else "",

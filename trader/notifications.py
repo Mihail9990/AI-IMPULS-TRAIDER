@@ -146,6 +146,11 @@ class NotificationHistoryWorker:
             self._results.clear()
         return values
 
+    def acknowledge(self, key: str) -> None:
+        """Release an in-flight key only after the main owner durably applied its result."""
+        with self._lock:
+            self._keys.discard(str(key))
+
     def _run(self) -> None:
         client = self.client_factory(self.cfg)
         while not self._stop.is_set():
@@ -168,7 +173,6 @@ class NotificationHistoryWorker:
                     self._wake.set()
                 continue
             with self._lock:
-                self._keys.discard(key)
                 self._results.append({"key": key, "result": result})
 
     @staticmethod
@@ -248,7 +252,6 @@ class TransactionHistoryWorker(NotificationHistoryWorker):
                 LOG.warning("Transaction history lookup delayed key=%s: %s", key, exc)
                 completed = {"key": key, "error": str(exc)}
             with self._lock:
-                self._keys.discard(key)
                 self._results.append(completed)
 
     @staticmethod

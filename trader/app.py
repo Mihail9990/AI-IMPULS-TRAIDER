@@ -20,11 +20,11 @@ from .diagnostics import (
 )
 from .engine import Strategy
 from .events import (
-    find_close_event,
+    BrokerEvent, find_close_event,
     find_trigger_open_event,
     find_working_order_cancellation,
     find_working_order_execution,
-    normalize_events,
+    normalize_events, protection_range_diagnostic,
 )
 from .execution import ExecutionPolicy, is_crossed_level_rejection, trigger_level_passed
 from .model import CycleState, Leg, stop_for, target_for
@@ -191,6 +191,8 @@ class Bot:
                 job = next((item for item in self.state.pending_notification_jobs
                             if item.get("key") == completed["key"]), None)
                 if job is None:
+                    if isinstance(worker, NotificationHistoryWorker):
+                        worker.acknowledge(completed["key"])
                     continue
                 waiting = dict(job["waiting"])
                 waiting.update(completed["result"])
@@ -200,6 +202,8 @@ class Bot:
                 )
                 self.state.pending_notification_jobs.remove(job)
                 self.state.save(self.cfg.state_file)
+                if isinstance(worker, NotificationHistoryWorker):
+                    worker.acknowledge(completed["key"])
             for job in self.state.pending_notification_jobs:
                 worker.submit(job)
         transaction_worker = getattr(self, "transaction_worker", None)
@@ -208,13 +212,23 @@ class Bot:
                 job = next((item for item in self.state.pending_transaction_jobs
                             if item.get("key") == completed["key"]), None)
                 if job is None:
+                    if isinstance(transaction_worker, TransactionHistoryWorker):
+                        transaction_worker.acknowledge(completed["key"])
                     continue
                 if completed.get("error"):
                     job["retry_count"] = int(job.get("retry_count", 0) or 0) + 1
                     job["next_check_at"] = now + min(300, 5 * 2 ** (job["retry_count"] - 1))
+                    if isinstance(transaction_worker, TransactionHistoryWorker):
+                        transaction_worker.acknowledge(completed["key"])
                     changed = True
                     continue
                 result = completed["result"]
+                observed = result.get("observed_to_epoch")
+                previous_observed = float(job.get("observed_to_epoch", 0) or 0)
+                if observed is not None and float(observed) < previous_observed:
+                    if isinstance(transaction_worker, TransactionHistoryWorker):
+                        transaction_worker.acknowledge(completed["key"])
+                    continue
                 fingerprint = transaction_result_fingerprint(result)
                 if fingerprint != job.get("result_fingerprint"):
                     job["status"] = result["status"]
@@ -222,7 +236,6 @@ class Bot:
                                      if result.get("amount") is not None else None)
                     job["currency"] = result.get("currency", "")
                     job["components"] = result.get("components", [])
-                    job["observed_to_epoch"] = result.get("observed_to_epoch")
                     job["result_fingerprint"] = fingerprint
                     attempt = next((item for item in self.state.attempt_history
                                     if item.get("attempt_id") == job.get("attempt_id")), None)
@@ -242,10 +255,14 @@ class Bot:
                         self.state.broker_transaction_currency = job["currency"]
                         self.state.broker_transaction_components = list(job["components"])
                     changed = True
+                if observed is not None:
+                    job["observed_to_epoch"] = max(previous_observed, float(observed))
                 job["retry_count"] = 0
                 job["next_check_at"] = now + (
                     3600 if result.get("status") == "COMPLETE_SNAPSHOT" else 30
                 )
+                if isinstance(transaction_worker, TransactionHistoryWorker):
+                    transaction_worker.acknowledge(completed["key"])
                 changed = True
             for job in self.state.pending_transaction_jobs:
                 job.setdefault("next_check_at", 0)
@@ -1357,6 +1374,7 @@ class Bot:
                     None,
                 )
                 if direct_close is not None:
+                    self._remember_close_event(leg, direct_close)
                     return direct_close.source, direct_close.level
                 global_activity = self.capital.activity()
                 opened = find_trigger_open_event(global_activity, execution_id, leg.direction)
@@ -1368,6 +1386,7 @@ class Bot:
                 for source in ("SL", "TP"):
                     event = find_close_event(activity, leg.deal_id, source)
                     if event is not None and event.level is not None:
+                        self._remember_close_event(leg, event)
                         LOG.info(
                             "Accepted initial deal resolved from history: dealId=%s "
                             "source=%s fill=%s activity_attempt=%s/%s",
@@ -1478,7 +1497,7 @@ class Bot:
                             return
                         self.state.realized_losses += race_loss
                         self.state.realized_loss_money += (
-                            race_loss * self.cfg.size_for(min(9, self.state.scenario + 1))
+                            race_loss * stopped.size
                         )
                         self.state.last_trigger_resolution = (
                             f"workingOrderId={stopped.trigger_id} исполнился одновременно с TP; "
@@ -1701,7 +1720,7 @@ class Bot:
                               if item.get("deal_id") == lost.deal_id), None)
         if opened_record and int(opened_record.get("scenario", self.state.scenario)) < self.state.scenario:
             chronology = self.capital.activity()
-            close_event = find_close_event(chronology, lost.deal_id, "SL")
+            close_event = self._close_event_any_index(lost, "SL", chronology)
             if close_event is None or close_event.level != fill:
                 self._manual("Поздний SL не связан с broker chronology")
                 return
@@ -1918,8 +1937,13 @@ class Bot:
             if opened is None and position is not None:
                 deal_id = str(position.get("dealId", ""))
                 entry = D(str(position.get("level", leg.original_trigger_level)))
+                actual_size = (D(str(position["size"]))
+                               if position.get("size") is not None else None)
             elif opened is not None and opened.deal_id and opened.level is not None:
                 deal_id, entry = opened.deal_id, opened.level
+                actual_size = opened.size
+                if actual_size is None and position is not None and position.get("size") is not None:
+                    actual_size = D(str(position["size"]))
             else:
                 executed = find_working_order_execution(activity, trigger_id)
                 if executed is None:
@@ -1931,8 +1955,13 @@ class Bot:
                     continue
                 return None
 
+            if actual_size is None or actual_size <= 0:
+                LOG.info("Trigger race size is not published yet: dealId=%s", deal_id)
+                continue
             leg.deal_id = deal_id
             leg.current_entry = entry
+            leg.size = actual_size
+            leg.size_confirmation = "broker"
             leg.open = True
             self.state.remember_deal(leg, self.state.scenario + 1)
             position = positions.get(deal_id, position)
@@ -2019,10 +2048,22 @@ class Bot:
             trigger_level = leg.original_trigger_level
             executed_trigger_id = leg.trigger_id
             actual_size = D(str(candidate["size"])) if candidate.get("size") is not None else None
+            execution_time = ""
+            try:
+                execution = find_working_order_execution(
+                    self.capital.activity(), executed_trigger_id
+                )
+                if execution is not None:
+                    execution_time = execution.timestamp.isoformat()
+            except (CapitalError, TypeError):
+                # The matching position is enough to continue the live path.  Durable ownership is
+                # retained so a later close/startup read can obtain WORKING_ORDER execution time.
+                LOG.info("Trigger execution history is not published yet: %s", executed_trigger_id)
             self.strategy.reopened(
                 leg.direction, fill, str(candidate["dealId"]),
                 f"reopen:{candidate['dealId']}", actual_size=actual_size,
                 working_order_id=executed_trigger_id,
+                broker_execution_time=execution_time,
             )
             if self.state.scenario == self.cfg.max_scenarios:
                 self._enter_manual_nine()
@@ -2086,9 +2127,43 @@ class Bot:
                        if event.deal_id == record.get("deal_id")
                        and event.event_type == "POSITION" and event.source == "USER"
                        and event.status == "ACCEPTED"]
-            if len(matches) != 1 or matches[0].timestamp == unknown:
+            trigger_id = str(record.get("trigger_id", ""))
+            owned_triggers = set(self.state.cycle_trigger_ids) | {
+                str(item.get("trigger_id", "")) for item in self.state.pending_recovery
+                if int(item.get("cycle_id", self.state.cycle_id) or 0) == self.state.cycle_id
+                and int(item.get("cycle_attempt", self.state.cycle_attempt) or 0)
+                == self.state.cycle_attempt
+            }
+            if trigger_id and trigger_id not in owned_triggers:
                 return None
-            reentries.append((scenario, matches[0]))
+            executions = [event for event in normalized
+                          if trigger_id and event.deal_id == trigger_id
+                          and event.event_type == "WORKING_ORDER"
+                          and event.status == "EXECUTED"]
+            saved_time = str(record.get("broker_open_execution_time", ""))
+            if executions:
+                opened_event = executions[-1]
+            elif len(matches) == 1:
+                opened_event = matches[0]
+            elif saved_time:
+                try:
+                    saved_timestamp = datetime.fromisoformat(saved_time.replace("Z", "+00:00"))
+                    if saved_timestamp.tzinfo is None:
+                        saved_timestamp = saved_timestamp.replace(tzinfo=timezone.utc)
+                    opened_event = BrokerEvent(
+                        f"saved-open:{record.get('deal_id')}",
+                        saved_timestamp,
+                        "USER", "EXECUTED", "WORKING_ORDER", trigger_id, "", trigger_id,
+                        str(record.get("direction", "")), D(str(record.get("entry", "0"))),
+                        D(str(record.get("size", "0"))), {},
+                    )
+                except (ValueError, TypeError, ArithmeticError):
+                    return None
+            else:
+                return None
+            if opened_event.timestamp == unknown:
+                return None
+            reentries.append((scenario, opened_event))
         if not reentries:
             return None
         same_time = [event for _, event in reentries if event.timestamp == close_event.timestamp]
@@ -2104,11 +2179,64 @@ class Bot:
         scenario = self._scenario_at_broker_close(leg, close_event, activity)
         if scenario is None:
             return None
+        details = close_event.raw.get("details", {}) if isinstance(close_event.raw, dict) else {}
+        effective_stop = details.get("stopLevel")
+        if effective_stop is not None:
+            leg.confirmation_stop = leg.confirmed_stop = D(str(effective_stop))
+            leg.confirmed_stop_distance = abs(leg.current_entry - leg.confirmed_stop)
+            leg.protection_confirmation = "ACCEPTED"
+        if close_event.size is not None:
+            if close_event.size <= 0:
+                return None
+            leg.size = close_event.size
+            leg.size_confirmation = "broker_close_event"
+        self._remember_close_event(leg, close_event)
         return self.strategy.stopped(
             leg.direction, close_event.level,
             f"stop:{leg.deal_id}:{close_event.level}",
             scenario_at_close=scenario,
             broker_execution_time=close_event.timestamp.isoformat(),
+        )
+
+    def _remember_close_event(self, leg: Leg, event: BrokerEvent) -> None:
+        details = event.raw.get("details", {}) if isinstance(event.raw, dict) else {}
+        broker_stop = details.get("stopLevel")
+        broker_target = details.get("profitLevel")
+        stop = D(str(broker_stop)) if broker_stop is not None else leg.confirmed_stop
+        target = D(str(broker_target)) if broker_target is not None else leg.confirmed_take_profit
+        diagnostic = protection_range_diagnostic(
+            event, confirmed_stop=stop, confirmed_take_profit=target
+        )
+        self.state.remember_deal(leg)
+        self.state.remember_close(
+            leg.deal_id, event.source, event.level,
+            close_event_id=event.event_id, close_event_type=event.event_type,
+            close_event_status=event.status, close_execution_time=event.timestamp.isoformat(),
+            close_size=event.size if event.size is not None else leg.size,
+            effective_stop=stop, effective_take_profit=target,
+            close_cycle_id=self.state.cycle_id, close_cycle_attempt=self.state.cycle_attempt,
+            protection_range=diagnostic,
+        )
+
+    def _saved_close_event(self, leg: Leg, source: str) -> BrokerEvent | None:
+        record = next((item for item in reversed(self.state.deal_history)
+                       if item.get("deal_id") == leg.deal_id
+                       and item.get("close_source") == source.upper()
+                       and item.get("close_level") is not None), None)
+        if record is None or record.get("close_evidence_conflict"):
+            return None
+        try:
+            timestamp = datetime.fromisoformat(
+                str(record.get("close_execution_time", "")).replace("Z", "+00:00")
+            )
+        except ValueError:
+            timestamp = datetime.min.replace(tzinfo=timezone.utc)
+        return BrokerEvent(
+            str(record.get("close_event_id") or f"saved:{leg.deal_id}:{source}:{record['close_level']}"),
+            timestamp, source.upper(), str(record.get("close_event_status", "ACCEPTED")),
+            str(record.get("close_event_type", "POSITION")), leg.deal_id, "", "",
+            leg.direction, D(str(record["close_level"])),
+            D(str(record.get("close_size", leg.size))), {"saved": True},
         )
 
     def _recover_trigger_fill_then_stop(
@@ -2223,7 +2351,7 @@ class Bot:
                 return True
             self.state.realized_losses += race_loss
             self.state.realized_loss_money += (
-                race_loss * self.cfg.size_for(min(9, self.state.scenario + 1))
+                race_loss * stopped.size
             )
             stopped.trigger_id = stopped.trigger_reference = ""
             self._complete_cycle(survivor.direction, survivor_tp.level)
@@ -2333,10 +2461,21 @@ class Bot:
         if not self.state.active or self.state.phase not in {"LONG_ONLY", "SHORT_ONLY"}:
             return
         for leg in (self.state.long, self.state.short):
-            if leg and not leg.open and not leg.trigger_id:
+            if (leg and not leg.open and not leg.trigger_id
+                    and not leg.pending_trigger_action
+                    and not leg.pending_trigger_cancel_unknown
+                    and not leg.pending_trigger_replacement_reference
+                    and not leg.pending_trigger_replacement_unknown_post
+                    and not leg.trigger_recreation_suppressed):
                 self._create_trigger(leg)
 
     def _create_trigger(self, leg: Leg) -> None:
+        if any(item and (item.pending_trigger_cancel_unknown
+                         or item.pending_trigger_replacement_reference
+                         or item.pending_trigger_replacement_unknown_post)
+               for item in (self.state.long, self.state.short)):
+            LOG.info("Trigger mutation deferred while a manual trigger mutation is unresolved")
+            return
         last_error = "trigger отклонён"
         projected_size, projected_distance, projected_recovery = self.strategy.projected_reopen(
             leg.direction
@@ -2998,7 +3137,7 @@ class Bot:
                     if survivor.deal_id not in positions:
                         raise RuntimeError("обе ожидаемые позиции отсутствуют")
                     activity = self.capital.activity()
-                    close_event = find_close_event(activity, lost.deal_id, "SL")
+                    close_event = self._close_event_any_index(lost, "SL", activity)
                     if close_event is None or close_event.level is None:
                         raise RuntimeError(f"не найдена цена закрытия {lost.deal_id}")
                     if self._apply_confirmed_stop_event(lost, close_event, activity) is None:
@@ -3496,44 +3635,113 @@ class Bot:
         projected_size, projected_distance, projected_recovery = self.strategy.projected_reopen(
             leg.direction
         )
-        reference = self.capital.working_stop(
-            self.cfg.epic, leg.direction, projected_size, level,
-            stop_for(leg.direction, level, projected_distance),
-            target_for(leg.direction, level, projected_distance, projected_recovery),
-        )
+        reference = leg.pending_trigger_replacement_reference
+        if not reference:
+            # Persist the mutation lock before POST.  If the response is lost, reconciliation may
+            # bind a unique matching order but no second STOP is submitted.
+            leg.pending_trigger_action = "replace"
+            leg.pending_trigger_replacement_level = level
+            leg.pending_trigger_replacement_unknown_post = True
+            self.state.save(self.cfg.state_file)
+            reference = self.capital.working_stop(
+                self.cfg.epic, leg.direction, projected_size, level,
+                stop_for(leg.direction, level, projected_distance),
+                target_for(leg.direction, level, projected_distance, projected_recovery),
+            )
+            leg.pending_trigger_replacement_reference = reference
+            leg.pending_trigger_replacement_unknown_post = False
+            self.state.save(self.cfg.state_file)
         result = self.capital.wait_confirmation(reference)
+        if result.get("dealStatus") == "REJECTED":
+            leg.pending_trigger_replacement_reference = ""
+            leg.pending_trigger_replacement_unknown_post = False
+            self.state.save(self.cfg.state_file)
+            raise CapitalError(result.get("reason") or "Ручной trigger отклонён")
         if result.get("dealStatus") != "ACCEPTED" or not result.get("dealId"):
             raise CapitalError(result.get("reason") or "Ручной trigger отклонён")
         leg.trigger_reference = reference
         leg.trigger_id = str(result["dealId"])
         leg.pending_trigger_replacement_level = None
+        leg.pending_trigger_replacement_reference = ""
+        leg.pending_trigger_replacement_unknown_post = False
         leg.pending_trigger_cancel_unknown = False
+        leg.pending_trigger_action = ""
+        leg.trigger_recreation_suppressed = False
         if leg.trigger_id not in self.state.cycle_trigger_ids:
             self.state.cycle_trigger_ids.append(leg.trigger_id)
         self._link_pending_closure_trigger(leg)
 
     def _resume_pending_trigger_replacement(self) -> bool:
         leg = next((item for item in (self.state.long, self.state.short)
-                    if item and item.pending_trigger_cancel_unknown), None)
+                    if item and (item.pending_trigger_cancel_unknown
+                                 or item.pending_trigger_action
+                                 or item.pending_trigger_replacement_reference
+                                 or item.pending_trigger_replacement_unknown_post)), None)
         if leg is None:
             return False
-        self._detect_trigger_fill(self._cycle_positions())
+        positions = self._cycle_positions()
+        self._detect_trigger_fill(positions)
         if leg.open:
             leg.pending_trigger_replacement_level = None
+            leg.pending_trigger_replacement_reference = ""
+            leg.pending_trigger_replacement_unknown_post = False
             leg.pending_trigger_cancel_unknown = False
+            leg.pending_trigger_action = ""
             self.state.save(self.cfg.state_file)
             return False
-        activity = self.capital.activity()
-        if find_working_order_cancellation(activity, leg.trigger_id) is not None:
-            level = leg.pending_trigger_replacement_level
-            leg.trigger_id = leg.trigger_reference = ""
+        if leg.pending_trigger_cancel_unknown and leg.trigger_id:
+            activity = self.capital.activity()
+            if find_working_order_cancellation(activity, leg.trigger_id) is not None:
+                leg.trigger_id = leg.trigger_reference = ""
+                leg.pending_trigger_cancel_unknown = False
+                if leg.pending_trigger_action == "cancel":
+                    leg.pending_trigger_action = ""
+                    leg.trigger_recreation_suppressed = True
+                    self.state.save(self.cfg.state_file)
+                    return False
+            else:
+                # Keep the old order binding and mutation lock, but never stop read-only survivor
+                # SL/TP/protection processing while cancellation history is delayed.
+                return False
+        if leg.pending_trigger_action == "cancel":
+            leg.pending_trigger_action = ""
+            leg.trigger_recreation_suppressed = True
+            self.state.save(self.cfg.state_file)
+            return False
+        level = leg.pending_trigger_replacement_level
+        if leg.pending_trigger_replacement_unknown_post and not leg.pending_trigger_replacement_reference:
+            matches = []
             if level is not None:
-                self._submit_replacement_trigger(leg, level)
+                for item in self.capital.working_orders():
+                    data = self._order_data(item)
+                    order_level = data.get("orderLevel", data.get("level"))
+                    if (self._order_epic(item) == self.cfg.epic
+                            and data.get("direction") == leg.direction
+                            and order_level is not None and D(str(order_level)) == level):
+                        matches.append(data)
+            if len(matches) == 1 and matches[0].get("dealId"):
+                leg.trigger_id = str(matches[0]["dealId"])
+                leg.trigger_reference = str(matches[0].get("dealReference", ""))
+                leg.pending_trigger_replacement_unknown_post = False
+                leg.pending_trigger_action = ""
+                leg.pending_trigger_replacement_level = None
+                if leg.trigger_id not in self.state.cycle_trigger_ids:
+                    self.state.cycle_trigger_ids.append(leg.trigger_id)
+                self._link_pending_closure_trigger(leg)
             self.state.save(self.cfg.state_file)
             return False
-        # EXECUTED without a published position, or no final event yet: retain ownership and let
-        # the next tick reconcile. No conflicting STOP/MARKET mutation is sent.
-        return True
+        if level is not None and (leg.pending_trigger_replacement_reference
+                                  or not leg.pending_trigger_replacement_unknown_post):
+            survivor = self.state.short if leg.direction == "BUY" else self.state.long
+            # An absent survivor is reconciled by the normal dispatcher before any replacement.
+            if (not self.state.active or not survivor or not survivor.open
+                    or survivor.deal_id not in positions):
+                return False
+            try:
+                self._submit_replacement_trigger(leg, level)
+            except CapitalError:
+                return False
+        return False
 
     def _manual_command(self, command: str, args: list[str]) -> None:
         if not args or args[0] not in {"long", "short"}:
@@ -3550,15 +3758,31 @@ class Bot:
             raise RuntimeError("Указанная позиция не открыта")
         if command == "/canceltrigger":
             if leg.trigger_id:
-                self.capital.delete_working_order(leg.trigger_id)
+                leg.pending_trigger_action = "cancel"
+                self.state.save(self.cfg.state_file)
+                try:
+                    cancelled = self.capital.delete_working_order(leg.trigger_id)
+                except CapitalError:
+                    cancelled = False
+                if not cancelled:
+                    leg.pending_trigger_cancel_unknown = True
+                    self.state.save(self.cfg.state_file)
+                    raise RuntimeError(
+                        f"Исход отмены Trigger {leg.trigger_id} ещё не подтверждён; "
+                        "ownership сохранён, survivor остаётся под автосопровождением"
+                    )
                 leg.trigger_id = leg.trigger_reference = ""
+                leg.pending_trigger_action = ""
+                leg.trigger_recreation_suppressed = True
         elif command == "/settrigger":
             if len(args) != 2:
                 raise RuntimeError("Укажите цену trigger")
             level = D(args[1])
+            leg.pending_trigger_action = "replace"
+            leg.pending_trigger_replacement_level = level
+            self.state.save(self.cfg.state_file)
             if leg.trigger_id:
                 old_trigger = leg.trigger_id
-                leg.pending_trigger_replacement_level = level
                 try:
                     cancelled = self.capital.delete_working_order(old_trigger)
                 except CapitalError:
@@ -3899,7 +4123,7 @@ class Bot:
                 )
             self.state.realized_losses += race_loss
             self.state.realized_loss_money += (
-                race_loss * self.cfg.size_for(min(9, self.state.scenario + 1))
+                race_loss * pending.size
             )
             self.state.last_trigger_resolution = (
                 f"workingOrderId={trigger_id} исполнился около TP; позиция закрыта, "
@@ -4106,11 +4330,18 @@ class Bot:
         return matches[0] if matches else None
 
     def _closing_fill(self, leg: Leg, expected_source: str = "SL") -> Decimal | None:
-        event = find_close_event(self.capital.activity(leg.deal_id), leg.deal_id, expected_source)
+        try:
+            event = find_close_event(
+                self.capital.activity(leg.deal_id), leg.deal_id, expected_source
+            )
+        except CapitalError:
+            event = None
         if event and event.level is not None:
-            self.state.remember_deal(leg)
-            self.state.remember_close(leg.deal_id, expected_source, event.level)
+            self._remember_close_event(leg, event)
             return event.level
+        saved = self._saved_close_event(leg, expected_source)
+        if saved is not None:
+            return saved.level
         return None
 
     def _closing_fill_any_index(
@@ -4129,8 +4360,7 @@ class Bot:
             return fill
         event = find_close_event(global_activity, leg.deal_id, expected_source)
         if event and event.level is not None:
-            self.state.remember_deal(leg)
-            self.state.remember_close(leg.deal_id, expected_source, event.level)
+            self._remember_close_event(leg, event)
             LOG.info(
                 "Close resolved from global activity: dealId=%s source=%s fill=%s",
                 leg.deal_id, expected_source, event.level,
@@ -4142,13 +4372,18 @@ class Bot:
                                global_activity: list[dict]):
         event = find_close_event(global_activity, leg.deal_id, expected_source)
         if event is not None:
+            self._remember_close_event(leg, event)
             return event
         try:
-            return find_close_event(
+            event = find_close_event(
                 self.capital.activity(leg.deal_id), leg.deal_id, expected_source
             )
+            if event is not None:
+                self._remember_close_event(leg, event)
+                return event
+            return self._saved_close_event(leg, expected_source)
         except CapitalError:
-            return None
+            return self._saved_close_event(leg, expected_source)
 
     def _wait_closing_fill(
         self, leg: Leg, expected_source: str = "SL", attempts: int = 16, delay: float = 0.5

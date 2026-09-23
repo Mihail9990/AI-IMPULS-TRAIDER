@@ -280,7 +280,7 @@ class Strategy:
 
     def reopened(self, direction: str, fill: Decimal, deal_id: str = "", event_id: str = "",
                  actual_size: Decimal | None = None, *, working_order_id: str = "",
-                 close_key: str = "") -> None:
+                 close_key: str = "", broker_execution_time: str = "") -> None:
         if self.state.scenario >= self.cfg.max_scenarios:
             raise RuntimeError("Scenario limit reached")
         leg = self._leg(direction)
@@ -332,12 +332,24 @@ class Strategy:
         leg.deal_id = deal_id
         leg.open = True
         leg.trigger_id = leg.trigger_reference = ""
+        leg.pending_trigger_action = ""
+        leg.pending_trigger_replacement_level = None
+        leg.pending_trigger_replacement_reference = ""
+        leg.pending_trigger_replacement_unknown_post = False
+        leg.pending_trigger_cancel_unknown = False
+        leg.trigger_recreation_suppressed = False
         leg.confirmed_stop = leg.confirmed_take_profit = None
         leg.confirmed_stop_distance = None
         leg.protection_sent_stop = leg.protection_sent_take_profit = None
         leg.confirmation_stop = leg.confirmation_take_profit = None
         leg.protection_confirmation = leg.protection_readback = ""
         self.state.remember_deal(leg, self.state.scenario)
+        opened = next((item for item in self.state.deal_history
+                       if item.get("deal_id") == deal_id), None)
+        if opened is not None:
+            opened["trigger_id"] = working_order_id
+            opened["broker_open_execution_time"] = broker_execution_time
+            opened["open_evidence"] = "WORKING_ORDER_EXECUTED+POSITION_WORKING_ORDER_ID"
         self._targets_from_entries()
         self.state.phase = "SCENARIO_9_CLOSING" if next_scenario == self.cfg.max_scenarios else "BOTH_OPEN"
         if event_id:

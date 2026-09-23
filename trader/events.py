@@ -9,6 +9,7 @@ from typing import Any, Iterable
 
 
 D = Decimal
+PROTECTION_DIAGNOSTIC_TOLERANCE = D("0.50")
 
 
 @dataclass(frozen=True)
@@ -120,6 +121,33 @@ def find_working_order_cancellation(
         and event.status == "CANCELLED"
     ]
     return matches[-1] if matches else None
+
+
+def protection_range_diagnostic(
+    event: BrokerEvent, *, confirmed_stop: Decimal | None,
+    confirmed_take_profit: Decimal | None,
+) -> dict:
+    """Describe proximity to historical protection without classifying the close.
+
+    Identity and the authoritative broker source are established by callers first.  This helper is
+    deliberately pure: a price range is useful diagnostics, never evidence of SL/TP execution.
+    """
+    matches = []
+    if event.level is not None:
+        for source, level in (("SL", confirmed_stop), ("TP", confirmed_take_profit)):
+            if level is None:
+                continue
+            deviation = abs(event.level - level)
+            matches.append({
+                "source": source, "level": str(level), "deviation": str(deviation),
+                "within_0_50": deviation <= PROTECTION_DIAGNOSTIC_TOLERANCE,
+            })
+    near = [item["source"] for item in matches if item["within_0_50"]]
+    return {
+        "matches": matches,
+        "range_assessment": "AMBIGUOUS" if len(near) > 1 else near[0] if near else "NONE",
+        "authoritative_source": event.source,
+    }
 
 
 def _dicts(value: Any):

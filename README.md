@@ -94,6 +94,18 @@ confirmation либо `/positions` read-back; pending D вычисляется �
 - при исчезновении позиции во время обычной работы цена исполнения должна быть найдена в
   activity history; иначе бот останавливает автоматику вместо приблизительного расчёта.
 
+Подтверждённое activity-закрытие сохраняется как полный неизменяемый evidence: event identity,
+broker UTC execution time, source/type/status, actual fill/size, действовавшие SL/TP и владелец
+cycle/attempt. Поэтому временно пустой последующий history response не отменяет уже доказанный SL.
+Для позднего SL после уже обработанного reentry chronology может быть доказана сохранённой цепочкой
+owned Trigger → `WORKING_ORDER/EXECUTED` → position с тем же `workingOrderId`; поле
+`position.createdDateUTC` не заменяет execution time.
+
+Для диагностики каждого идентифицированного закрытия дополнительно показывается попадание actual
+fill в диапазон `confirmed effective SL/TP ± 0.50`. Диапазон не классифицирует событие, не заменяет
+broker source/chronology и никогда сам не меняет Recovery, Scenario или заявки. Подтверждённый
+broker SL/TP принимается и за пределами диапазона как реальное проскальзывание.
+
 ## Telegram
 
 ### Устойчивые торговые отчёты и фоновое уточнение history
@@ -212,6 +224,19 @@ Capital API и не изменяют состояние цикла. Неотпр
 `/automode` выходит из ручного режима только если Capital.com подтверждает отсутствие Gold-позиций
 и working orders. Если что-то ещё открыто, команда блокируется до ручной сверки. При запуске
 stale ручное состояние также автоматически очищается, когда на брокере уже ничего нет.
+
+`/settrigger` и `/canceltrigger` сохраняют ownership старого Trigger до положительного CANCELLED
+либо восстановления EXECUTED-позиции. Неизвестная отмена блокирует только конфликтующую mutation:
+survivor продолжает сопровождаться. Для replacement intent сохраняется до POST, полученный
+`dealReference` — до ожидания confirmation; после restart проверяется та же mutation без второго
+STOP. Подтверждённая ручная отмена подавляет автоматическое немедленное пересоздание заявки.
+
+Transaction reconciliation принимает как прежние `transactionId/type/amount`, так и фактические
+Capital payloads `reference/transactionType/size` для `TRADE`. `size` считается денежным только для
+подтверждённого формата TRADE; для остальных типов требуется явное monetary поле. Snapshot не
+становится полным, пока основной TRADE отсутствует хотя бы для одного expected deal. Content
+fingerprint и время последнего успешного наблюдения независимы: одинаковый результат обновляет
+watermark, но не повторяет финансовое применение.
 
 `/profit200 VALUE` задаёт полное значение личного profit для следующих 200 завершённых циклов.
 Например, `/profit200 0.4` заменяет обычный `TARGET_PROFIT=0.3` на `0.4`. Уже открытый цикл не

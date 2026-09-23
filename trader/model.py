@@ -21,6 +21,10 @@ class Leg:
     trigger_reference: str = ""
     pending_trigger_replacement_level: Decimal | None = None
     pending_trigger_cancel_unknown: bool = False
+    pending_trigger_action: str = ""
+    pending_trigger_replacement_reference: str = ""
+    pending_trigger_replacement_unknown_post: bool = False
+    trigger_recreation_suppressed: bool = False
     # A MARKET fallback with a known dealReference but delayed confirmation is durable state, not
     # permission to submit another order. Subsequent ticks resolve this same reference first.
     pending_market_reference: str = ""
@@ -181,20 +185,32 @@ class CycleState:
             # Preserve close information already learned from activity history.
             values["close_source"] = record.get("close_source", "")
             values["close_level"] = record.get("close_level")
+            if not values["trigger_id"]:
+                values["trigger_id"] = record.get("trigger_id", "")
             record.update(values)
         if leg.deal_id not in self.attempt_deal_ids:
             self.attempt_deal_ids.append(leg.deal_id)
         # This is diagnostic/recovery metadata rather than an unbounded transaction database.
         del self.deal_history[:-500]
 
-    def remember_close(self, deal_id: str, source: str, level: Decimal) -> None:
+    def remember_close(self, deal_id: str, source: str, level: Decimal, **evidence) -> None:
         record = next(
             (item for item in self.deal_history if item.get("deal_id") == deal_id), None
         )
         if record is None:
             record = {"deal_id": deal_id}
             self.deal_history.append(record)
-        record.update({"close_source": source.upper(), "close_level": str(level)})
+        values = {"close_source": source.upper(), "close_level": str(level)}
+        values.update({key: str(value) if isinstance(value, Decimal) else value
+                       for key, value in evidence.items() if value is not None})
+        # Broker facts are immutable.  A later eventually-consistent empty response never calls
+        # this method, and a conflicting response is left for explicit reconciliation instead of
+        # silently rewriting the chronology used by Recovery.
+        if (record.get("close_event_id") and values.get("close_event_id")
+                and record["close_event_id"] != values["close_event_id"]):
+            record["close_evidence_conflict"] = values
+        else:
+            record.update(values)
         del self.deal_history[:-500]
 
     def remember_attempt(
@@ -311,6 +327,10 @@ class CycleState:
                     if leg.get(key) is not None:
                         leg[key] = D(str(leg[key]))
                 leg.setdefault("legacy_missing_fields", missing)
+                leg.setdefault("pending_trigger_action", "")
+                leg.setdefault("pending_trigger_replacement_reference", "")
+                leg.setdefault("pending_trigger_replacement_unknown_post", False)
+                leg.setdefault("trigger_recreation_suppressed", False)
                 raw[name] = Leg(**leg)
         raw["recovery"] = D(str(raw.get("recovery", "0")))
         for name in ("general_recovery", "target_value", "initial_position_size"):

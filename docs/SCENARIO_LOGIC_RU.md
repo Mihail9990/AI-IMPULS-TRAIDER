@@ -58,6 +58,11 @@ closure не теряет D даже после локального перех�
 stable recovery-event keys. Replay не меняет ledger и не повторяет Scenario transition.
 
 `original_trigger_level` неизменяем в пределах attempt; `current_entry` заменяется actual fill.
+
+Историческая связь исполнения сохраняет owned working-order ID, permanent position dealId и broker
+UTC timestamp `WORKING_ORDER/EXECUTED`. Она не удаляется при очистке активного `leg.trigger_id` после
+reentry и используется для позднего SL после restart. `position.createdDateUTC` является временем
+публикации/создания позиции и не подменяет broker execution chronology.
 Broker execution chronology, а не arrival order REST/history, определяет `scenario_at_close`.
 Неоднозначная chronology блокируется reconciliation/manual без приблизительного D.
 
@@ -117,6 +122,10 @@ Trigger cancellation/race, concurrent close, actual-fill и restart-защиты
 
 Actual P&L независимо суммируется по broker entry, close, direction и собственному actual size
 каждого deal; GENERAL_RECOVERY его не заменяет.
+
+Подтверждённый close event сохраняется целиком вместе с effective protection. Диагностический
+диапазон `SL/TP ± 0.50` вычисляется только после установления deal identity и не является основанием
+для source, Scenario, accounting или mutation.
 
 Новые циклы имеют `recovery_model_version=3`. Inactive old state начинает следующий cycle в v3.
 Active v1/v2 не мигрируется приблизительно: если точная deterministic continuation не доказуема,
