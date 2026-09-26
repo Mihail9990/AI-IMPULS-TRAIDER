@@ -1,0 +1,484 @@
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+from decimal import Decimal
+import json
+from pathlib import Path
+
+
+D = Decimal
+
+
+@dataclass
+class Leg:
+    direction: str
+    original_trigger_level: Decimal
+    current_entry: Decimal
+    deal_id: str = ""
+    deal_reference: str = ""
+    open: bool = True
+    trigger_id: str = ""
+    trigger_reference: str = ""
+    pending_trigger_cancel_unknown: bool = False
+    pending_trigger_action: str = ""
+    trigger_recreation_suppressed: bool = False
+    pending_race_close_reference: str = ""
+    pending_race_close_deal_id: str = ""
+    pending_race_close_unknown: bool = False
+    # A MARKET fallback with a known dealReference but delayed confirmation is durable state, not
+    # permission to submit another order. Subsequent ticks resolve this same reference first.
+    pending_market_reference: str = ""
+    pending_market_reason: str = ""
+    pending_market_kind: str = ""
+    pending_market_unknown_post: bool = False
+    pending_market_preexisting_ids: list[str] = field(default_factory=list)
+    stop: Decimal | None = None
+    take_profit: Decimal | None = None
+    confirmed_stop: Decimal | None = None
+    confirmed_stop_distance: Decimal | None = None
+    confirmed_take_profit: Decimal | None = None
+    protection_sent_stop: Decimal | None = None
+    protection_sent_take_profit: Decimal | None = None
+    confirmation_stop: Decimal | None = None
+    confirmation_take_profit: Decimal | None = None
+    protection_confirmation: str = ""
+    protection_readback: str = ""
+    entry_confirmation: str = "projected"
+    size_confirmation: str = "requested"
+    size: Decimal = D("0")
+    stop_distance: Decimal = D("0")
+    recovery: Decimal = D("0")
+    temporary_stop_compensation: Decimal = D("0")
+    temporary_spread_compensation: Decimal = D("0")
+    temporary_slippage_compensation: Decimal = D("0")
+    # Field names absent from a legacy JSON object.  A saved numeric zero is not missing.
+    legacy_missing_fields: list[str] = field(default_factory=list)
+
+    @property
+    def effective_recovery(self) -> Decimal:
+        return (self.recovery + self.temporary_stop_compensation
+                + self.temporary_spread_compensation + self.temporary_slippage_compensation)
+
+    @property
+    def temporary_recovery(self) -> Decimal:
+        return (self.temporary_stop_compensation + self.temporary_spread_compensation
+                + self.temporary_slippage_compensation)
+
+    def json(self) -> dict:
+        return {
+            key: str(value) if isinstance(value, Decimal) else value
+            for key, value in asdict(self).items()
+        }
+
+
+@dataclass
+class CycleState:
+    active: bool = False
+    armed: bool = False
+    waiting_current_candle: bool = False
+    paused: bool = False
+    manual: bool = False
+    scenario: int = 0
+    recovery: Decimal = D("0")
+    # Recovery model v3: one monetary balance for the complete logical cycle. ``recovery`` and
+    # the per-leg recovery fields are retained only as serialized legacy input/display mirrors.
+    recovery_model_version: int = 3
+    general_recovery: Decimal = D("0")
+    target_value: Decimal = D("0")
+    initial_position_size: Decimal = D("0")
+    recovery_events: list[dict] = field(default_factory=list)
+    pending_recovery: list[dict] = field(default_factory=list)
+    recovery_migration_error: str = ""
+    entry_spread: Decimal = D("0")
+    realized_losses: Decimal = D("0")
+    realized_loss_money: Decimal = D("0")
+    gross_take_profit: Decimal = D("0")
+    net_cycle_result: Decimal = D("0")
+    net_cycle_money: Decimal = D("0")
+    scenario_nine_prior_losses: Decimal = D("0")
+    scenario_nine_close_gap: Decimal = D("0")
+    scenario_nine_total_loss: Decimal = D("0")
+    scenario_nine_extra_loss: Decimal = D("0")
+    scenario_nine_triggers_verified: bool = False
+    scenario_nine_long_fill: Decimal | None = None
+    scenario_nine_short_fill: Decimal | None = None
+    cycle_target_profit: Decimal = D("0")
+    profit_override: Decimal | None = None
+    profit_override_remaining: int = 0
+    pending_tp_direction: str = ""
+    pending_tp_fill: Decimal | None = None
+    pending_close_direction: str = ""
+    pending_close_reference: str = ""
+    pending_close_reason: str = ""
+    long: Leg | None = None
+    short: Leg | None = None
+    phase: str = "IDLE"
+    telegram_offset: int = 0
+    completed_cycles: int = 0
+    diagnostic_cleanup_cycle: int = 0
+    diagnostic_cycle_number: int = 0
+    attempt_counter: int = 0
+    active_attempt_id: int = 0
+    cycle_id: int = 0
+    cycle_attempt: int = 0
+    continuation_pause_until: float = 0.0
+    continuation_stopped_by_user: bool = False
+    cycle_attempt_start_losses: Decimal = D("0")
+    cycle_attempt_start_loss_money: Decimal = D("0")
+    continuation_managed: bool = False
+    continuation_stage: str = ""
+    continuation_flat_checks: int = 0
+    continuation_filter_reason: str = ""
+    attempt_result_total: Decimal = D("0")
+    attempt_history: list[dict] = field(default_factory=list)
+    initial_submitted_directions: list[str] = field(default_factory=list)
+    attempt_deal_ids: list[str] = field(default_factory=list)
+    pending_actual_attempt_id: int = 0
+    pending_actual_deal_ids: list[str] = field(default_factory=list)
+    broker_transaction_pnl: Decimal | None = None
+    broker_transaction_currency: str = ""
+    broker_transaction_status: str = "UNAVAILABLE"
+    broker_transaction_components: list[dict] = field(default_factory=list)
+    pending_transaction_jobs: list[dict] = field(default_factory=list)
+    transaction_generation: int = 0
+    # Durable notification state is deliberately separate from processed trading events.  A
+    # broker event may be fully accounted while its human-readable report is still waiting for
+    # history or Telegram delivery.
+    pending_notification_jobs: list[dict] = field(default_factory=list)
+    report_outbox: list[dict] = field(default_factory=list)
+    next_report_id: int = 1
+    last_trigger_resolution: str = "Нет связанного Trigger."
+    processed_events: list[str] = field(default_factory=list)
+    cycle_trigger_ids: list[str] = field(default_factory=list)
+    scenario_transitions: list[dict] = field(default_factory=list)
+    trigger_race_results: list[dict] = field(default_factory=list)
+    completed_cycle_report: str = ""
+    # Durable broker ledger for the active logical cycle. Leg.deal_id changes after every trigger
+    # fill, so prior permanent IDs remain here through reentries and continuation attempts. The
+    # completion path archives this ledger before reset clears it for the next logical cycle.
+    deal_history: list[dict] = field(default_factory=list)
+    events: list[str] = field(default_factory=list)
+
+    def remember_deal(self, leg: Leg, scenario: int | None = None) -> None:
+        if not leg.deal_id:
+            return
+        record = next(
+            (item for item in self.deal_history if item.get("deal_id") == leg.deal_id), None
+        )
+        values = {
+            "deal_id": leg.deal_id,
+            "deal_reference": leg.deal_reference,
+            "direction": leg.direction,
+            "entry": str(leg.current_entry),
+            "scenario": self.scenario if scenario is None else scenario,
+            "attempt_id": self.active_attempt_id or self.diagnostic_cycle_number,
+            "cycle_id": self.cycle_id,
+            "cycle_attempt": self.cycle_attempt,
+            "active_trigger_id": leg.trigger_id,
+            "size": str(leg.size),
+            "close_source": "",
+            "close_level": None,
+        }
+        if record is None:
+            self.deal_history.append(values)
+        else:
+            # A history read may discover an old close after a later reentry advanced the local
+            # scenario.  Updating broker evidence must not rewrite when this deal was opened.
+            for key in ("scenario", "attempt_id", "cycle_id", "cycle_attempt", "entry", "size"):
+                values[key] = record.get(key, values[key])
+            # ``trigger_id`` is the immutable opening working-order identity.  The live leg's
+            # ``trigger_id`` is cleared/replaced as the strategy advances, so it must never be
+            # used to rewrite the historical relationship.
+            values["trigger_id"] = record.get("trigger_id", values["active_trigger_id"])
+            # Preserve close information already learned from activity history.
+            values["close_source"] = record.get("close_source", "")
+            values["close_level"] = record.get("close_level")
+            record.update(values)
+        if leg.deal_id not in self.attempt_deal_ids:
+            self.attempt_deal_ids.append(leg.deal_id)
+
+    def remember_close(self, deal_id: str, source: str, level: Decimal, **evidence) -> str:
+        record = next(
+            (item for item in self.deal_history if item.get("deal_id") == deal_id), None
+        )
+        if record is None:
+            record = {"deal_id": deal_id}
+            self.deal_history.append(record)
+        values = {"close_source": source.upper(), "close_level": str(level)}
+        values.update({key: str(value) if isinstance(value, Decimal) else value
+                       for key, value in evidence.items() if value is not None})
+        # Broker facts are immutable.  A later eventually-consistent empty response never calls
+        # this method, and a conflicting response is left for explicit reconciliation instead of
+        # silently rewriting the chronology used by Recovery.
+        significant = ("close_source", "close_level", "close_size", "close_event_type",
+                       "close_event_status", "close_execution_time")
+        existing = {key: record.get(key) for key in significant}
+        incoming = {key: values.get(key) for key in significant}
+        existing_known = record.get("close_level") is not None
+        def differs(key: str) -> bool:
+            left, right = existing[key], incoming[key]
+            if left in (None, "") or right in (None, ""):
+                return False
+            if key in {"close_level", "close_size"}:
+                try:
+                    return D(str(left)) != D(str(right))
+                except Exception:
+                    pass
+            return str(left) != str(right)
+
+        conflict = existing_known and any(differs(key) for key in significant)
+        if conflict:
+            record["close_evidence_conflict"] = values
+            return "CONFLICT"
+        else:
+            record.update(values)
+        return "SAME" if existing_known else "NEW"
+
+    def remember_attempt(
+        self, status: str, result: Decimal, *, include_in_total: bool = True, **details
+    ) -> None:
+        """Persist one unique trading attempt without feeding it into strategy recovery."""
+        attempt_id = self.active_attempt_id or self.diagnostic_cycle_number
+        if not attempt_id or any(item.get("attempt_id") == attempt_id for item in self.attempt_history):
+            return
+        self.attempt_history.append({
+            "attempt_id": attempt_id,
+            "cycle_id": self.cycle_id,
+            "cycle_attempt": self.cycle_attempt,
+            "status": status,
+            "result": str(result),
+            **{key: str(value) if isinstance(value, Decimal) else value
+               for key, value in details.items()},
+        })
+        if include_in_total:
+            self.attempt_result_total += result
+
+    def save(self, path: str) -> None:
+        payload = asdict(self)
+        payload["recovery"] = str(self.recovery)
+        payload["general_recovery"] = str(self.general_recovery)
+        payload["target_value"] = str(self.target_value)
+        payload["initial_position_size"] = str(self.initial_position_size)
+        payload["entry_spread"] = str(self.entry_spread)
+        payload["realized_losses"] = str(self.realized_losses)
+        payload["realized_loss_money"] = str(self.realized_loss_money)
+        payload["gross_take_profit"] = str(self.gross_take_profit)
+        payload["net_cycle_result"] = str(self.net_cycle_result)
+        payload["net_cycle_money"] = str(self.net_cycle_money)
+        payload["attempt_result_total"] = str(self.attempt_result_total)
+        payload["cycle_attempt_start_losses"] = str(self.cycle_attempt_start_losses)
+        payload["cycle_attempt_start_loss_money"] = str(self.cycle_attempt_start_loss_money)
+        payload["scenario_nine_prior_losses"] = str(self.scenario_nine_prior_losses)
+        payload["scenario_nine_close_gap"] = str(self.scenario_nine_close_gap)
+        payload["scenario_nine_total_loss"] = str(self.scenario_nine_total_loss)
+        payload["scenario_nine_extra_loss"] = str(self.scenario_nine_extra_loss)
+        payload["scenario_nine_long_fill"] = (
+            str(self.scenario_nine_long_fill) if self.scenario_nine_long_fill is not None else None
+        )
+        payload["scenario_nine_short_fill"] = (
+            str(self.scenario_nine_short_fill) if self.scenario_nine_short_fill is not None else None
+        )
+        payload["cycle_target_profit"] = str(self.cycle_target_profit)
+        payload["profit_override"] = (
+            str(self.profit_override) if self.profit_override is not None else None
+        )
+        payload["pending_tp_fill"] = (
+            str(self.pending_tp_fill) if self.pending_tp_fill is not None else None
+        )
+        payload["broker_transaction_pnl"] = (
+            str(self.broker_transaction_pnl)
+            if self.broker_transaction_pnl is not None else None
+        )
+        payload["long"] = self.long.json() if self.long else None
+        payload["short"] = self.short.json() if self.short else None
+        destination = Path(path)
+        temporary = destination.with_suffix(destination.suffix + ".tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(destination)
+
+    @classmethod
+    def load(cls, path: str) -> "CycleState":
+        file = Path(path)
+        if not file.exists():
+            return cls()
+        raw = json.loads(file.read_text(encoding="utf-8"))
+        if "recovery_model_version" not in raw:
+            raw["recovery_model_version"] = 1
+        # A permanent transport classification applies only to that process/request.  On a later
+        # launch every non-delivered report part is eligible for recovery; acknowledged parts stay
+        # delivered and are never repeated.
+        for report in raw.get("report_outbox", []):
+            for part in report.get("parts", []):
+                if part.get("status") != "delivered":
+                    part["status"] = "pending"
+        for closure in raw.get("pending_recovery", []):
+            closure.setdefault("d_value", closure.get("pending_d_value", "0"))
+            closure.setdefault("scenario_at_close", 1)
+            closure.setdefault("broker_execution_time", "")
+            closure.setdefault("original_trigger_anchor", closure.get("entry", "0"))
+            closure.setdefault("reentry_accounted", bool(closure.get("reopen_event_id")))
+            record = next((item for item in raw.get("deal_history", [])
+                           if item.get("deal_id") == closure.get("deal_id")), None)
+            if record:
+                closure.setdefault("cycle_id", record.get("cycle_id", 0))
+                closure.setdefault("cycle_attempt", record.get("cycle_attempt", 0))
+        for job in raw.get("pending_transaction_jobs", []):
+            job.setdefault("next_check_at", 0)
+            job.setdefault("retry_count", 0)
+        for name in ("long", "short"):
+            leg = raw.get(name)
+            if leg:
+                for obsolete in ("pending_trigger_replacement_level",
+                                 "pending_trigger_replacement_reference",
+                                 "pending_trigger_replacement_unknown_post"):
+                    leg.pop(obsolete, None)
+                legacy_fields = (
+                    "size", "stop_distance", "recovery", "temporary_stop_compensation",
+                    "temporary_spread_compensation", "temporary_slippage_compensation",
+                )
+                missing = [key for key in legacy_fields if key not in leg]
+                legacy_entry = leg.pop("entry", None)
+                if legacy_entry is not None:
+                    leg.setdefault("original_trigger_level", legacy_entry)
+                    leg.setdefault("current_entry", legacy_entry)
+                for key in ("original_trigger_level", "current_entry", "stop", "take_profit",
+                            "confirmed_stop", "confirmed_take_profit", "protection_sent_stop",
+                            "confirmed_stop_distance",
+                            "protection_sent_take_profit", "confirmation_stop",
+                            "confirmation_take_profit",
+                            "size", "stop_distance", "recovery", "temporary_stop_compensation",
+                            "temporary_spread_compensation", "temporary_slippage_compensation"):
+                    if leg.get(key) is not None:
+                        leg[key] = D(str(leg[key]))
+                leg.setdefault("legacy_missing_fields", missing)
+                leg.setdefault("pending_trigger_action", "")
+                leg.setdefault("trigger_recreation_suppressed", False)
+                leg.setdefault("pending_race_close_reference", "")
+                leg.setdefault("pending_race_close_deal_id", "")
+                leg.setdefault("pending_race_close_unknown", False)
+                raw[name] = Leg(**leg)
+        raw["recovery"] = D(str(raw.get("recovery", "0")))
+        for name in ("general_recovery", "target_value", "initial_position_size"):
+            raw[name] = D(str(raw.get(name, "0")))
+        for name in (
+            "entry_spread", "realized_losses", "realized_loss_money", "gross_take_profit", "net_cycle_result",
+            "net_cycle_money",
+            "attempt_result_total",
+            "cycle_attempt_start_losses",
+            "cycle_attempt_start_loss_money",
+            "scenario_nine_prior_losses", "scenario_nine_close_gap",
+            "scenario_nine_total_loss", "scenario_nine_extra_loss",
+            "cycle_target_profit", "profit_override", "pending_tp_fill",
+            "scenario_nine_long_fill", "scenario_nine_short_fill",
+            "broker_transaction_pnl",
+        ):
+            if name in {
+                "profit_override", "pending_tp_fill", "scenario_nine_long_fill",
+                "scenario_nine_short_fill", "broker_transaction_pnl",
+            } and raw.get(name) is None:
+                continue
+            raw[name] = D(str(raw.get(name, "0")))
+        allowed = cls.__dataclass_fields__
+        return cls(**{key: value for key, value in raw.items() if key in allowed})
+
+    def reset(self) -> None:
+        self.active = self.armed = self.waiting_current_candle = False
+        self.paused = self.manual = False
+        self.scenario = 0
+        self.recovery = self.entry_spread = D("0")
+        self.general_recovery = self.target_value = self.initial_position_size = D("0")
+        self.recovery_model_version = 3
+        self.recovery_events.clear()
+        self.pending_recovery.clear()
+        self.deal_history.clear()
+        self.attempt_history.clear()
+        self.scenario_transitions.clear()
+        self.trigger_race_results.clear()
+        self.completed_cycle_report = ""
+        self.recovery_migration_error = ""
+        self.realized_losses = self.realized_loss_money = D("0")
+        self.gross_take_profit = self.net_cycle_result = self.net_cycle_money = D("0")
+        self.scenario_nine_prior_losses = self.scenario_nine_close_gap = D("0")
+        self.scenario_nine_total_loss = self.scenario_nine_extra_loss = D("0")
+        self.scenario_nine_triggers_verified = False
+        self.scenario_nine_long_fill = self.scenario_nine_short_fill = None
+        self.pending_tp_direction = ""
+        self.pending_tp_fill = None
+        self.pending_close_direction = self.pending_close_reference = self.pending_close_reason = ""
+        self.broker_transaction_pnl = None
+        self.broker_transaction_currency = ""
+        self.broker_transaction_status = "UNAVAILABLE"
+        self.broker_transaction_components.clear()
+        self.pending_transaction_jobs.clear()
+        self.pending_notification_jobs.clear()
+        self.transaction_generation += 1
+        self.last_trigger_resolution = "Нет связанного Trigger."
+        self.long = self.short = None
+        self.phase = "IDLE"
+        self.processed_events.clear()
+        self.cycle_trigger_ids.clear()
+        self.initial_submitted_directions.clear()
+        self.attempt_deal_ids.clear()
+        self.active_attempt_id = 0
+        self.cycle_id = self.cycle_attempt = 0
+        self.continuation_pause_until = 0.0
+        self.continuation_stopped_by_user = False
+        self.cycle_attempt_start_losses = D("0")
+        self.cycle_attempt_start_loss_money = D("0")
+        self.continuation_managed = False
+        self.continuation_stage = ""
+        self.continuation_flat_checks = 0
+        self.continuation_filter_reason = ""
+
+
+def stop_for(direction: str, entry: Decimal, distance: Decimal) -> Decimal:
+    return entry - distance if direction == "BUY" else entry + distance
+
+
+def target_for(direction: str, entry: Decimal, distance: Decimal, recovery: Decimal) -> Decimal:
+    """Return strategic TP from this position's own confirmed/projected entry."""
+    total = distance + recovery
+    return entry + total if direction == "BUY" else entry - total
+
+
+def recovery_distance(general_recovery: Decimal, size: Decimal) -> Decimal:
+    """Convert the single monetary recovery balance to a position-specific price distance."""
+    if size <= 0:
+        raise RuntimeError("Cannot calculate Recovery distance for an unknown or zero size")
+    return general_recovery / size
+
+
+def remaining_recovery_distance(
+    general_recovery: Decimal, size: Decimal, scenario_distance: Decimal
+) -> Decimal:
+    """Return the v3 S2-S8 recovery remainder without mutating the monetary ledger."""
+    if size <= 0:
+        raise RuntimeError("Cannot calculate Recovery distance for an unknown or zero size")
+    base_value = scenario_distance * size
+    return max(D("0"), general_recovery - base_value) / size
+
+
+def protection_levels(direction: str, entry: Decimal, stop_distance: Decimal,
+                      general_recovery: Decimal, size: Decimal, *,
+                      scenario: int = 1) -> tuple[Decimal, Decimal]:
+    """Central monetary-Recovery SL/TP formula used by every execution path."""
+    stop = stop_for(direction, entry, stop_distance)
+    recovery = (
+        recovery_distance(general_recovery, size)
+        if scenario == 1
+        else remaining_recovery_distance(general_recovery, size, stop_distance)
+    )
+    target = target_for(direction, entry, stop_distance, recovery)
+    return stop, target
+
+
+def stop_slippage(direction: str, expected: Decimal, actual: Decimal) -> Decimal:
+    """Return the unsigned deviation between planned and actual stop execution."""
+    del direction  # Direction does not change the configured absolute-distance rule.
+    return abs(expected - actual)
+
+
+def trigger_slippage(direction: str, trigger: Decimal, actual: Decimal) -> Decimal:
+    """Return the unsigned deviation between saved trigger level and actual fill."""
+    del direction
+    return abs(trigger - actual)

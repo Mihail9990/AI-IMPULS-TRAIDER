@@ -1,0 +1,191 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from decimal import Decimal
+import hashlib
+import json
+from typing import Any, Iterable
+
+
+D = Decimal
+PROTECTION_DIAGNOSTIC_TOLERANCE = D("0.50")
+
+
+@dataclass(frozen=True)
+class BrokerEvent:
+    event_id: str
+    timestamp: datetime
+    source: str
+    status: str
+    event_type: str
+    deal_id: str
+    deal_reference: str
+    working_order_id: str
+    direction: str
+    level: Decimal | None
+    size: Decimal | None
+    raw: dict
+
+    @property
+    def is_stop(self) -> bool:
+        return self.source == "SL"
+
+    @property
+    def is_take_profit(self) -> bool:
+        return self.source == "TP"
+
+
+def normalize_events(items: Iterable[dict]) -> list[BrokerEvent]:
+    events = [normalize_event(item, index) for index, item in enumerate(items)]
+    return sorted(events, key=lambda event: (event.timestamp, event.event_id))
+
+
+def normalize_event(item: dict, index: int = 0) -> BrokerEvent:
+    containers = list(_dicts(item))
+    timestamp_text = _first(containers, "dateUTC", "date", "timestamp", "createdDateUTC")
+    timestamp = _datetime(timestamp_text)
+    deal_id = _text(_first(containers, "dealId", "affectedDealId", "positionDealId"))
+    reference = _text(_first(containers, "dealReference", "reference"))
+    working_order_id = _text(_first(containers, "workingOrderId", "orderId"))
+    source = _text(_first(containers, "source", "channel")).upper()
+    status = _text(_first(containers, "status", "dealStatus")).upper()
+    event_type = _text(_first(containers, "type", "activityType")).upper()
+    direction = _text(_first(containers, "direction")).upper()
+    level = _decimal(_first(containers, "closeLevel", "level", "price"))
+    size = _decimal(_first(containers, "size"))
+    event_id = _text(_first(containers, "id", "activityId", "transactionId"))
+    if not event_id:
+        # Capital activity records do not always carry an ID.  Response order is not broker
+        # identity (and may change between eventually-consistent reads), so derive the fallback
+        # solely from the complete broker payload in canonical form.  Equal insufficient records
+        # intentionally remain indistinguishable; callers must obtain more broker evidence rather
+        # than manufacture an execution count or chronology from array indexes.
+        del index
+        canonical = json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                               default=str)
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        event_id = f"synthetic:{digest}"
+    return BrokerEvent(
+        event_id, timestamp, source, status, event_type, deal_id, reference,
+        working_order_id, direction, level, size, item,
+    )
+
+
+def find_close_event(items: Iterable[dict], deal_id: str, source: str) -> BrokerEvent | None:
+    expected = source.upper()
+    matches = [event for event in normalize_events(items)
+               if event.deal_id == deal_id and event.source == expected
+               and event.status != "REJECTED" and event.level is not None]
+    return matches[-1] if matches else None
+
+
+def find_trigger_open_event(
+    items: Iterable[dict], working_order_id: str, direction: str = ""
+) -> BrokerEvent | None:
+    """Find a position opening linked to a saved working trigger."""
+    expected_direction = direction.upper()
+    matches = [
+        event for event in normalize_events(items)
+        if event.working_order_id == working_order_id
+        and event.event_type == "POSITION"
+        and event.source == "USER"
+        and event.status == "ACCEPTED"
+        and event.level is not None
+        and (not expected_direction or event.direction == expected_direction)
+    ]
+    return matches[0] if matches else None
+
+
+def find_working_order_execution(
+    items: Iterable[dict], working_order_id: str
+) -> BrokerEvent | None:
+    """Find broker proof that a working order executed before its position is published."""
+    matches = [
+        event for event in normalize_events(items)
+        if event.deal_id == working_order_id
+        and event.event_type == "WORKING_ORDER"
+        and event.status == "EXECUTED"
+    ]
+    return matches[-1] if matches else None
+
+
+def find_working_order_cancellation(
+    items: Iterable[dict], working_order_id: str
+) -> BrokerEvent | None:
+    """Find positive broker evidence that a working order was cancelled, not executed."""
+    matches = [
+        event for event in normalize_events(items)
+        if event.deal_id == working_order_id
+        and event.event_type == "WORKING_ORDER"
+        and event.status == "CANCELLED"
+    ]
+    return matches[-1] if matches else None
+
+
+def protection_range_diagnostic(
+    event: BrokerEvent, *, confirmed_stop: Decimal | None,
+    confirmed_take_profit: Decimal | None,
+) -> dict:
+    """Describe proximity to historical protection without classifying the close.
+
+    Identity and the authoritative broker source are established by callers first.  This helper is
+    deliberately pure: a price range is useful diagnostics, never evidence of SL/TP execution.
+    """
+    matches = []
+    if event.level is not None:
+        for source, level in (("SL", confirmed_stop), ("TP", confirmed_take_profit)):
+            if level is None:
+                continue
+            deviation = abs(event.level - level)
+            matches.append({
+                "source": source, "level": str(level), "deviation": str(deviation),
+                "within_0_50": deviation <= PROTECTION_DIAGNOSTIC_TOLERANCE,
+            })
+    near = [item["source"] for item in matches if item["within_0_50"]]
+    return {
+        "matches": matches,
+        "range_assessment": "AMBIGUOUS" if len(near) > 1 else near[0] if near else "NONE",
+        "authoritative_source": event.source,
+    }
+
+
+def _dicts(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for nested in value.values():
+            yield from _dicts(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from _dicts(nested)
+
+
+def _first(containers: list[dict], *keys: str):
+    for key in keys:
+        for container in containers:
+            if container.get(key) is not None:
+                return container[key]
+    return None
+
+
+def _text(value: Any) -> str:
+    return "" if value is None else str(value)
+
+
+def _decimal(value: Any) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    try:
+        return D(str(value).replace(",", ""))
+    except Exception:
+        return None
+
+
+def _datetime(value: Any) -> datetime:
+    if value:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    return datetime.min.replace(tzinfo=timezone.utc)
