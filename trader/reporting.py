@@ -273,16 +273,17 @@ def broker_attempt_pnl(transactions: list[dict], deal_ids: set[str]) -> dict:
         status = str(item.get("status") or "").upper()
         if status and status != "PROCESSED":
             continue
+        normalized_amount = "0" if numeric_amount == 0 else format(numeric_amount.normalize(), "f")
         identity_payload = {
             "reference": str(item.get("reference") or ""), "deal_id": deal_id,
-            "kind": kind, "amount": str(numeric_amount), "currency": currency,
+            "kind": kind, "amount": normalized_amount, "currency": currency,
             "status": status, "date": str(item.get("dateUtc") or item.get("dateUTC")
                                            or item.get("date") or ""),
         }
         transaction_id = explicit_id or "broker:" + hashlib.sha256(
             json.dumps(identity_payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
-        fingerprint = (deal_id, kind, str(numeric_amount), currency, status)
+        fingerprint = (deal_id, kind, normalized_amount, currency.upper(), status)
         if transaction_id in seen:
             if seen[transaction_id] != fingerprint:
                 return {"status": "UNAVAILABLE", "amount": None, "currency": "",
@@ -293,7 +294,7 @@ def broker_attempt_pnl(transactions: list[dict], deal_ids: set[str]) -> dict:
             return {"status": "UNAVAILABLE", "amount": None, "currency": "", "components": []}
         seen[transaction_id] = fingerprint
         correlated.append({"id": transaction_id, "deal_id": deal_id, "type": kind,
-                           "amount": str(numeric_amount), "currency": currency,
+                           "amount": normalized_amount, "currency": currency.upper(),
                            "status": status})
     if not correlated:
         return {"status": "PENDING", "amount": None, "currency": "", "components": []}
@@ -338,6 +339,8 @@ def pnl_text(state: CycleState, positions: list[dict], transactions: list[dict])
 
 def cycle_result_text(state: CycleState, direction: str, fill: Decimal, size: Decimal) -> str:
     """Explain the completed cycle without depending on broker history latency."""
+    if not state.active and state.completed_cycle_report:
+        return state.completed_cycle_report
     winner = state.long if direction == "BUY" else state.short
     winner_size = winner.size if winner and winner.size else size
     gross_money = state.gross_take_profit * winner_size
@@ -349,6 +352,7 @@ def cycle_result_text(state: CycleState, direction: str, fill: Decimal, size: De
                      if item.get("cycle_id") == state.cycle_id]
     selected = [item for item in (cycle_records or state.deal_history)
                 if item.get("close_level") is not None
+                and item.get("category") != "TP_TRIGGER_RACE"
                 and (cycle_records or item.get("deal_id") in state.attempt_deal_ids)]
     for item in selected:
         entry = _decimal(item.get("entry"))
@@ -376,11 +380,19 @@ def cycle_result_text(state: CycleState, direction: str, fill: Decimal, size: De
         f"• попытка {item.get('cycle_attempt', '?')}: {item.get('status')} = {item.get('result')}"
         for item in attempts
     ) or "• Отдельные итоги попыток отсутствуют в сохранённом состоянии."
+    race_detail = "\n".join(
+        f"• {item.get('direction')} dealId={item.get('deal_id')}; "
+        f"size={item.get('size')}; entry={item.get('entry')}; close={item.get('close')}; "
+        f"signed result={item.get('signed_result')}"
+        for item in state.trigger_race_results
+    ) or "• Нет."
     return (
         f"🏁 Итог завершённого цикла\n"
         f"Сделки:\n{detail}\n"
         f"Полнота детализации: {'ПОЛНАЯ' if detail_complete else 'НЕПОЛНАЯ; денежный итог взят из полного сохранённого агрегата'}\n"
         f"Попытки логического цикла:\n{attempt_detail}\n"
+        f"Trigger-позиции, исполненные в гонке после TP (вне результата стратегии):\n"
+        f"{race_detail}\n"
         f"TP сторона: {direction}\nФактическое закрытие: {fill}\n"
         f"Валовая прибыль TP: {state.gross_take_profit} пункта\n"
         f"Общие убытки закрытых сторон: {state.realized_losses} пункта\n"

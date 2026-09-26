@@ -13,6 +13,13 @@ D_VALUE = effective_stop_distance_at_close * actual_closed_size
 broker P&L. Он никогда не масштабируется при смене size. Size используется только в стоимости
 конкретного события и при переводе денежного Recovery в расстояние TP.
 
+`deal_history` хранит отдельную запись каждого permanent position `dealId`, а
+`scenario_transitions` — подтверждённую последовательность переоткрытий. Поэтому несколько
+последовательных reentry одной стороны не переписывают предыдущую сделку: Scenario открытия,
+Scenario закрытия и действовавшая stop-distance остаются независимыми фактами. У перехода
+сохраняются owned `workingOrderId` и broker time `WORKING_ORDER/EXECUTED`; неизвестная
+принадлежность старой записи не подменяется текущими `cycle_id/cycle_attempt`.
+
 ## Initial Scenario 1
 
 После двух подтверждённых fills одинакового фактического размера один раз фиксируются:
@@ -65,6 +72,11 @@ reentry и используется для позднего SL после restar
 публикации/создания позиции и не подменяет broker execution chronology.
 Broker execution chronology, а не arrival order REST/history, определяет `scenario_at_close`.
 Неоднозначная chronology блокируется reconciliation/manual без приблизительного D.
+Полное подтверждённое close evidence (fill, actual size, source/status/type, broker time и
+исторические confirmed SL/TP) сохраняется до конца логического цикла. Пустой последующий history
+response его не стирает. Существенно противоречащая запись блокируется **до** accounting;
+подтверждённые partial fills сохраняются раздельно, используют собственный actual closed size и
+оставляют остаток позиции открытым.
 
 ## Scenario 2–8
 
@@ -113,6 +125,20 @@ continuation_spread_value = abs(BUY_fill - SELL_fill) * actual_pair_size
 ```
 
 Target не повторяется, а actual fills новой pair становятся anchors новой attempt.
+
+## TP/Trigger race и граница логического цикла
+
+Если owned Trigger исполнился в гонке отмены после подтверждённого TP survivor, появившаяся
+позиция закрывается отдельно по permanent dealId. Её signed результат рассчитывается по actual
+entry, actual close и actual size, показывается отдельной строкой и не меняет GENERAL_RECOVERY,
+основные realized losses или стратегический итог TP. Неизвестный исход close сохраняется и
+сверяется после restart без повторного DELETE.
+
+После окончательного завершения сначала формируется самодостаточный Telegram-report и в
+diagnostic log записывается `CYCLE_LEDGER_FINAL` со сделками, attempts, Recovery events,
+переходами, race results и доступным transaction snapshot. Только затем detailed working ledger
+и transaction jobs этого `cycle_id` очищаются. Агрегаты/counters и durable outbox сохраняются;
+late worker result с удалённым key/generation не может восстановить старую историю в новом цикле.
 
 ## Scenario 9, actual P&L и migration
 

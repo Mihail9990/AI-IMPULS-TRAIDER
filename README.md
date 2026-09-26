@@ -189,7 +189,6 @@ deal history показывается как неполная детализац
 /status /start /startcycle /pause /stop /resume /positions /orders /pnl /cycleinfo
 /setsl long|short PRICE
 /settp long|short PRICE
-/settrigger long|short PRICE
 /profit200 0.4
 /automode
 /removesl long|short
@@ -225,11 +224,10 @@ Capital API и не изменяют состояние цикла. Неотпр
 и working orders. Если что-то ещё открыто, команда блокируется до ручной сверки. При запуске
 stale ручное состояние также автоматически очищается, когда на брокере уже ничего нет.
 
-`/settrigger` и `/canceltrigger` сохраняют ownership старого Trigger до положительного CANCELLED
-либо восстановления EXECUTED-позиции. Неизвестная отмена блокирует только конфликтующую mutation:
-survivor продолжает сопровождаться. Для replacement intent сохраняется до POST, полученный
-`dealReference` — до ожидания confirmation; после restart проверяется та же mutation без второго
-STOP. Подтверждённая ручная отмена подавляет автоматическое немедленное пересоздание заявки.
+Пользовательская команда `/settrigger` удалена: Trigger создаётся только автоматикой стратегии.
+`/canceltrigger` сохраняет ownership старого Trigger до положительного CANCELLED либо восстановления
+EXECUTED-позиции. Неизвестная отмена блокирует только конфликтующую mutation, а survivor продолжает
+сопровождаться. Подтверждённая ручная отмена подавляет автоматическое немедленное пересоздание заявки.
 
 Transaction reconciliation принимает как прежние `transactionId/type/amount`, так и фактические
 Capital payloads `reference/transactionType/size` для `TRADE`. `size` считается денежным только для
@@ -237,6 +235,16 @@ Capital payloads `reference/transactionType/size` для `TRADE`. `size` счи�
 становится полным, пока основной TRADE отсутствует хотя бы для одного expected deal. Content
 fingerprint и время последнего успешного наблюдения независимы: одинаковый результат обновляет
 watermark, но не повторяет финансовое применение.
+
+Числовое значение нормализуется до построения synthetic transaction identity, поэтому эквивалентные
+`-11.2` и `-11.20` не удваивают P&L. Общая `reference` не заменяет position `dealId`, а изменение
+содержимого записи с той же подтверждённой identity считается конфликтом, не новой выплатой.
+
+Активный логический цикл хранит отдельную запись каждого permanent position и broker-time каждого
+подтверждённого Scenario transition. При окончательном завершении самодостаточный отчёт и полный
+ledger сначала записываются в diagnostic log, после чего рабочие `deal_history`, `attempt_history`,
+Recovery events и transaction jobs этого цикла очищаются. Durable Telegram outbox и общие счётчики
+сохраняются; новый цикл до первого MARKET не наследует сделки завершённого цикла.
 
 `/profit200 VALUE` задаёт полное значение личного profit для следующих 200 завершённых циклов.
 Например, `/profit200 0.4` заменяет обычный `TARGET_PROFIT=0.3` на `0.4`. Уже открытый цикл не

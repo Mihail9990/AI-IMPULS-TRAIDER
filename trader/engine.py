@@ -85,6 +85,12 @@ class Strategy:
         self.state.recovery = Decimal("0")
         self.state.recovery_events.clear()
         self.state.pending_recovery.clear()
+        self.state.scenario_transitions.clear()
+        self.state.trigger_race_results.clear()
+        # A fresh logical cycle never inherits the detailed ledger of a completed/aborted one.
+        self.state.deal_history.clear()
+        self.state.attempt_history.clear()
+        self.state.completed_cycle_report = ""
         self.state.recovery_migration_error = ""
         self.state.phase = "BOTH_OPEN"
         size, distance = self.cfg.size_for(1), self.cfg.stop_for(1)
@@ -166,7 +172,8 @@ class Strategy:
 
     def stopped(self, direction: str, fill: Decimal, event_id: str = "", *,
                 scenario_at_close: int | None = None,
-                broker_execution_time: str = "") -> Leg:
+                broker_execution_time: str = "", actual_closed_size: Decimal | None = None,
+                fully_closed: bool = True) -> Leg:
         leg = self._leg(direction)
         if event_id and event_id in self.state.processed_events:
             return leg
@@ -189,33 +196,61 @@ class Strategy:
             stop_source = "initial_calculated_without_new_put"
         confirmed_distance = abs(leg.current_entry - expected_stop)
         slip_distance = stop_slippage(direction, expected_stop, fill)
-        slip_value = slip_distance * leg.size
+        closed_size = actual_closed_size if actual_closed_size is not None else leg.size
+        if closed_size <= 0 or closed_size > leg.size:
+            raise RuntimeError("Actual closed size is invalid for the open position")
+        slip_value = slip_distance * closed_size
         loss = max(Decimal("0"), leg.current_entry - fill) if direction == "BUY" else max(
             Decimal("0"), fill - leg.current_entry
         )
         self.state.realized_losses += loss
-        self.state.realized_loss_money += loss * leg.size
-        leg.open = False
+        self.state.realized_loss_money += loss * closed_size
+        leg.open = not fully_closed
         self.state.remember_deal(leg)
-        self.state.remember_close(leg.deal_id, "SL", fill)
+        if fully_closed:
+            self.state.remember_close(leg.deal_id, "SL", fill)
         close_key = event_id or f"stop:{leg.deal_id}:{fill}"
         self._record_recovery(
             f"slippage:{close_key}", "SL_SLIPPAGE", slip_value, deal_id=leg.deal_id,
-            distance=slip_distance, size=leg.size,
+                distance=slip_distance, size=closed_size,
         )
         close_scenario = self.state.scenario if scenario_at_close is None else scenario_at_close
-        d_value = confirmed_distance * leg.size
+        d_value = confirmed_distance * closed_size
         d_accounted = close_scenario >= 2
         if d_accounted:
             self._record_recovery(
                 f"stop-distance:{close_key}", "STOP_DISTANCE_VALUE", d_value,
                 deal_id=leg.deal_id, scenario_at_close=close_scenario,
-                distance=confirmed_distance, size=leg.size,
+                distance=confirmed_distance, size=closed_size,
             )
-        if not any(item.get("close_key") == close_key for item in self.state.pending_recovery):
+        existing_partial = next((item for item in self.state.pending_recovery
+                                 if item.get("deal_id") == leg.deal_id
+                                 and item.get("direction") == direction
+                                 and not item.get("reentry_accounted", False)), None)
+        if existing_partial is not None and close_key not in existing_partial.get(
+                "close_keys", [existing_partial.get("close_key")]
+        ):
+            existing_partial.setdefault("close_keys", [existing_partial["close_key"]]).append(
+                close_key
+            )
+            existing_partial["size"] = str(
+                Decimal(str(existing_partial["size"])) + closed_size
+            )
+            existing_partial["pending_d_value"] = str(
+                Decimal(str(existing_partial["pending_d_value"])) + d_value
+            )
+            existing_partial["d_value"] = existing_partial["pending_d_value"]
+            existing_partial["sl_slippage_value"] = str(
+                Decimal(str(existing_partial["sl_slippage_value"])) + slip_value
+            )
+            existing_partial["close_fill"] = str(fill)
+            existing_partial["broker_execution_time"] = broker_execution_time
+            existing_partial["fully_closed"] = fully_closed
+        elif existing_partial is None:
             self.state.pending_recovery.append({
                 "close_key": close_key, "deal_id": leg.deal_id, "direction": direction,
-                "entry": str(leg.current_entry), "size": str(leg.size),
+                "close_keys": [close_key], "fully_closed": fully_closed,
+                "entry": str(leg.current_entry), "size": str(closed_size),
                 "stop_distance": str(confirmed_distance), "confirmed_stop": str(expected_stop),
                 "desired_stop_distance": str(leg.stop_distance), "desired_stop": str(leg.stop),
                 "stop_source": stop_source,
@@ -230,6 +265,14 @@ class Strategy:
                 "d_accounted": d_accounted, "reentry_accounted": False,
                 "reopen_event_id": "", "trigger_slippage_accounted": False,
             })
+        if not fully_closed:
+            leg.size -= closed_size
+            leg.size_confirmation = "broker_partial_close"
+            self._targets_from_entries()
+            self.state.phase = "BOTH_OPEN"
+            if event_id:
+                self.state.processed_events.append(event_id)
+            return leg
         survivor = self._leg("SELL" if direction == "BUY" else "BUY")
         if survivor.open:
             survivor.stop, survivor.take_profit = protection_levels(
@@ -333,9 +376,6 @@ class Strategy:
         leg.open = True
         leg.trigger_id = leg.trigger_reference = ""
         leg.pending_trigger_action = ""
-        leg.pending_trigger_replacement_level = None
-        leg.pending_trigger_replacement_reference = ""
-        leg.pending_trigger_replacement_unknown_post = False
         leg.pending_trigger_cancel_unknown = False
         leg.trigger_recreation_suppressed = False
         leg.confirmed_stop = leg.confirmed_take_profit = None
@@ -348,8 +388,20 @@ class Strategy:
                        if item.get("deal_id") == deal_id), None)
         if opened is not None:
             opened["trigger_id"] = working_order_id
+            opened["open_working_order_id"] = working_order_id
             opened["broker_open_execution_time"] = broker_execution_time
+            opened["broker_open_time_source"] = "WORKING_ORDER_EXECUTED"
             opened["open_evidence"] = "WORKING_ORDER_EXECUTED+POSITION_WORKING_ORDER_ID"
+        transition_key = event_id or f"reopen:{deal_id}:{fill}"
+        if not any(item.get("key") == transition_key for item in self.state.scenario_transitions):
+            self.state.scenario_transitions.append({
+                "key": transition_key, "cycle_id": self.state.cycle_id,
+                "cycle_attempt": self.state.cycle_attempt, "scenario": self.state.scenario,
+                "direction": direction, "deal_id": deal_id,
+                "working_order_id": working_order_id, "fill": str(fill),
+                "size": str(new_size), "broker_execution_time": broker_execution_time,
+                "time_source": "WORKING_ORDER_EXECUTED" if broker_execution_time else "PENDING",
+            })
         self._targets_from_entries()
         self.state.phase = "SCENARIO_9_CLOSING" if next_scenario == self.cfg.max_scenarios else "BOTH_OPEN"
         if event_id:

@@ -19,12 +19,12 @@ class Leg:
     open: bool = True
     trigger_id: str = ""
     trigger_reference: str = ""
-    pending_trigger_replacement_level: Decimal | None = None
     pending_trigger_cancel_unknown: bool = False
     pending_trigger_action: str = ""
-    pending_trigger_replacement_reference: str = ""
-    pending_trigger_replacement_unknown_post: bool = False
     trigger_recreation_suppressed: bool = False
+    pending_race_close_reference: str = ""
+    pending_race_close_deal_id: str = ""
+    pending_race_close_unknown: bool = False
     # A MARKET fallback with a known dealReference but delayed confirmation is durable state, not
     # permission to submit another order. Subsequent ticks resolve this same reference first.
     pending_market_reference: str = ""
@@ -140,6 +140,7 @@ class CycleState:
     broker_transaction_status: str = "UNAVAILABLE"
     broker_transaction_components: list[dict] = field(default_factory=list)
     pending_transaction_jobs: list[dict] = field(default_factory=list)
+    transaction_generation: int = 0
     # Durable notification state is deliberately separate from processed trading events.  A
     # broker event may be fully accounted while its human-readable report is still waiting for
     # history or Telegram delivery.
@@ -149,9 +150,12 @@ class CycleState:
     last_trigger_resolution: str = "Нет связанного Trigger."
     processed_events: list[str] = field(default_factory=list)
     cycle_trigger_ids: list[str] = field(default_factory=list)
-    # Durable broker ledger.  Leg.deal_id necessarily changes after every trigger fill, while
-    # Capital.com's deal-specific history remains addressable by every previous dealId.  Keep the
-    # IDs instead of losing them when a Leg is reopened or the cycle is reset.
+    scenario_transitions: list[dict] = field(default_factory=list)
+    trigger_race_results: list[dict] = field(default_factory=list)
+    completed_cycle_report: str = ""
+    # Durable broker ledger for the active logical cycle. Leg.deal_id changes after every trigger
+    # fill, so prior permanent IDs remain here through reentries and continuation attempts. The
+    # completion path archives this ledger before reset clears it for the next logical cycle.
     deal_history: list[dict] = field(default_factory=list)
     events: list[str] = field(default_factory=list)
 
@@ -170,7 +174,7 @@ class CycleState:
             "attempt_id": self.active_attempt_id or self.diagnostic_cycle_number,
             "cycle_id": self.cycle_id,
             "cycle_attempt": self.cycle_attempt,
-            "trigger_id": leg.trigger_id,
+            "active_trigger_id": leg.trigger_id,
             "size": str(leg.size),
             "close_source": "",
             "close_level": None,
@@ -180,20 +184,20 @@ class CycleState:
         else:
             # A history read may discover an old close after a later reentry advanced the local
             # scenario.  Updating broker evidence must not rewrite when this deal was opened.
-            for key in ("scenario", "attempt_id", "cycle_id", "cycle_attempt"):
+            for key in ("scenario", "attempt_id", "cycle_id", "cycle_attempt", "entry", "size"):
                 values[key] = record.get(key, values[key])
+            # ``trigger_id`` is the immutable opening working-order identity.  The live leg's
+            # ``trigger_id`` is cleared/replaced as the strategy advances, so it must never be
+            # used to rewrite the historical relationship.
+            values["trigger_id"] = record.get("trigger_id", values["active_trigger_id"])
             # Preserve close information already learned from activity history.
             values["close_source"] = record.get("close_source", "")
             values["close_level"] = record.get("close_level")
-            if not values["trigger_id"]:
-                values["trigger_id"] = record.get("trigger_id", "")
             record.update(values)
         if leg.deal_id not in self.attempt_deal_ids:
             self.attempt_deal_ids.append(leg.deal_id)
-        # This is diagnostic/recovery metadata rather than an unbounded transaction database.
-        del self.deal_history[:-500]
 
-    def remember_close(self, deal_id: str, source: str, level: Decimal, **evidence) -> None:
+    def remember_close(self, deal_id: str, source: str, level: Decimal, **evidence) -> str:
         record = next(
             (item for item in self.deal_history if item.get("deal_id") == deal_id), None
         )
@@ -206,12 +210,29 @@ class CycleState:
         # Broker facts are immutable.  A later eventually-consistent empty response never calls
         # this method, and a conflicting response is left for explicit reconciliation instead of
         # silently rewriting the chronology used by Recovery.
-        if (record.get("close_event_id") and values.get("close_event_id")
-                and record["close_event_id"] != values["close_event_id"]):
+        significant = ("close_source", "close_level", "close_size", "close_event_type",
+                       "close_event_status", "close_execution_time")
+        existing = {key: record.get(key) for key in significant}
+        incoming = {key: values.get(key) for key in significant}
+        existing_known = record.get("close_level") is not None
+        def differs(key: str) -> bool:
+            left, right = existing[key], incoming[key]
+            if left in (None, "") or right in (None, ""):
+                return False
+            if key in {"close_level", "close_size"}:
+                try:
+                    return D(str(left)) != D(str(right))
+                except Exception:
+                    pass
+            return str(left) != str(right)
+
+        conflict = existing_known and any(differs(key) for key in significant)
+        if conflict:
             record["close_evidence_conflict"] = values
+            return "CONFLICT"
         else:
             record.update(values)
-        del self.deal_history[:-500]
+        return "SAME" if existing_known else "NEW"
 
     def remember_attempt(
         self, status: str, result: Decimal, *, include_in_total: bool = True, **details
@@ -231,7 +252,6 @@ class CycleState:
         })
         if include_in_total:
             self.attempt_result_total += result
-        del self.attempt_history[:-500]
 
     def save(self, path: str) -> None:
         payload = asdict(self)
@@ -308,6 +328,10 @@ class CycleState:
         for name in ("long", "short"):
             leg = raw.get(name)
             if leg:
+                for obsolete in ("pending_trigger_replacement_level",
+                                 "pending_trigger_replacement_reference",
+                                 "pending_trigger_replacement_unknown_post"):
+                    leg.pop(obsolete, None)
                 legacy_fields = (
                     "size", "stop_distance", "recovery", "temporary_stop_compensation",
                     "temporary_spread_compensation", "temporary_slippage_compensation",
@@ -321,16 +345,17 @@ class CycleState:
                             "confirmed_stop", "confirmed_take_profit", "protection_sent_stop",
                             "confirmed_stop_distance",
                             "protection_sent_take_profit", "confirmation_stop",
-                            "confirmation_take_profit", "pending_trigger_replacement_level",
+                            "confirmation_take_profit",
                             "size", "stop_distance", "recovery", "temporary_stop_compensation",
                             "temporary_spread_compensation", "temporary_slippage_compensation"):
                     if leg.get(key) is not None:
                         leg[key] = D(str(leg[key]))
                 leg.setdefault("legacy_missing_fields", missing)
                 leg.setdefault("pending_trigger_action", "")
-                leg.setdefault("pending_trigger_replacement_reference", "")
-                leg.setdefault("pending_trigger_replacement_unknown_post", False)
                 leg.setdefault("trigger_recreation_suppressed", False)
+                leg.setdefault("pending_race_close_reference", "")
+                leg.setdefault("pending_race_close_deal_id", "")
+                leg.setdefault("pending_race_close_unknown", False)
                 raw[name] = Leg(**leg)
         raw["recovery"] = D(str(raw.get("recovery", "0")))
         for name in ("general_recovery", "target_value", "initial_position_size"):
@@ -365,6 +390,11 @@ class CycleState:
         self.recovery_model_version = 3
         self.recovery_events.clear()
         self.pending_recovery.clear()
+        self.deal_history.clear()
+        self.attempt_history.clear()
+        self.scenario_transitions.clear()
+        self.trigger_race_results.clear()
+        self.completed_cycle_report = ""
         self.recovery_migration_error = ""
         self.realized_losses = self.realized_loss_money = D("0")
         self.gross_take_profit = self.net_cycle_result = self.net_cycle_money = D("0")
@@ -379,6 +409,9 @@ class CycleState:
         self.broker_transaction_currency = ""
         self.broker_transaction_status = "UNAVAILABLE"
         self.broker_transaction_components.clear()
+        self.pending_transaction_jobs.clear()
+        self.pending_notification_jobs.clear()
+        self.transaction_generation += 1
         self.last_trigger_resolution = "Нет связанного Trigger."
         self.long = self.short = None
         self.phase = "IDLE"
