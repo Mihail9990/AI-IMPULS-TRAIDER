@@ -6470,3 +6470,27 @@ class Attempt286UnifiedLedgerRegressionTest(unittest.TestCase):
             self.assertEqual((bot.state.general_recovery,
                               bot.state.attempt_result_total), before)
             bot.transaction_worker.acknowledge.assert_called_once_with("transactions:old")
+
+    def test_stale_transaction_generation_cannot_apply_to_current_cycle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self.make_bot(str(Path(directory) / "state.json"))
+            bot.state.transaction_generation = 2
+            bot.state.pending_transaction_jobs = [{
+                "key": "stale", "cycle_id": 286, "generation": 1,
+                "attempt_id": 286, "next_check_at": 0,
+            }]
+            bot.notification_worker = None; bot.telegram = Mock()
+            bot._queue_pending_reports = Mock()
+            bot.transaction_worker = TransactionHistoryWorker(
+                bot.cfg, client_factory=lambda _cfg: Mock()
+            )
+            bot.transaction_worker.results = Mock(return_value=[{
+                "key": "stale", "result": {"status": "COMPLETE_SNAPSHOT",
+                    "amount": D("999"), "currency": "USD", "components": [],
+                    "observed_to_epoch": 10},
+            }])
+            bot.transaction_worker.acknowledge = Mock()
+            bot._tick_notifications(now=10)
+            self.assertEqual(bot.state.broker_transaction_pnl, None)
+            self.assertNotIn("amount", bot.state.pending_transaction_jobs[0])
+            bot.transaction_worker.acknowledge.assert_called_once_with("stale")

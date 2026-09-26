@@ -223,6 +223,13 @@ class Bot:
                     if isinstance(transaction_worker, TransactionHistoryWorker):
                         transaction_worker.acknowledge(completed["key"])
                     continue
+                if (int(job.get("generation", self.state.transaction_generation))
+                        != self.state.transaction_generation
+                        or int(job.get("cycle_id", self.state.cycle_id) or 0)
+                        != self.state.cycle_id):
+                    if isinstance(transaction_worker, TransactionHistoryWorker):
+                        transaction_worker.acknowledge(completed["key"])
+                    continue
                 if completed.get("error"):
                     job["retry_count"] = int(job.get("retry_count", 0) or 0) + 1
                     job["next_check_at"] = now + min(300, 5 * 2 ** (job["retry_count"] - 1))
