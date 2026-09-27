@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal
-import json
-from pathlib import Path
 
 
 D = Decimal
@@ -300,17 +298,24 @@ class CycleState:
         )
         payload["long"] = self.long.json() if self.long else None
         payload["short"] = self.short.json() if self.short else None
-        destination = Path(path)
-        temporary = destination.with_suffix(destination.suffix + ".tmp")
-        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(destination)
+        from .storage import StateStore
+        store = StateStore(path)
+        try:
+            store.save(payload)
+        except Exception:
+            # The in-memory model must not remain ahead of a failed authoritative commit: a
+            # following tick could otherwise emit a command whose intent was never persisted.
+            restored = type(self).load(path)
+            self.__dict__.clear()
+            self.__dict__.update(restored.__dict__)
+            raise
 
     @classmethod
     def load(cls, path: str) -> "CycleState":
-        file = Path(path)
-        if not file.exists():
+        from .storage import StateStore
+        raw = StateStore(path).load()
+        if raw is None:
             return cls()
-        raw = json.loads(file.read_text(encoding="utf-8"))
         if "recovery_model_version" not in raw:
             raw["recovery_model_version"] = 1
         # A permanent transport classification applies only to that process/request.  On a later

@@ -21,12 +21,15 @@ ARCHIVE_URL = "https://github.com/Mihail9990/AI-IMPULS-TRAIDER/archive/refs/head
 VERSION_URL = "https://api.github.com/repos/Mihail9990/AI-IMPULS-TRAIDER/commits/work"
 PROJECT_NAME = "AI-IMPULS-TRAIDER"
 PRESERVE = {
-    "bot_config.json", "bot_state.json", "demo_captures", "bot_diagnostics.log.history",
+    "bot_config.json", "bot_state.json", "bot_state.sqlite3", "bot_state.sqlite3-wal",
+    "bot_state.sqlite3-shm", "bot_state.sqlite3.lock", "demo_captures",
+    "bot_diagnostics.log.history",
 }
 
 
 def is_runtime_data(name: str) -> bool:
-    return name in PRESERVE or name == "bot_diagnostics.log" or (
+    return name in PRESERVE or name.startswith("bot_state.sqlite3.backup") \
+        or name == "bot_diagnostics.log" or (
         name.startswith("bot_diagnostics.log.") and name.removeprefix("bot_diagnostics.log.").isdigit()
     )
 

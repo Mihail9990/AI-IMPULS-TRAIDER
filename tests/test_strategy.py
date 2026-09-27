@@ -2,6 +2,7 @@ from decimal import Decimal as D
 from datetime import datetime, timezone
 import json
 import os
+import sqlite3
 from pathlib import Path
 import tempfile
 import time
@@ -38,12 +39,16 @@ from trader.reporting import (
     recovery_snapshot, transaction_result_fingerprint,
 )
 from trader.streaming import PriceWatch, QuoteStream
+from trader.storage import StateStore, WriterLock, database_path
 from trader.telegram import Telegram
 
 
 _RUNTIME_STATE_PATH = Path(__file__).resolve().parents[1] / "bot_state.json"
 _RUNTIME_STATE_EXISTED = _RUNTIME_STATE_PATH.exists()
 _RUNTIME_STATE_BYTES = _RUNTIME_STATE_PATH.read_bytes() if _RUNTIME_STATE_EXISTED else None
+_RUNTIME_DB_FILES = [Path(str(database_path(_RUNTIME_STATE_PATH)) + suffix)
+                     for suffix in ("", "-wal", "-shm", ".lock")]
+_RUNTIME_DB_SNAPSHOTS = {path: path.read_bytes() for path in _RUNTIME_DB_FILES if path.exists()}
 
 
 def tearDownModule():
@@ -52,6 +57,11 @@ def tearDownModule():
         _RUNTIME_STATE_PATH.write_bytes(_RUNTIME_STATE_BYTES)
     else:
         _RUNTIME_STATE_PATH.unlink(missing_ok=True)
+    for path in _RUNTIME_DB_FILES:
+        if path in _RUNTIME_DB_SNAPSHOTS:
+            path.write_bytes(_RUNTIME_DB_SNAPSHOTS[path])
+        else:
+            path.unlink(missing_ok=True)
 
 
 class StrategyTest(unittest.TestCase):
@@ -2315,6 +2325,7 @@ class EntryRetryTest(unittest.TestCase):
             "dealId": "buy-old", "source": source, "type": "POSITION",
             "status": "ACCEPTED", "details": {
                 "level": 4009.25 if source == "SL" else 4011.70,
+                "size": "0.1",
             },
         }] if not deal_id or deal_id == "buy-old" else []
         bot.capital.update_position.side_effect = lambda deal_id, stop, target: (
@@ -2590,12 +2601,12 @@ class EntryRetryTest(unittest.TestCase):
             def activity(self, deal_id="", last_period=86400):
                 events = [{
                     "dealId": "buy-ee9f", "source": "SL", "type": "POSITION",
-                    "status": "ACCEPTED", "details": {"level": 4410.34},
+                    "status": "ACCEPTED", "details": {"level": 4410.34, "size": 10},
                 }]
                 if self.tp_visible:
                     events.append({
                         "dealId": "sell-eff8", "source": "TP", "type": "POSITION",
-                        "status": "ACCEPTED", "details": {"level": 4406.09},
+                        "status": "ACCEPTED", "details": {"level": 4406.09, "size": 10},
                     })
                 return [event for event in events if not deal_id or event["dealId"] == deal_id]
 
@@ -3259,16 +3270,18 @@ class BrokerInfrastructureTest(unittest.TestCase):
              "source": "SL", "type": "POSITION", "status": "ACCEPTED",
              "details": {"direction": "SELL", "level": 4621.62, "size": 0.1}},
         ]
+        bot.capital.positions.return_value = []
+        bot.capital.working_orders.return_value = []
         bot.telegram = Mock()
         bot._create_trigger = Mock()
 
         self.assertTrue(
             bot._recover_trigger_round_trip_from_activity(old_survivor, original_stopped)
         )
-        self.assertEqual(bot.state.phase, "LONG_ONLY")
-        self.assertTrue(bot.state.long.open)
+        self.assertEqual(bot.state.phase, "DOUBLE_SL_PAUSE")
+        self.assertFalse(bot.state.long.open)
         self.assertFalse(bot.state.short.open)
-        bot._create_trigger.assert_called_once_with(old_survivor)
+        bot._create_trigger.assert_not_called()
 
     def test_nested_activity_is_normalized_and_sorted(self):
         items = [{
@@ -4981,17 +4994,16 @@ class GeneralRecoveryIntegrationFixTest(unittest.TestCase):
         self.assertEqual(state.scenario, 8)
         self.assertEqual(directions[:5], ("SELL", "SELL", "SELL", "BUY", "BUY"))
 
-    def test_named_bot_state_is_removed_or_restored_byte_for_byte(self):
+    def test_named_json_is_preserved_after_sqlite_becomes_authoritative(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "bot_state.json"
             state = CycleState(general_recovery=D("12")); state.save(str(path))
-            path.unlink()
             self.assertFalse(path.exists())
+            self.assertTrue(database_path(path).exists())
             original = b'{"user":"state"}\n'; path.write_bytes(original)
-            backup = path.read_bytes()
             CycleState(general_recovery=D("99")).save(str(path))
-            path.write_bytes(backup)
             self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(CycleState.load(str(path)).general_recovery, D("99"))
 
 
 class GeneralRecoveryV3AcceptanceTest(unittest.TestCase):
@@ -6714,3 +6726,89 @@ class Attempt286UnifiedLedgerRegressionTest(unittest.TestCase):
             self.assertEqual(len(restored.report_outbox), 1)
             bot.reconcile_startup()
             self.assertEqual((restored.completed_cycles, len(restored.report_outbox)), (1, 1))
+
+
+class SQLiteStateStoreRegressionTest(unittest.TestCase):
+    def test_json_migration_is_transactional_one_time_and_preserves_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            legacy = Path(directory) / "bot_state.json"
+            payload = {
+                "active": True, "scenario": 3, "cycle_id": 7, "cycle_attempt": 2,
+                "general_recovery": "68.30", "processed_events": ["execution-1"],
+                "pending_transaction_jobs": [{"key": "tx", "deal_ids": ["deal-1"]}],
+                "report_outbox": [{"id": "report", "parts": []}],
+                "deal_history": [{"deal_id": "deal-1", "partial_closes": [{
+                    "event_id": "part-1", "source": "SL", "fill": "98.9", "size": "7"}]}],
+            }
+            original = json.dumps(payload).encode(); legacy.write_bytes(original)
+            migrated = CycleState.load(str(legacy))
+            self.assertEqual((migrated.scenario, migrated.general_recovery), (3, D("68.30")))
+            self.assertEqual(legacy.read_bytes(), original)
+            self.assertTrue(database_path(legacy).exists())
+            legacy.write_text(json.dumps({"scenario": 9}), encoding="utf-8")
+            self.assertEqual(CycleState.load(str(legacy)).scenario, 3)
+            with sqlite3.connect(database_path(legacy)) as db:
+                self.assertEqual(db.execute(
+                    "SELECT value FROM metadata WHERE key='schema_version'"
+                ).fetchone()[0], "1")
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM broker_executions").fetchone()[0], 1)
+
+    def test_failed_sqlite_commit_rolls_back_disk_and_in_memory_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "state.json")
+            state = CycleState(general_recovery=D("8")); state.save(path)
+            state.general_recovery = D("99")
+            original_save = StateStore.save
+
+            def fail_before_commit(store, payload, **kwargs):
+                return original_save(store, payload, fault=lambda stage: (
+                    (_ for _ in ()).throw(RuntimeError("fault"))
+                    if stage == "before_commit" else None
+                ), **kwargs)
+
+            with patch.object(StateStore, "save", new=fail_before_commit):
+                with self.assertRaisesRegex(RuntimeError, "fault"):
+                    state.save(path)
+            self.assertEqual(state.general_recovery, D("8"))
+            self.assertEqual(CycleState.load(path).general_recovery, D("8"))
+
+    def test_writer_lock_rejects_second_instance_and_backup_is_consistent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "state.json")
+            CycleState(general_recovery=D("12.34")).save(path)
+            first = WriterLock(path)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "Another trading instance"):
+                    WriterLock(path)
+            finally:
+                first.close()
+            backup = Path(directory) / "snapshot.sqlite3"
+            StateStore(path).backup(backup)
+            with sqlite3.connect(backup) as db:
+                raw = json.loads(db.execute(
+                    "SELECT payload FROM state_snapshot WHERE singleton=1"
+                ).fetchone()[0])
+            self.assertEqual(raw["general_recovery"], "12.34")
+
+    def test_scenario_nine_owners_receive_independent_deal_id_snapshots(self):
+        deal_ids = ["a", "b"]
+        state = CycleState(pending_actual_deal_ids=list(deal_ids), pending_finalization={
+            "kind": "SCENARIO_9", "deal_ids": list(deal_ids),
+        }, pending_transaction_jobs=[{"key": "tx", "deal_ids": list(deal_ids)}])
+        state.pending_actual_deal_ids.clear()
+        self.assertEqual(state.pending_finalization["deal_ids"], deal_ids)
+        self.assertEqual(state.pending_transaction_jobs[0]["deal_ids"], deal_ids)
+
+    def test_installer_preserves_sqlite_database_wal_shm_and_backups(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source"; target = Path(directory) / "target"
+            source.mkdir(); target.mkdir()
+            (source / "main.py").write_text("new", encoding="utf-8")
+            for name in ("bot_state.sqlite3", "bot_state.sqlite3-wal",
+                         "bot_state.sqlite3-shm", "bot_state.sqlite3.backup-1"):
+                (source / name).write_text("new", encoding="utf-8")
+                (target / name).write_text("runtime", encoding="utf-8")
+            copy_project(source, target)
+            for name in ("bot_state.sqlite3", "bot_state.sqlite3-wal",
+                         "bot_state.sqlite3-shm", "bot_state.sqlite3.backup-1"):
+                self.assertEqual((target / name).read_text(), "runtime")
