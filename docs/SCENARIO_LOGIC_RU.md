@@ -136,9 +136,9 @@ entry, actual close и actual size, показывается отдельной 
 
 После окончательного завершения сначала формируется самодостаточный Telegram-report и в
 diagnostic log записывается `CYCLE_LEDGER_FINAL` со сделками, attempts, Recovery events,
-переходами, race results и доступным transaction snapshot. Только затем detailed working ledger
-и transaction jobs этого `cycle_id` очищаются. Агрегаты/counters и durable outbox сохраняются;
-late worker result с удалённым key/generation не может восстановить старую историю в новом цикле.
+переходами, race results и доступным transaction snapshot. Только затем detailed trading ledger
+очищается. Агрегаты/counters, durable outbox и ещё незавершённые transaction jobs сохраняются;
+late worker result неверной generation не может восстановить старую торговую историю в новом цикле.
 
 Pending transaction job при этом не является рабочей торговой историей и не удаляется только из-за
 завершения цикла. Она хранит собственные `cycle_id`, `attempt_id`, deal IDs и generation, работает
