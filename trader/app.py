@@ -2693,6 +2693,28 @@ class Bot:
                 return True
 
         if reopened_tp is not None and reopened_tp.level is not None:
+            if self.state.scenario >= self.cfg.max_scenarios:
+                # The trigger execution already advanced S8 -> S9. S9 is terminal regardless of
+                # whether the reopened position subsequently closed by SL or TP between polls;
+                # both actual fills must go through the Scenario-9 calculated/actual/finalization
+                # lifecycle rather than the ordinary S1-S8 TP completion path.
+                if self._remember_close_event(
+                        stopped, reopened_tp, scenario_at_close=self.state.scenario
+                ) == "CONFLICT":
+                    self._manual(
+                        f"Конфликт TP evidence терминального S9 dealId={stopped.deal_id}"
+                    )
+                    return True
+                stopped.open = False
+                for leg, fill in ((survivor, survivor_sl.level),
+                                  (stopped, reopened_tp.level)):
+                    if leg.direction == "BUY":
+                        self.state.scenario_nine_long_fill = fill
+                    else:
+                        self.state.scenario_nine_short_fill = fill
+                self.state.save(self.cfg.state_file)
+                self._enter_manual_nine()
+                return True
             self._complete_cycle(stopped.direction, reopened_tp.level)
             self.state.armed = not self.state.paused
             self.state.phase = "FILTER" if self.state.armed else "PAUSED"
@@ -3849,7 +3871,15 @@ class Bot:
         self.state.realized_losses = prior_losses
         for leg in legs:
             self.state.remember_deal(leg)
-            self.state.remember_close(leg.deal_id, "SCENARIO_9_MARKET", fills[leg.direction])
+            record = next((item for item in self.state.deal_history
+                           if item.get("deal_id") == leg.deal_id), None)
+            # SL/TP that completed before polling remains the execution reason. Scenario 9 is the
+            # cycle completion kind, not a replacement broker source for that position close.
+            if not record or record.get("close_level") is None:
+                self.state.remember_close(
+                    leg.deal_id, "SCENARIO_9_MARKET", fills[leg.direction],
+                    close_size=leg.size,
+                )
         scenario_nine_deals = list(dict.fromkeys(self.state.attempt_deal_ids))
         attempt_id = self.state.active_attempt_id
         self.strategy.complete_scenario_nine(long_fill, short_fill, extra_loss)

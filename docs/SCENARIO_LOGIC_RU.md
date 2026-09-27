@@ -27,6 +27,12 @@ Capital REST объединяет одинаковые GET, сохраняет �
 операция S9 дополнительно сверяется по `cycle_id`, `attempt_id` и permanent position `dealId`, а не
 только по направлению.
 
+Если между опросами подтверждена цепочка `S8 Trigger execution → actual reentry S9 → survivor SL
+→ reopened TP`, TP не возвращает цикл в обычную ветку S1–S8. Оба actual fill передаются в
+терминальный S9 lifecycle, при этом в deal ledger сохраняются исходные broker-причины `SL` и `TP`.
+Повторные DELETE/PUT/Trigger для уже закрытых позиций не отправляются; calculated S9 result,
+fill-based actual result, transaction job и итоговый outbox формируются штатной S9 finalization.
+
 ## Термины и единый ledger
 
 `DISTANCE_SCENARIO` — настроенная stop-геометрия текущего сценария. `D_VALUE` — стоимость

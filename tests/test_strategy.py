@@ -6765,6 +6765,219 @@ class SQLiteStateStoreRegressionTest(unittest.TestCase):
                 }
                 bot._resume_scenario_nine_finalization()
                 self.assertEqual(bot.state.scenario_nine_close_operations, {})
+
+
+class SuccessfulCycleBroker:
+    """Stateful Capital fake for full-volume, immediately successful production paths."""
+
+    def __init__(self, epic="GOLD"):
+        self.epic = epic; self.positions_by_id = {}; self.orders = {}; self.events = []
+        self.confirmations = {}; self.sequence = 0; self.mutations = []
+        self.executions = []
+
+    def _id(self, prefix):
+        self.sequence += 1
+        return f"{prefix}-{self.sequence}"
+
+    def _time(self):
+        minute, second = divmod(self.sequence, 60)
+        return f"2026-09-20T10:{minute:02d}:{second:02d}.000Z"
+
+    def positions(self):
+        return [{"position": dict(item), "market": {"epic": self.epic}}
+                for item in self.positions_by_id.values()]
+
+    def position(self, deal_id):
+        return {"position": dict(self.positions_by_id[deal_id])}
+
+    def working_orders(self):
+        return [{"workingOrderData": dict(item), "marketData": {"epic": self.epic}}
+                for item in self.orders.values()]
+
+    def quote(self, epic):
+        return D("100"), D("100.2")
+
+    def candle_ranges(self, epic, minutes):
+        return D("0"), D("0")
+
+    def open_position(self, epic, direction, size, **kwargs):
+        reference = self._id("market-ref"); deal_id = self._id(direction.lower())
+        level = D("100.2") if direction == "BUY" else D("100")
+        position = {"dealId": deal_id, "dealReference": reference,
+                    "direction": direction, "level": level, "size": size,
+                    "stopLevel": level - D("1") if direction == "BUY" else level + D("1")}
+        self.positions_by_id[deal_id] = position
+        self.confirmations[reference] = {
+            "dealStatus": "ACCEPTED", "dealId": deal_id, "level": level, "size": size,
+            "affectedDeals": [{"dealId": deal_id, "status": "OPENED"}],
+        }
+        self.mutations.append(("POST_POSITION", deal_id))
+        return reference
+
+    def wait_confirmation(self, reference, attempts=10):
+        return self.confirmations[reference]
+
+    def wait_position(self, deal_id, reference, direction, **kwargs):
+        return dict(self.positions_by_id[deal_id])
+
+    def update_position(self, deal_id, stop, target):
+        reference = self._id("put-ref")
+        position = self.positions_by_id[deal_id]
+        position["stopLevel"], position["profitLevel"] = stop, target
+        self.confirmations[reference] = {"dealStatus": "ACCEPTED", "dealId": deal_id}
+        self.mutations.append(("PUT", deal_id, stop, target))
+        return reference
+
+    def working_stop(self, epic, direction, size, level, stop, target):
+        reference = self._id("stop-ref"); order_id = self._id("order")
+        self.orders[order_id] = {"dealId": order_id, "dealReference": reference,
+            "epic": epic, "direction": direction, "orderLevel": level, "orderSize": size,
+            "stopLevel": stop, "profitLevel": target}
+        self.confirmations[reference] = {"dealStatus": "ACCEPTED", "dealId": order_id}
+        self.mutations.append(("POST_STOP", order_id))
+        return reference
+
+    def delete_working_order(self, order_id):
+        self.orders.pop(order_id, None); self.mutations.append(("DELETE_STOP", order_id))
+        return True
+
+    def activity(self, deal_id="", last_period=86400):
+        return [item for item in self.events if not deal_id or item.get("dealId") == deal_id]
+
+    def login(self, **kwargs):
+        return None
+
+    def emit_close(self, deal_id, source, fill):
+        position = self.positions_by_id.pop(deal_id)
+        event_id = self._id("close")
+        event = {"id": event_id, "dateUTC": self._time(), "dealId": deal_id,
+            "source": source, "type": "POSITION", "status": "ACCEPTED",
+            "direction": "SELL" if position["direction"] == "BUY" else "BUY",
+            "details": {"level": fill, "size": position["size"],
+                        "stopLevel": position.get("stopLevel"),
+                        "profitLevel": position.get("profitLevel")}}
+        self.events.append(event)
+        points = (fill - position["level"] if position["direction"] == "BUY"
+                  else position["level"] - fill)
+        self.executions.append(points * D(str(position["size"])))
+        return event
+
+    def execute_order(self, order_id, fill):
+        order = self.orders.pop(order_id); deal_id = self._id(order["direction"].lower())
+        self.events.append({"id": self._id("wo-exec"), "dateUTC": self._time(),
+                            "dealId": order_id, "source": "USER",
+                            "type": "WORKING_ORDER", "status": "EXECUTED"})
+        position = {"dealId": deal_id, "dealReference": order["dealReference"],
+                    "workingOrderId": order_id, "direction": order["direction"],
+                    "level": fill, "size": order["orderSize"],
+                    "stopLevel": order["stopLevel"], "profitLevel": order["profitLevel"]}
+        self.positions_by_id[deal_id] = position
+        self.events.append({"id": self._id("open"), "dateUTC": self._time(),
+            "dealId": deal_id, "workingOrderId": order_id, "source": "USER",
+            "type": "POSITION", "status": "ACCEPTED", "direction": order["direction"],
+            "details": {"level": fill, "size": order["orderSize"]}})
+        return position
+
+
+class SuccessfulCycleEndToEndTest(unittest.TestCase):
+    def make_bot(self, path):
+        cfg = Settings(dry_run=False, api_key="key", identifier="id", password="pw",
+                       state_file=path, diagnostic_log_file=path + ".log",
+                       scenario_sizes=(D("10"),) * 9,
+                       scenario_stop_distances=tuple(D(str(i)) for i in range(1, 10)),
+                       target_profit=D("0.3"))
+        bot = Bot.__new__(Bot); bot.cfg = cfg; bot.state = CycleState()
+        bot.strategy = Strategy(cfg, bot.state); bot.capital = SuccessfulCycleBroker(cfg.epic)
+        bot.telegram = Mock(); bot.execution_policy = ExecutionPolicy(); bot._flat_checks = 0
+        return bot
+
+    def test_s8_trigger_then_survivor_sl_and_reopened_tp_uses_terminal_s9_both_mirrors(self):
+        for final_direction, owner in (("SELL", "normal"), ("BUY", "normal"),
+                                       ("SELL", "continuation"), ("BUY", "continuation")):
+            with self.subTest(final_direction=final_direction, owner=owner), \
+                    tempfile.TemporaryDirectory() as directory:
+                bot = self.make_bot(str(Path(directory) / "state.json")); broker = bot.capital
+                bot._start_pair_common("successful candle", continuation=False, preflight_done=True)
+                self.assertEqual(bot.state.scenario, 1)
+                # Seven full SL -> owned Trigger -> actual fill transitions produce S2..S8.
+                direction = "SELL" if final_direction == "SELL" else "BUY"
+                for expected in range(2, 9):
+                    leg = bot.state.short if direction == "SELL" else bot.state.long
+                    stop_fill = leg.stop + (D("0.1") if direction == "SELL" else D("-0.1"))
+                    broker.emit_close(leg.deal_id, "SL", stop_fill)
+                    bot._tick_cycle()
+                    order_id = leg.trigger_id
+                    anchor = leg.original_trigger_level
+                    fill = anchor + (D("0.05") if direction == "BUY" else D("-0.05"))
+                    broker.execute_order(order_id, fill)
+                    bot._tick_cycle()
+                    self.assertEqual(bot.state.scenario, expected)
+                    direction = "BUY" if direction == "SELL" else "SELL"
+
+                # At S8 close the requested side, create and execute its S9 Trigger, then publish
+                # survivor SL and reopened TP before the next successful positions snapshot.
+                reopened = bot.state.short if final_direction == "SELL" else bot.state.long
+                survivor = bot.state.long if final_direction == "SELL" else bot.state.short
+                first_fill = reopened.stop + (D("0.1") if final_direction == "SELL" else D("-0.1"))
+                broker.emit_close(reopened.deal_id, "SL", first_fill)
+                bot._tick_cycle()
+                order_id = reopened.trigger_id
+                new_position = broker.execute_order(order_id, reopened.original_trigger_level)
+                survivor_fill = survivor.stop + (D("-0.1") if survivor.direction == "BUY" else D("0.1"))
+                survivor_event = broker.emit_close(survivor.deal_id, "SL", survivor_fill)
+                tp_fill = new_position["profitLevel"]
+                tp_event = broker.emit_close(new_position["dealId"], "TP", tp_fill)
+                mutation_count = len(broker.mutations)
+                expected_deal_ids = set(bot.state.attempt_deal_ids) | {new_position["dealId"]}
+                expected_actual_pnl = sum(broker.executions, D("0"))
+                expected_prior_losses = sum(
+                    (-result / D("10") for result in broker.executions if result < 0), D("0")
+                )
+                with patch("trader.app.LOG.info") as info_log:
+                    if owner == "continuation":
+                        bot.state.continuation_managed = True
+                        bot.state.continuation_stage = "ACTIVE"
+                        bot.continuation = CycleContinuation(bot)
+                        bot.continuation.handle_active_scenario()
+                    else:
+                        bot._tick_cycle()
+                archive_call = next(call for call in info_log.call_args_list
+                                    if call.args and call.args[0] == "CYCLE_LEDGER_FINAL %s")
+                archived = json.loads(archive_call.args[1])
+                sources = {item["deal_id"]: item.get("close_source")
+                           for item in archived["deal_history"]}
+                self.assertEqual(sources[survivor_event["dealId"]], "SL")
+                self.assertEqual(sources[tp_event["dealId"]], "TP")
+
+                self.assertEqual(bot.state.scenario, 9)
+                self.assertFalse(bot.state.active)
+                self.assertEqual(bot.state.phase, "FILTER")
+                self.assertEqual(bot.state.completed_cycles, 1)
+                self.assertEqual(bot.state.active_attempt_id, 0)
+                self.assertFalse(bot.state.continuation_managed)
+                self.assertEqual(len(bot.state.pending_transaction_jobs), 1)
+                self.assertEqual(set(bot.state.pending_transaction_jobs[0]["deal_ids"]),
+                                 expected_deal_ids)
+                summary = next(item for item in bot.state.completed_attempt_summaries
+                               if item.get("status") == "COMPLETED_SCENARIO_9")
+                self.assertEqual(D(summary["actual_result"]), expected_actual_pnl)
+                self.assertEqual(
+                    bot.state.net_cycle_result,
+                    -(expected_prior_losses + abs(survivor_fill - tp_fill)),
+                )
+                self.assertIn(str(survivor_fill), bot.state.completed_cycle_report)
+                self.assertIn(str(tp_fill), bot.state.completed_cycle_report)
+                self.assertFalse(any(item[0] in {"PUT", "POST_STOP"}
+                                     for item in broker.mutations[mutation_count:]))
+                # S9 finalization archived the precise broker sources before clearing the ledger.
+                self.assertEqual(survivor_event["source"], "SL")
+                self.assertEqual(tp_event["source"], "TP")
+                before = (bot.state.completed_cycles, len(bot.state.report_outbox),
+                          len(bot.state.pending_transaction_jobs), len(broker.mutations))
+                bot.tick()
+                self.assertEqual(before, (bot.state.completed_cycles, len(bot.state.report_outbox),
+                                          len(bot.state.pending_transaction_jobs),
+                                          len(broker.mutations)))
                 self.assertEqual((bot.state.phase, bot.state.armed), ("FILTER", True))
                 bot.strategy.begin(D("100.2"), D("100"))
                 self.assertEqual(bot.state.scenario, 1)
