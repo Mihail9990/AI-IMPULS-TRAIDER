@@ -453,6 +453,7 @@ class Bot:
         self.state.trigger_race_results.clear()
         self.state.attempt_deal_ids.clear()
         self.state.cycle_trigger_ids.clear()
+        self.state.scenario_nine_close_operations.clear()
         self.state.processed_events.clear()
         self.state.pending_actual_attempt_id = 0
         self.state.pending_actual_deal_ids.clear()
@@ -3680,6 +3681,20 @@ class Bot:
         unresolved_existing = []
         for leg in list(open_legs):
             operation = operations.get(leg.direction)
+            if operation and (
+                int(operation.get("cycle_id", 0) or 0) != self.state.cycle_id
+                or int(operation.get("attempt_id", 0) or 0) != self.state.active_attempt_id
+                or str(operation.get("deal_id", "")) != leg.deal_id
+            ):
+                LOG.info(
+                    "Discarding completed/stale S9 close owner direction=%s owner=%s/%s/%s "
+                    "current=%s/%s/%s",
+                    leg.direction, operation.get("cycle_id"), operation.get("attempt_id"),
+                    operation.get("deal_id"), self.state.cycle_id,
+                    self.state.active_attempt_id, leg.deal_id,
+                )
+                operations.pop(leg.direction, None)
+                operation = None
             if not operation:
                 continue
             reference = str(operation.get("reference", ""))
@@ -3923,6 +3938,9 @@ class Bot:
         self._store_report(scenario_report, f"scenario-9-complete:{attempt_id}")
         if self.state.deal_history or self.state.attempt_history:
             self._archive_and_clear_completed_cycle(scenario_report)
+        # Close operations are trading ownership, not reporting jobs. They are terminal once the
+        # S9 outcome is finalized and must never be inherited by the next logical cycle.
+        self.state.scenario_nine_close_operations.clear()
         self.state.pending_finalization = {}
         self.state.save(self.cfg.state_file)
         end_diagnostic_cycle(

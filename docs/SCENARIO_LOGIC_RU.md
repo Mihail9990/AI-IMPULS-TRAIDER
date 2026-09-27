@@ -22,6 +22,11 @@ Capital REST объединяет одинаковые GET, сохраняет �
 делает автоматический retry mutation. Activity execution без конечного положительного actual size
 остаётся raw observation и не попадает в authoritative close ledger.
 
+После терминальной финализации S9 durable close operations очищаются как trading ownership.
+Следующий логический цикл начинает S1 без BUY/SELL operation предыдущего цикла; при reconciliation
+операция S9 дополнительно сверяется по `cycle_id`, `attempt_id` и permanent position `dealId`, а не
+только по направлению.
+
 ## Термины и единый ledger
 
 `DISTANCE_SCENARIO` — настроенная stop-геометрия текущего сценария. `D_VALUE` — стоимость

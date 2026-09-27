@@ -75,6 +75,7 @@ class Strategy:
         self.state.scenario_nine_triggers_verified = False
         self.state.cycle_trigger_ids.clear()
         self.state.scenario_nine_long_fill = self.state.scenario_nine_short_fill = None
+        self.state.scenario_nine_close_operations.clear()
         self.state.cycle_target_profit = (
             self.state.profit_override
             if self.state.profit_override is not None and self.state.profit_override_remaining > 0

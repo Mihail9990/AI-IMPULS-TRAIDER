@@ -6738,6 +6738,38 @@ class Attempt286UnifiedLedgerRegressionTest(unittest.TestCase):
 
 
 class SQLiteStateStoreRegressionTest(unittest.TestCase):
+    def test_two_scenario_nine_finalizations_do_not_reuse_close_operations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "state.json")
+            bot = Bot.__new__(Bot)
+            bot.cfg = Settings(dry_run=False, api_key="key", identifier="id", password="pw",
+                               state_file=path,
+                               diagnostic_log_file=str(Path(directory) / "diagnostic.log"))
+            bot.telegram = Mock(); bot.capital = Mock()
+            bot.state = CycleState(); bot.strategy = Strategy(bot.cfg, bot.state)
+            for cycle_id in (71, 72):
+                bot.state.cycle_id = cycle_id
+                bot.state.completed_cycles = cycle_id - 70
+                bot.state.active = False
+                bot.state.scenario = 9
+                bot.state.scenario_nine_close_operations = {
+                    "BUY": {"operation_id": f"old-buy-{cycle_id}", "cycle_id": cycle_id,
+                            "attempt_id": cycle_id, "deal_id": f"buy-{cycle_id}"},
+                    "SELL": {"operation_id": f"old-sell-{cycle_id}", "cycle_id": cycle_id,
+                             "attempt_id": cycle_id, "deal_id": f"sell-{cycle_id}"},
+                }
+                bot.state.pending_finalization = {
+                    "kind": "SCENARIO_9", "attempt_id": 0,
+                    "long_fill": "99", "short_fill": "101", "paused": False,
+                    "deal_ids": [],
+                }
+                bot._resume_scenario_nine_finalization()
+                self.assertEqual(bot.state.scenario_nine_close_operations, {})
+                self.assertEqual((bot.state.phase, bot.state.armed), ("FILTER", True))
+                bot.strategy.begin(D("100.2"), D("100"))
+                self.assertEqual(bot.state.scenario, 1)
+                self.assertEqual(bot.state.scenario_nine_close_operations, {})
+
     def test_actual_result_accepts_partial_execution_ledger_not_last_fill_times_full_size(self):
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "state.json")
