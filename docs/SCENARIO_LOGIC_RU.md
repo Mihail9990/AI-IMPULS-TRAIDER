@@ -15,6 +15,13 @@ DELETE неизвестный результат разрешается чере
 освобождения continuation ownership и перехода в `FILTER`/`PAUSED`. Transaction P&L jobs имеют
 собственный immutable snapshot и не изменяют Scenario или GENERAL нового цикла.
 
+Сбой локального SQLite commit немедленно обрывает handler и отличается от неизвестного результата
+HTTP: продолжение через отсоединённый объект `Leg` запрещено. Перед initial MARKET и S9 DELETE
+сохраняется `MAY_HAVE_SENT`, а broker reference фиксируется до confirmation. Общая bounded очередь
+Capital REST объединяет одинаковые GET, сохраняет приоритет live reconciliation и никогда не
+делает автоматический retry mutation. Activity execution без конечного положительного actual size
+остаётся raw observation и не попадает в authoritative close ledger.
+
 ## Термины и единый ledger
 
 `DISTANCE_SCENARIO` — настроенная stop-геометрия текущего сценария. `D_VALUE` — стоимость

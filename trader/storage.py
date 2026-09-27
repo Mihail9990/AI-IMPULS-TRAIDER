@@ -12,6 +12,16 @@ from typing import Callable
 SCHEMA_VERSION = 1
 
 
+class StorageFailure(BaseException):
+    """Fatal local durability failure.
+
+    This deliberately does not inherit from ``Exception``. Broker handlers commonly catch
+    ``Exception`` to reconcile an uncertain HTTP result; treating a failed local commit as such
+    would let that handler continue with detached model objects and issue an unsaved mutation.
+    The process-level owner must stop the current turn and restart from the committed snapshot.
+    """
+
+
 def database_path(legacy_path: str | Path) -> Path:
     path = Path(legacy_path)
     return path.with_suffix(".sqlite3") if path.suffix else Path(str(path) + ".sqlite3")
@@ -116,10 +126,14 @@ class StateStore:
         try:
             raw = self.legacy_path.read_bytes()
             payload = json.loads(raw.decode("utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            return None
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise StorageFailure(
+                f"Legacy state {self.legacy_path} exists but cannot be migrated: {exc}"
+            ) from exc
         if not isinstance(payload, dict):
-            return None
+            raise StorageFailure(
+                f"Legacy state {self.legacy_path} must contain a JSON object"
+            )
         payload.setdefault("storage_migration", {
             "source": self.legacy_path.name,
             "sha256": hashlib.sha256(raw).hexdigest(),
@@ -156,9 +170,11 @@ class StateStore:
             if fault:
                 fault("before_commit")
             db.execute("COMMIT")
-        except BaseException:
+        except BaseException as exc:
             db.execute("ROLLBACK")
-            raise
+            if isinstance(exc, StorageFailure):
+                raise
+            raise StorageFailure(f"SQLite state commit failed: {exc}") from exc
         finally:
             if own:
                 db.close()
@@ -204,8 +220,9 @@ class StateStore:
                 ("TRIGGER_CREATE", leg.get("pending_trigger_create")),
                 ("TRIGGER_CANCEL", leg.get("pending_trigger_cancel_unknown")),
                 ("MARKET_OPEN", leg.get("pending_market_kind")),
-                ("PROTECTION_UPDATE", leg.get("protection_sent_stop") is not None
-                 and leg.get("protection_readback") != "ПОДТВЕРЖДЕНО"),
+                ("PROTECTION_UPDATE", leg.get("protection_unknown")
+                 or (leg.get("protection_sent_stop") is not None
+                     and leg.get("protection_readback") != "ПОДТВЕРЖДЕНО")),
                 ("RACE_CLOSE", leg.get("pending_race_close_unknown")
                  or leg.get("pending_race_close_reference")),
             ):
@@ -224,6 +241,17 @@ class StateStore:
                 "VALUES(?,?,?,?,?)",
                 (identity, payload.get("cycle_id"), payload.get("active_attempt_id"),
                  "MARKET_CLOSE", encoded_subset(payload, "pending_close")),
+            )
+        for direction, operation in payload.get("scenario_nine_close_operations", {}).items():
+            identity = str(operation.get("operation_id") or
+                           f"{payload.get('cycle_id', 0)}:S9_CLOSE:{direction}")
+            db.execute(
+                "INSERT INTO durable_commands(identity,cycle_id,attempt_id,kind,payload) "
+                "VALUES(?,?,?,?,?)",
+                (identity, operation.get("cycle_id", payload.get("cycle_id")),
+                 operation.get("attempt_id", payload.get("active_attempt_id")),
+                 "SCENARIO_9_CLOSE",
+                 json.dumps(operation, ensure_ascii=False, sort_keys=True)),
             )
         db.execute("DELETE FROM notification_outbox")
         for report in payload.get("report_outbox", []):

@@ -11,6 +11,7 @@ import time
 import requests
 
 from .config import Settings
+from .scheduler import scheduler_for
 
 
 LOG = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ class CapitalClient:
         self.settings = settings
         host = "https://demo-api-capital.backend-capital.com" if settings.demo else "https://api-capital.backend-capital.com"
         self.base = host + "/api/v1"
+        self.scheduler = scheduler_for(host)
         self.http = requests.Session()
         self.http.headers.update({"X-CAP-API-KEY": settings.api_key, "Content-Type": "application/json"})
         self.last_login = 0.0
@@ -99,6 +101,19 @@ class CapitalClient:
             LOG.info("CAPITAL SESSION ready generation=%s", self.session_generation)
 
     def request(self, method: str, path: str, **kwargs) -> dict:
+        method_upper = method.upper()
+        priority = (0 if method_upper != "GET" else
+                    1 if path.startswith(("/confirms/", "/history/activity")) else
+                    3 if path.startswith("/history/transactions") else 2)
+        # Query parameters are part of read identity; mutations deliberately receive unique keys.
+        encoded_params = json.dumps(kwargs.get("params", {}), sort_keys=True, default=str)
+        key = f"{method_upper}:{path}:{encoded_params}"
+        return self.scheduler.execute(
+            key, priority, lambda: self._request_now(method, path, **kwargs),
+            coalesce=method_upper == "GET",
+        )
+
+    def _request_now(self, method: str, path: str, **kwargs) -> dict:
         if time.time() - self.last_login > 540:
             self.login()
         request_id = next(self._request_ids)

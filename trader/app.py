@@ -1237,6 +1237,10 @@ class Bot:
                 reason=f"initial {leg.direction} POST outcome pending",
                 unknown_post=True,
             )
+            # Commit the may-send boundary before broker I/O. StorageFailure intentionally
+            # escapes every HTTP-reconciliation ``except Exception`` in this handler, so the
+            # opposite leg cannot be submitted from detached objects after a failed commit.
+            self.state.save(self.cfg.state_file)
             try:
                 # The previous cycle can remain briefly visible in /positions. Remember every
                 # pre-existing id so wait_position cannot bind the new leg to a stale position
@@ -2528,7 +2532,8 @@ class Bot:
         self.state.processed_events.append(marker)
         self.state.events.append(message)
         LOG.warning("BROKER DECISION %s", message)
-        self.state.save(self.cfg.state_file)
+        if hasattr(self, "cfg"):
+            self.state.save(self.cfg.state_file)
 
     def _recover_trigger_fill_then_stop(
         self, positions: dict[str, dict], survivor: Leg, stopped: Leg
@@ -2713,6 +2718,19 @@ class Bot:
             related_orders = [item for item in self.capital.working_orders()
                               if self._order_epic(item) == self.cfg.epic]
             if related_orders:
+                return True
+            if self.state.scenario >= self.cfg.max_scenarios:
+                # Scenario 9 is terminal for this logical cycle. Both authoritative fills are
+                # already known, so route through its durable finalizer instead of scheduling a
+                # continuation attempt (which could otherwise create an invalid scenario 10).
+                for leg, fill in ((survivor, survivor_sl.level),
+                                  (stopped, reopened_sl.level)):
+                    if leg.direction == "BUY":
+                        self.state.scenario_nine_long_fill = fill
+                    else:
+                        self.state.scenario_nine_short_fill = fill
+                self.state.save(self.cfg.state_file)
+                self._enter_manual_nine()
                 return True
             self._begin_double_sl_pause([
                 (survivor, survivor_sl.level), (stopped, reopened_sl.level),
@@ -3284,20 +3302,62 @@ class Bot:
                 reopened.deal_id,
             )
             return False
-        reference = self.capital.close_position(reopened.deal_id)
-        result = self.capital.wait_confirmation(reference)
-        close = self._confirmation_close_level(result, reopened.deal_id)
-        if result.get("dealStatus") != "ACCEPTED" or close is None:
-            raise CapitalError(
-                result.get("reason") or "MARKET-позиция после TP противоположной стороны не закрыта"
-            )
-        loss = max(D("0"), reopened.current_entry - close) if reopened.direction == "BUY" else max(
-            D("0"), close - reopened.current_entry
-        )
-        self.state.realized_losses += loss
-        self.state.realized_loss_money += loss * reopened.size
+        # This is the MARKET-fallback equivalent of a TP/STOP race. Persist its close operation
+        # before DELETE and keep its signed result outside strategic GENERAL/realized losses.
+        if not reopened.pending_race_close_unknown and not reopened.pending_race_close_reference:
+            reopened.pending_race_close_deal_id = reopened.deal_id
+            reopened.pending_race_close_unknown = True
+            self.state.save(self.cfg.state_file)
+            try:
+                reopened.pending_race_close_reference = self.capital.close_position(reopened.deal_id)
+                self.state.save(self.cfg.state_file)
+            except Exception as exc:
+                LOG.info("MARKET TP race DELETE remains unknown dealId=%s: %s",
+                         reopened.deal_id, exc)
+                self.state.save(self.cfg.state_file)
+                return True
+        close = None
+        reference = reopened.pending_race_close_reference
+        if reference:
+            try:
+                result = self.capital.wait_confirmation(reference)
+            except Exception as exc:
+                LOG.info("MARKET TP race confirmation delayed reference=%s: %s", reference, exc)
+                result = {}
+            close = self._confirmation_close_level(result, reopened.deal_id)
+            if result.get("dealStatus") == "REJECTED":
+                raise CapitalError(result.get("reason") or "Закрытие race-позиции отклонено")
+        if close is None:
+            latest = self._cycle_positions()
+            if reopened.deal_id in latest:
+                self.state.save(self.cfg.state_file)
+                return True
+            activity = self.capital.activity(reopened.deal_id)
+            event = next((event for event in reversed(normalize_events(activity))
+                          if event.deal_id == reopened.deal_id
+                          and event.event_type == "POSITION" and event.status == "ACCEPTED"
+                          and event.source in {"USER", "SL", "TP"}
+                          and event.level is not None
+                          and self._close_event_has_valid_size(reopened, event)), None)
+            if event is None:
+                self.state.save(self.cfg.state_file)
+                return True
+            close = event.level
+        signed = ((close - reopened.current_entry) if reopened.direction == "BUY"
+                  else (reopened.current_entry - close)) * reopened.size
+        race_key = f"market-race:{reopened.deal_id}:{close}:{reopened.size}"
+        if not any(item.get("key") == race_key for item in self.state.trigger_race_results):
+            self.state.trigger_race_results.append({
+                "key": race_key, "deal_id": reopened.deal_id,
+                "direction": reopened.direction, "entry": str(reopened.current_entry),
+                "close": str(close), "size": str(reopened.size),
+                "signed_result": str(signed), "kind": "MARKET_FALLBACK_TP_RACE",
+            })
         reopened.open = False
-        self.state.remember_close(reopened.deal_id, "TP_MARKET_RACE", close)
+        reopened.pending_race_close_unknown = False
+        reopened.pending_race_close_reference = ""
+        self.state.remember_close(reopened.deal_id, "TP_MARKET_RACE", close,
+                                  close_size=reopened.size)
         self._complete_cycle(opposite.direction, tp_fill)
         self.state.armed = not self.state.paused
         self.state.phase = "FILTER" if self.state.armed else "PAUSED"
@@ -3306,7 +3366,7 @@ class Bot:
             "⚡ TP противоположной стороны исполнен во время pending MARKET\n"
             f"TP {opposite.direction}: {tp_fill}\n"
             f"Связанная MARKET-позиция {reopened.direction} закрыта: {close}\n"
-            f"Дополнительный убыток: {loss}\n"
+            f"Отдельный signed result race-позиции: {signed}\n"
             + cycle_result_text(self.state, opposite.direction, tp_fill, self.cfg.size)
         )
         return True
@@ -3374,6 +3434,10 @@ class Bot:
                 self._resume_scenario_nine_finalization()
             else:
                 self._resume_normal_finalization()
+            self.reconciled = True
+            return
+        if self.state.active and self.state.phase == "SCENARIO_9_CLOSING":
+            self._enter_manual_nine()
             self.reconciled = True
             return
         positions = self._cycle_positions()
@@ -3588,6 +3652,8 @@ class Bot:
         # window; that is a normal scenario-9 close and its authoritative activity fill is used.
         for leg in (self.state.long, self.state.short):
             if leg and leg.open:
+                if leg.stop is None and leg.take_profit is None:
+                    continue
                 try:
                     self._confirm_update(self.capital.update_position(leg.deal_id, None, None))
                     leg.stop = leg.take_profit = None
@@ -3608,12 +3674,73 @@ class Bot:
         open_legs = [leg for leg in legs if leg.deal_id in positions]
         open_legs = [leg for leg in open_legs if leg.direction not in fills]
 
+        # First resume operations which may already have reached Capital. They are never sent a
+        # second time merely because a confirmation GET or the previous process disappeared.
+        operations = self.state.scenario_nine_close_operations
+        unresolved_existing = []
+        for leg in list(open_legs):
+            operation = operations.get(leg.direction)
+            if not operation:
+                continue
+            reference = str(operation.get("reference", ""))
+            result = {}
+            if reference:
+                try:
+                    result = self.capital.wait_confirmation(reference)
+                except Exception as exc:
+                    operation["last_error"] = str(exc)
+            confirmed = self._confirmation_close_level(result, leg.deal_id) if result else None
+            if result.get("dealStatus") == "ACCEPTED" and confirmed is not None:
+                fills[leg.direction] = confirmed
+                operation["state"] = "CONFIRMED"
+                if leg.direction == "BUY":
+                    self.state.scenario_nine_long_fill = confirmed
+                else:
+                    self.state.scenario_nine_short_fill = confirmed
+                open_legs.remove(leg)
+                continue
+            # Activity can prove a close even while /confirms is delayed. A still-visible target
+            # leaves the original DELETE unknown and blocks a duplicate.
+            if leg.deal_id not in self._cycle_positions():
+                historical = self._wait_any_closing_fill(leg, attempts=1, delay=0)
+                if historical is not None:
+                    fills[leg.direction] = historical
+                    operation["state"] = "RECONCILED"
+                    if leg.direction == "BUY":
+                        self.state.scenario_nine_long_fill = historical
+                    else:
+                        self.state.scenario_nine_short_fill = historical
+                    open_legs.remove(leg)
+                    continue
+            unresolved_existing.append(leg.direction)
+        if unresolved_existing:
+            self.state.save(self.cfg.state_file)
+            LOG.info("Scenario 9 close operations remain unresolved: %s", unresolved_existing)
+            return
+
         # Establish one fresh session before concurrent DELETEs. CapitalClient.login is also
         # serialized as a second line of defence against any future parallel request path.
         self.capital.login()
 
+        # Commit both may-send boundaries before either worker performs network I/O. If the
+        # process stops at any later instruction, startup sees UNKNOWN rather than submitting a
+        # second DELETE.
+        for leg in open_legs:
+            operations[leg.direction] = {
+                "operation_id": (f"s9-close:{self.state.cycle_id}:"
+                                 f"{self.state.active_attempt_id}:{leg.deal_id}"),
+                "cycle_id": self.state.cycle_id,
+                "attempt_id": self.state.active_attempt_id,
+                "deal_id": leg.deal_id,
+                "direction": leg.direction,
+                "state": "MAY_HAVE_SENT",
+                "reference": "",
+            }
+        if open_legs:
+            self.state.save(self.cfg.state_file)
+
         # DELETE requests are issued from two workers so neither side intentionally waits for the
-        # other's HTTP round trip. Confirmations provide the actual execution prices.
+        # other's HTTP round trip. Only the main owner persists returned references.
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures = {pool.submit(self.capital.close_position, leg.deal_id): leg for leg in open_legs}
             references: dict[str, str] = {}
@@ -3621,16 +3748,26 @@ class Bot:
                 leg = futures[future]
                 try:
                     references[leg.direction] = future.result()
+                    operations[leg.direction]["reference"] = references[leg.direction]
+                    operations[leg.direction]["state"] = "REFERENCE_RECEIVED"
+                    self.state.save(self.cfg.state_file)
                 except CapitalError as exc:
+                    operations[leg.direction]["last_error"] = str(exc)
+                    self.state.save(self.cfg.state_file)
                     if "error.not-found.dealId" not in str(exc):
-                        raise
+                        continue
             confirmation_futures = {
                 pool.submit(self.capital.wait_confirmation, reference): direction
                 for direction, reference in references.items()
             }
             for future in as_completed(confirmation_futures):
                 direction = confirmation_futures[future]
-                result = future.result()
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    operations[direction]["last_error"] = str(exc)
+                    self.state.save(self.cfg.state_file)
+                    continue
                 expected_leg = next(leg for leg in open_legs if leg.direction == direction)
                 confirmed_fill = self._confirmation_close_level(result, expected_leg.deal_id)
                 if result.get("dealStatus") != "ACCEPTED":
@@ -3644,11 +3781,31 @@ class Bot:
                     )
                     continue
                 fills[direction] = confirmed_fill
+                operations[direction]["state"] = "CONFIRMED"
                 if direction == "BUY":
                     self.state.scenario_nine_long_fill = fills[direction]
                 else:
                     self.state.scenario_nine_short_fill = fills[direction]
                 self.state.save(self.cfg.state_file)
+
+        for leg in open_legs:
+            if leg.direction in fills:
+                continue
+            historical = self._wait_any_closing_fill(leg, attempts=1, delay=0)
+            if historical is not None:
+                fills[leg.direction] = historical
+                operations[leg.direction]["state"] = "RECONCILED"
+                if leg.direction == "BUY":
+                    self.state.scenario_nine_long_fill = historical
+                else:
+                    self.state.scenario_nine_short_fill = historical
+                self.state.save(self.cfg.state_file)
+        if any(leg.direction not in fills and leg.deal_id in self._cycle_positions()
+               for leg in open_legs):
+            # Confirmation/activity will be resumed on the next tick or startup. Do not fall
+            # through to a long blocking wait and do not resend the DELETE.
+            self.state.save(self.cfg.state_file)
+            return
 
         # A side that vanished while protections were being removed is resolved from durable
         # activity. It may have closed by SL or TP; either actual fill participates in the gap.
@@ -3743,13 +3900,13 @@ class Bot:
             )
             self.state.active_attempt_id = saved_active_attempt
         self.state.pending_actual_attempt_id = attempt_id
-        self.state.pending_actual_deal_ids = deal_ids
+        self.state.pending_actual_deal_ids = list(deal_ids)
         transaction_key = f"transactions:{self.state.cycle_id}:{attempt_id}"
         if attempt_id and not any(job.get("key") == transaction_key
                                   for job in self.state.pending_transaction_jobs):
             self.state.pending_transaction_jobs.append({
                 "key": transaction_key, "cycle_id": self.state.cycle_id,
-                "attempt_id": attempt_id, "deal_ids": deal_ids,
+                "attempt_id": attempt_id, "deal_ids": list(deal_ids),
                 "search_from_epoch": float(operation.get("search_from_epoch", time.time() - 86400)),
                 "status": "PENDING", "amount": None, "currency": "", "components": [],
                 "next_check_at": 0, "retry_count": 0,
@@ -3787,27 +3944,46 @@ class Bot:
         total = D("0")
         for deal_id in self.state.pending_actual_deal_ids:
             item = records.get(deal_id)
+            if item and item.get("close_evidence_conflict"):
+                missing.append(deal_id)
+                continue
             if item and item.get("close_level") is None:
                 try:
                     activity = self.capital.activity(deal_id)
-                    close_event = next(
-                        (event for source in ("SL", "TP")
-                         if (event := find_close_event(activity, deal_id, source)) is not None),
-                        None,
-                    )
-                    if close_event is None:
-                        direction = str(item.get("direction", ""))
-                        close_direction = "SELL" if direction == "BUY" else "BUY"
-                        close_event = next((event for event in reversed(normalize_events(activity))
-                                            if event.deal_id == deal_id
-                                            and event.event_type == "POSITION"
-                                            and event.source == "USER"
-                                            and event.direction == close_direction
-                                            and event.level is not None), None)
-                    if close_event is not None and close_event.level is not None:
-                        self.state.remember_close(
-                            deal_id, close_event.source or "USER", close_event.level
+                    direction = str(item.get("direction", ""))
+                    close_direction = "SELL" if direction == "BUY" else "BUY"
+                    executions = []
+                    seen = set()
+                    for event in normalize_events(activity):
+                        if (event.event_id in seen or event.deal_id != deal_id
+                                or event.event_type != "POSITION" or event.status != "ACCEPTED"
+                                or event.source not in {"SL", "TP", "USER"}
+                                or event.level is None or event.size is None
+                                or not event.size.is_finite() or event.size <= 0
+                                or (event.source == "USER"
+                                    and event.direction != close_direction)):
+                            continue
+                        seen.add(event.event_id)
+                        executions.append(event)
+                    original_size = D(str(item.get("size", "0")))
+                    if (original_size > 0
+                            and sum((event.size for event in executions), D("0"))
+                            == original_size):
+                        item["partial_closes"] = [{
+                            "event_id": event.event_id, "source": event.source,
+                            "fill": str(event.level), "size": str(event.size),
+                            "execution_time": event.timestamp.isoformat(),
+                        } for event in executions[:-1]]
+                        final = executions[-1]
+                        status = self.state.remember_close(
+                            deal_id, final.source or "USER", final.level,
+                            close_size=final.size, close_event_id=final.event_id,
+                            close_event_type=final.event_type,
+                            close_event_status=final.status,
+                            close_execution_time=final.timestamp.isoformat(),
                         )
+                        if status == "CONFLICT":
+                            missing.append(deal_id)
                 except Exception:
                     LOG.warning("Actual attempt result history delayed for %s", deal_id)
                 item = next((value for value in self.state.deal_history
@@ -3817,8 +3993,10 @@ class Bot:
                 missing.append(deal_id)
                 continue
             entry, close = D(str(item["entry"])), D(str(item["close_level"]))
-            original_size = (D(str(item.get("size", self.cfg.size)))
-                             if self.cfg.scenario_sizes else self.cfg.size)
+            original_size = D(str(item.get("size", "0")))
+            if original_size <= 0:
+                missing.append(deal_id)
+                continue
             partial_size = D("0")
             for partial in item.get("partial_closes", []):
                 part_size = D(str(partial["size"])); part_close = D(str(partial["fill"]))
@@ -3827,7 +4005,8 @@ class Bot:
                 total += part_points * part_size
                 partial_size += part_size
             final_size = original_size - partial_size
-            if final_size < 0:
+            close_size = D(str(item.get("close_size", final_size)))
+            if final_size <= 0 or close_size != final_size:
                 missing.append(deal_id)
                 continue
             points = close - entry if item["direction"] == "BUY" else entry - close
@@ -3861,6 +4040,8 @@ class Bot:
         }
         owned_ids = set(self.state.cycle_trigger_ids) | current_ids
         uncertain_ids = set(current_ids)
+        if self.state.scenario_nine_triggers_verified and not uncertain_ids:
+            return set()
         consecutive_empty = 0
         for attempt in range(8):
             orders = [
@@ -4202,6 +4383,7 @@ class Bot:
                 leg.confirmed_stop, leg.confirmed_take_profit = actual_stop, actual_tp
                 leg.confirmed_stop_distance = abs(leg.current_entry - actual_stop)
                 leg.protection_readback = "ПОДТВЕРЖДЕНО"
+                leg.protection_unknown = False
                 self.state.save(self.cfg.state_file)
                 self._send_report(
                     f"🛡 {cycle_heading(self.state, 'отложенная проверка защиты завершена')}\n"
@@ -4216,10 +4398,13 @@ class Bot:
                 leg.confirmation_stop = leg.confirmation_take_profit = None
                 leg.protection_confirmation = "ожидается"
                 leg.protection_readback = "не выполнено"
+                leg.protection_unknown = True
                 self.state.save(self.cfg.state_file)
                 reference = self.capital.update_position(
                     leg.deal_id, leg.stop, leg.take_profit
                 )
+                leg.protection_reference = str(reference)
+                self.state.save(self.cfg.state_file)
             except CapitalError as exc:
                 # The quote can cross the target between the pre-check and PUT. Capital then
                 # rejects the now-stale absolute TP with minvalue/maxvalue. Treat that as the
@@ -4270,6 +4455,7 @@ class Bot:
                 self._close_reached_take_profit(leg)
                 return False
             self._confirm_update(reference)
+            leg.protection_unknown = False
             leg.confirmation_stop, leg.confirmation_take_profit = leg.stop, leg.take_profit
             leg.protection_confirmation = "ACCEPTED"
             leg.protection_readback = "ожидается"
@@ -4682,6 +4868,11 @@ class Bot:
         return result
 
     def _find_order(self, leg: Leg) -> dict | None:
+        """Return only an order correlated by a broker identity already owned by this leg.
+
+        Price/direction/size are useful consistency checks, never ownership proof after an
+        unknown POST. Capital does not provide an idempotency key for STOP creation.
+        """
         expected_size, _, _ = self.strategy.projected_reopen(leg.direction)
         matches = []
         for item in self.capital.working_orders():
@@ -4690,7 +4881,14 @@ class Bot:
             size = data.get("orderSize", data.get("size"))
             if level is None or size is None:
                 continue
-            if (self._order_epic(item) == self.cfg.epic
+            broker_id = str(data.get("dealId", ""))
+            broker_reference = str(data.get("dealReference", ""))
+            owned_identity = (
+                (leg.trigger_id and broker_id == leg.trigger_id)
+                or (leg.pending_trigger_create_reference
+                    and broker_reference == leg.pending_trigger_create_reference)
+            )
+            if (owned_identity and self._order_epic(item) == self.cfg.epic
                     and data.get("direction") == leg.direction
                     and D(str(level)) == leg.original_trigger_level
                     and D(str(size)) == expected_size):
@@ -4709,7 +4907,7 @@ class Bot:
             )
         except CapitalError:
             event = None
-        if event and event.level is not None:
+        if event and event.level is not None and self._close_event_has_valid_size(leg, event):
             if self._remember_close_event(leg, event) == "CONFLICT":
                 return None
             return event.level
@@ -4717,6 +4915,18 @@ class Bot:
         if saved is not None:
             return saved.level
         return None
+
+    def _close_event_has_valid_size(self, leg: Leg, event: BrokerEvent) -> bool:
+        """Validate execution quantity before it can become authoritative close evidence."""
+        size = event.size
+        if size is not None and size.is_finite() and size > 0 and size <= leg.size:
+            return True
+        self._diagnostic_decision_once(
+            f"invalid-close-size:{leg.deal_id}:{event.event_id}",
+            f"raw observation rejected dealId={leg.deal_id}; event={event.event_id}; "
+            f"actual_size={size}; proven_remaining={leg.size}",
+        )
+        return False
 
     def _closing_fill_any_index(
         self, leg: Leg, expected_source: str, global_activity: list[dict]
@@ -4733,7 +4943,7 @@ class Bot:
         if fill is not None:
             return fill
         event = find_close_event(global_activity, leg.deal_id, expected_source)
-        if event and event.level is not None:
+        if event and event.level is not None and self._close_event_has_valid_size(leg, event):
             if self._remember_close_event(leg, event) == "CONFLICT":
                 return None
             LOG.info(
@@ -4747,6 +4957,8 @@ class Bot:
                                global_activity: list[dict]):
         event = find_close_event(global_activity, leg.deal_id, expected_source)
         if event is not None:
+            if not self._close_event_has_valid_size(leg, event):
+                return None
             if self._remember_close_event(leg, event) == "CONFLICT":
                 return None
             return event
@@ -4755,6 +4967,8 @@ class Bot:
                 self.capital.activity(leg.deal_id), leg.deal_id, expected_source
             )
             if event is not None:
+                if not self._close_event_has_valid_size(leg, event):
+                    return None
                 if self._remember_close_event(leg, event) == "CONFLICT":
                     return None
                 return event
@@ -4791,7 +5005,8 @@ class Bot:
                     event = find_close_event(
                         self.capital.activity(), leg.deal_id, expected_source
                     )
-                    if event and event.level is not None:
+                    if (event and event.level is not None
+                            and self._close_event_has_valid_size(leg, event)):
                         status = self._remember_close_event(leg, event)
                         if status == "CONFLICT":
                             LOG.warning("Conflicting global close evidence dealId=%s", leg.deal_id)

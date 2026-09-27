@@ -42,6 +42,8 @@ class Leg:
     confirmed_take_profit: Decimal | None = None
     protection_sent_stop: Decimal | None = None
     protection_sent_take_profit: Decimal | None = None
+    protection_reference: str = ""
+    protection_unknown: bool = False
     confirmation_stop: Decimal | None = None
     confirmation_take_profit: Decimal | None = None
     protection_confirmation: str = ""
@@ -105,6 +107,7 @@ class CycleState:
     scenario_nine_triggers_verified: bool = False
     scenario_nine_long_fill: Decimal | None = None
     scenario_nine_short_fill: Decimal | None = None
+    scenario_nine_close_operations: dict = field(default_factory=dict)
     cycle_target_profit: Decimal = D("0")
     profit_override: Decimal | None = None
     profit_override_remaining: int = 0
@@ -217,7 +220,7 @@ class CycleState:
         # Broker facts are immutable.  A later eventually-consistent empty response never calls
         # this method, and a conflicting response is left for explicit reconciliation instead of
         # silently rewriting the chronology used by Recovery.
-        significant = ("close_source", "close_level", "close_size", "close_event_type",
+        significant = ("close_source", "close_level", "close_size", "close_event_id", "close_event_type",
                        "close_event_status", "close_execution_time")
         existing = {key: record.get(key) for key in significant}
         incoming = {key: values.get(key) for key in significant}
@@ -302,13 +305,16 @@ class CycleState:
         store = StateStore(path)
         try:
             store.save(payload)
-        except Exception:
+        except BaseException as exc:
             # The in-memory model must not remain ahead of a failed authoritative commit: a
             # following tick could otherwise emit a command whose intent was never persisted.
             restored = type(self).load(path)
             self.__dict__.clear()
             self.__dict__.update(restored.__dict__)
-            raise
+            from .storage import StorageFailure
+            if isinstance(exc, StorageFailure):
+                raise
+            raise StorageFailure(f"SQLite state commit failed: {exc}") from exc
 
     @classmethod
     def load(cls, path: str) -> "CycleState":
@@ -375,6 +381,8 @@ class CycleState:
                 leg.setdefault("pending_race_close_reference", "")
                 leg.setdefault("pending_race_close_deal_id", "")
                 leg.setdefault("pending_race_close_unknown", False)
+                leg.setdefault("protection_reference", "")
+                leg.setdefault("protection_unknown", False)
                 raw[name] = Leg(**leg)
         raw["recovery"] = D(str(raw.get("recovery", "0")))
         for name in ("general_recovery", "target_value", "initial_position_size"):
@@ -422,6 +430,7 @@ class CycleState:
         self.scenario_nine_total_loss = self.scenario_nine_extra_loss = D("0")
         self.scenario_nine_triggers_verified = False
         self.scenario_nine_long_fill = self.scenario_nine_short_fill = None
+        self.scenario_nine_close_operations.clear()
         self.pending_tp_direction = ""
         self.pending_tp_fill = None
         self.pending_close_direction = self.pending_close_reference = self.pending_close_reason = ""
