@@ -76,7 +76,8 @@ def find_close_event(items: Iterable[dict], deal_id: str, source: str) -> Broker
     expected = source.upper()
     matches = [event for event in normalize_events(items)
                if event.deal_id == deal_id and event.source == expected
-               and event.status != "REJECTED" and event.level is not None]
+               and event.event_type == "POSITION"
+               and event.status == "ACCEPTED" and event.level is not None]
     return matches[-1] if matches else None
 
 

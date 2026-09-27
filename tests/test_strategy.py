@@ -533,6 +533,8 @@ class EntryRetryTest(unittest.TestCase):
         self.assertEqual(bot.state.scenario_nine_total_loss, D("22.20"))
         self.assertTrue(bot.state.scenario_nine_triggers_verified)
         self.assertEqual(bot.state.scenario_nine_extra_loss, D("0"))
+        self.assertEqual(len(bot.state.pending_transaction_jobs), 1)
+        self.assertEqual(bot.state.pending_transaction_jobs[0]["status"], "PENDING")
         self.assertEqual(bot.capital.close_position.call_count, 2)
         bot.capital.update_position.assert_any_call("long-9", None, None)
         bot.capital.update_position.assert_any_call("short-9", None, None)
@@ -866,7 +868,8 @@ class EntryRetryTest(unittest.TestCase):
         close_visible = False
         bot.capital.activity.side_effect = lambda deal_id="", last_period=86400: ([{
             "dealId": "buy-close-id", "source": "TP", "type": "POSITION",
-            "status": "ACCEPTED", "details": {"level": 4011.71, "direction": "SELL"},
+            "status": "ACCEPTED", "details": {"level": 4011.71, "direction": "SELL",
+                                               "size": 0.1},
         }] if close_visible else [])
 
         with patch("trader.app.time.sleep"):
@@ -1261,9 +1264,9 @@ class EntryRetryTest(unittest.TestCase):
         bot.state.long.size = bot.state.short.size = D("10")
         bot.capital.positions.return_value = []
         events = [
-            {"dealId": "buy-224", "source": "SL", "status": "ACCEPTED",
+            {"dealId": "buy-224", "source": "SL", "type": "POSITION", "status": "ACCEPTED",
              "type": "POSITION", "details": {"level": 4371.22, "size": 10}},
-            {"dealId": "sell-224", "source": "SL", "status": "ACCEPTED",
+            {"dealId": "sell-224", "source": "SL", "type": "POSITION", "status": "ACCEPTED",
              "type": "POSITION", "details": {"level": 4373.53, "size": 10}},
         ]
         bot.capital.activity.side_effect = lambda deal_id="", last_period=86400: events
@@ -1695,7 +1698,8 @@ class EntryRetryTest(unittest.TestCase):
         bot.capital.positions.return_value = []
         bot.capital.working_orders.return_value = []
         bot.capital.activity.return_value = [{
-            "dealId": bot.state.long.deal_id, "source": "TP", "level": 4011.60,
+            "dealId": bot.state.long.deal_id, "source": "TP", "type": "POSITION",
+            "status": "ACCEPTED", "details": {"level": 4011.60, "size": 0.1},
         }]
         bot._tick_cycle()
         self.assertFalse(bot.state.active)
@@ -1709,7 +1713,8 @@ class EntryRetryTest(unittest.TestCase):
         bot.state.phase = "LONG_ONLY"
         bot.capital.positions.return_value = []
         bot.capital.activity.return_value = [{
-            "dealId": bot.state.long.deal_id, "source": "TP", "level": 4011.60,
+            "dealId": bot.state.long.deal_id, "source": "TP", "type": "POSITION",
+            "status": "ACCEPTED", "details": {"level": 4011.60, "size": 0.1},
         }]
         bot._tick_cycle()
         self.assertFalse(bot.state.active)
@@ -1816,7 +1821,8 @@ class EntryRetryTest(unittest.TestCase):
         }]
         bot.capital.positions.return_value = short_position
         bot.capital.activity.return_value = [{
-            "dealId": "long-1", "source": "SL", "status": "ACCEPTED", "level": 4644.76,
+            "dealId": "long-1", "source": "SL", "type": "POSITION", "status": "ACCEPTED",
+            "details": {"level": 4644.76, "size": 0.1},
         }]
         bot.capital.update_position.return_value = "update-ref"
         bot.capital.working_orders.return_value = []
@@ -1931,6 +1937,7 @@ class EntryRetryTest(unittest.TestCase):
         bot = self.make_bot()
         bot.state.long.deal_id = "long-old"
         bot.state.short.deal_id = "short-old"
+        bot.state.remember_deal(bot.state.long, 1); bot.state.remember_deal(bot.state.short, 1)
         stopped_short = bot.strategy.stopped("SELL", D("4637.05"), "stop-short-old")
         stopped_short.trigger_id = "buy-trigger"
         stopped_short.trigger_reference = "trigger-ref"
@@ -1949,9 +1956,10 @@ class EntryRetryTest(unittest.TestCase):
             {"dealId": "short-new", "source": "USER", "status": "ACCEPTED",
              "type": "POSITION", "dateUTC": "2026-09-21T10:00:00Z",
              "details": {"workingOrderId": "buy-trigger", "direction": "SELL",
-                         "level": 4635.97}},
-            {"dealId": "long-old", "source": "SL", "status": "ACCEPTED",
-             "level": 4635.42, "dateUTC": "2026-09-21T10:00:01Z"},
+                         "level": 4635.97, "size": 0.1}},
+            {"dealId": "long-old", "source": "SL", "type": "POSITION", "status": "ACCEPTED",
+             "level": 4635.42, "dateUTC": "2026-09-21T10:00:01Z",
+             "details": {"level": 4635.42, "size": 0.1}},
         ]
         bot.capital.update_position.return_value = "update-ref"
         bot.capital.working_orders.return_value = []
@@ -1978,6 +1986,7 @@ class EntryRetryTest(unittest.TestCase):
         bot = self.make_bot()
         bot.state.long.deal_id = "long-old"
         bot.state.short.deal_id = "short-old"
+        bot.state.remember_deal(bot.state.long, 1); bot.state.remember_deal(bot.state.short, 1)
         stopped_short = bot.strategy.stopped("SELL", D("4637.05"), "stop-short-old")
         stopped_short.trigger_id = "sell-trigger"
         stopped_short.trigger_reference = "trigger-ref"
@@ -1999,9 +2008,10 @@ class EntryRetryTest(unittest.TestCase):
             {"dealId": "short-new", "source": "USER", "status": "ACCEPTED",
              "type": "POSITION", "dateUTC": "2026-09-21T10:00:00Z",
              "details": {"workingOrderId": "sell-trigger", "direction": "SELL",
-                         "level": 4635.97}},
-            {"dealId": "long-old", "source": "SL", "status": "ACCEPTED",
-             "level": 4635.42, "dateUTC": "2026-09-21T10:00:01Z"},
+                         "level": 4635.97, "size": 0.1}},
+            {"dealId": "long-old", "source": "SL", "type": "POSITION", "status": "ACCEPTED",
+             "level": 4635.42, "dateUTC": "2026-09-21T10:00:01Z",
+             "details": {"level": 4635.42, "size": 0.1}},
         ]
         bot.capital.update_position.return_value = "update-ref"
         bot.capital.working_orders.return_value = []
@@ -2024,6 +2034,8 @@ class EntryRetryTest(unittest.TestCase):
     def test_fast_positions_path_uses_broker_order_when_sl_precedes_reentry(self):
         bot = self.make_bot()
         bot.state.long.deal_id, bot.state.short.deal_id = "long-old", "short-old"
+        bot.state.remember_deal(bot.state.long, 1)
+        bot.state.remember_deal(bot.state.short, 1)
         stopped = bot.strategy.stopped("SELL", D("4011.00"), "stop-short-old")
         stopped.trigger_id = "sell-trigger"
         stopped.trigger_reference = "trigger-ref"
@@ -2036,7 +2048,8 @@ class EntryRetryTest(unittest.TestCase):
              "details": {"workingOrderId": "sell-trigger", "direction": "SELL",
                          "level": "4010.00"}},
             {"dateUTC": "2026-09-21T10:00:01Z", "dealId": "long-old",
-             "source": "SL", "status": "ACCEPTED", "type": "POSITION", "level": "4009.30"},
+             "source": "SL", "type": "POSITION", "status": "ACCEPTED",
+             "details": {"level": "4009.30", "size": "0.1"}},
         ]
         bot.capital.update_position.return_value = "update-ref"
         bot.capital.wait_confirmation.side_effect = [
@@ -2067,7 +2080,7 @@ class EntryRetryTest(unittest.TestCase):
             position = {"dealId": "short-new", "workingOrderId": "sell-trigger",
                         "direction": "SELL", "level": "4010.00",
                         "createdDateUTC": "2026-09-21T10:00:02Z"}
-            event = {"dealId": "long-old", "source": "SL", "status": "ACCEPTED",
+            event = {"dealId": "long-old", "source": "SL", "type": "POSITION", "status": "ACCEPTED",
                      "type": "POSITION", "level": "4009.30"}
             if close_time:
                 event["dateUTC"] = close_time
@@ -2644,7 +2657,7 @@ class EntryRetryTest(unittest.TestCase):
         }]
         bot.capital.working_orders.return_value = []
         bot.capital.activity.return_value = [{
-            "dealId": short_id, "level": 4011.10, "source": "SL", "status": "ACCEPTED",
+            "dealId": short_id, "level": 4011.10, "source": "SL", "type": "POSITION", "status": "ACCEPTED",
             "details": {"level": 4011.10, "size": 0.1},
         }]
         bot.capital.update_position.return_value = "update-ref"
@@ -2679,10 +2692,10 @@ class EntryRetryTest(unittest.TestCase):
             )
             bot.capital.activity.return_value = [
                 {"dateUTC": "2026-09-21T00:00:01Z", "dealId": "buy-224",
-                 "source": "SL", "status": "ACCEPTED", "level": 4371.22,
+                 "source": "SL", "type": "POSITION", "status": "ACCEPTED", "level": 4371.22,
                  "details": {"level": 4371.22, "size": 10}},
                 {"dateUTC": "2026-09-21T00:00:02Z", "dealId": "sell-224",
-                 "source": "SL", "status": "ACCEPTED", "level": 4373.53,
+                 "source": "SL", "type": "POSITION", "status": "ACCEPTED", "level": 4373.53,
                  "details": {"level": 4373.53, "size": 10}},
             ]
             with patch("trader.app.end_diagnostic_cycle"):
@@ -3158,6 +3171,8 @@ class BrokerInfrastructureTest(unittest.TestCase):
         bot.state = CycleState()
         bot.strategy = Strategy(bot.cfg, bot.state)
         bot.strategy.begin(D("4622.63"), D("4622.02"))
+        bot.state.long.deal_id, bot.state.short.deal_id = "old-buy", "old-sell"
+        bot.state.remember_deal(bot.state.long, 1); bot.state.remember_deal(bot.state.short, 1)
         stopped = bot.strategy.stopped("BUY", D("4621.61"), "initial-buy-stop")
         stopped.trigger_id = "trigger-buy"
         survivor = bot.state.short
@@ -3165,13 +3180,13 @@ class BrokerInfrastructureTest(unittest.TestCase):
             {"dateUTC": "2026-08-25T13:34:09", "dealId": "new-buy",
              "source": "USER", "type": "POSITION", "status": "ACCEPTED",
              "details": {"workingOrderId": "trigger-buy", "direction": "BUY",
-                         "level": 4622.63}},
+                         "level": 4622.63, "size": 0.1}},
             {"dateUTC": "2026-08-25T13:34:10", "dealId": survivor.deal_id,
              "source": "SL", "type": "POSITION", "status": "ACCEPTED",
-             "details": {"direction": "BUY", "level": 4623.07}},
+             "details": {"direction": "BUY", "level": 4623.07, "size": 0.1}},
             {"dateUTC": "2026-08-25T13:34:12", "dealId": "new-buy",
              "source": "TP", "type": "POSITION", "status": "ACCEPTED",
-             "details": {"direction": "SELL", "level": 4624.95}},
+             "details": {"direction": "SELL", "level": 4624.95, "size": 0.1}},
         ]
         bot.capital = Mock()
         bot.capital.activity.return_value = activity
@@ -3226,22 +3241,23 @@ class BrokerInfrastructureTest(unittest.TestCase):
         bot.state = CycleState()
         bot.strategy = Strategy(bot.cfg, bot.state)
         bot.strategy.begin(D("4622.63"), D("4622.02"))
+        bot.state.long.deal_id, bot.state.short.deal_id = "old-buy", "old-sell"
+        bot.state.remember_deal(bot.state.long, 1); bot.state.remember_deal(bot.state.short, 1)
         original_stopped = bot.strategy.stopped("BUY", D("4621.61"), "initial-buy-stop")
         original_stopped.trigger_id = "trigger-buy"
         old_survivor = bot.state.short
-        old_survivor.deal_id = "old-sell"
         bot.capital = Mock()
         bot.capital.activity.return_value = [
             {"dateUTC": "2026-08-25T13:34:09", "dealId": "reopened-buy",
              "source": "USER", "type": "POSITION", "status": "ACCEPTED",
              "details": {"workingOrderId": "trigger-buy", "direction": "BUY",
-                         "level": 4622.67}},
+                         "level": 4622.67, "size": 0.1}},
             {"dateUTC": "2026-08-25T13:34:10", "dealId": "old-sell",
              "source": "SL", "type": "POSITION", "status": "ACCEPTED",
-             "details": {"direction": "BUY", "level": 4623.07}},
+             "details": {"direction": "BUY", "level": 4623.07, "size": 0.1}},
             {"dateUTC": "2026-08-25T13:34:12", "dealId": "reopened-buy",
              "source": "SL", "type": "POSITION", "status": "ACCEPTED",
-             "details": {"direction": "SELL", "level": 4621.62}},
+             "details": {"direction": "SELL", "level": 4621.62, "size": 0.1}},
         ]
         bot.telegram = Mock()
         bot._create_trigger = Mock()
@@ -3256,7 +3272,8 @@ class BrokerInfrastructureTest(unittest.TestCase):
 
     def test_nested_activity_is_normalized_and_sorted(self):
         items = [{
-            "dateUTC": "2026-08-22T10:01:00Z", "source": "SL", "status": "ACCEPTED",
+            "dateUTC": "2026-08-22T10:01:00Z", "source": "SL", "type": "POSITION", "status": "ACCEPTED",
+            "type": "POSITION",
             "details": {"dealId": "deal-1", "closeLevel": "4009.20", "direction": "BUY"},
         }, {
             "dateUTC": "2026-08-22T10:00:00Z", "source": "USER", "status": "ACCEPTED",
@@ -3589,10 +3606,10 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
             object.__setattr__(bot.cfg, "diagnostic_log_file", str(Path(directory) / "diag.log"))
             bot.capital.activity.return_value = [
                 {"dateUTC": "2026-09-21T00:00:01Z", "dealId": "buy",
-                 "source": "SL", "status": "ACCEPTED", "level": 99,
+                 "source": "SL", "type": "POSITION", "status": "ACCEPTED", "level": 99,
                  "details": {"level": 99, "size": 10}},
                 {"dateUTC": "2026-09-21T00:00:02Z", "dealId": "sell",
-                 "source": "SL", "status": "ACCEPTED", "level": 103,
+                 "source": "SL", "type": "POSITION", "status": "ACCEPTED", "level": 103,
                  "details": {"level": 103, "size": 20}},
             ]
             bot._begin_double_sl_pause([(buy, D("99")), (sell, D("103"))])
@@ -3666,7 +3683,7 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
         client.activity.side_effect = [
             [{"dealId": "buy-old", "source": "USER", "status": "ACCEPTED",
               "type": "POSITION", "level": 100}],
-            [{"dealId": "buy-old", "source": "TP", "status": "ACCEPTED",
+            [{"dealId": "buy-old", "source": "TP", "type": "POSITION", "status": "ACCEPTED",
               "type": "POSITION", "level": 105}],
         ]
         started = time.time() - 3 * 86400
@@ -3686,7 +3703,7 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
     def test_specific_sl_returns_without_global_request(self):
         client = Mock()
         client.activity.return_value = [{
-            "dealId": "wanted", "source": "SL", "status": "ACCEPTED", "level": 99,
+            "dealId": "wanted", "source": "SL", "type": "POSITION", "status": "ACCEPTED", "level": 99,
         }]
         result = NotificationHistoryWorker._resolve(client, {
             "waiting": {"deal_id": "wanted"}, "search_from_epoch": 1000,
@@ -3702,7 +3719,7 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
         def activity(deal_id="", **kwargs):
             if not deal_id:
                 raise CapitalError("global unavailable")
-            return [{"dealId": "wanted", "source": "TP", "status": "ACCEPTED",
+            return [{"dealId": "wanted", "source": "TP", "type": "POSITION", "status": "ACCEPTED",
                      "level": 103}]
 
         client.activity.side_effect = activity
@@ -3716,7 +3733,7 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
     def test_foreign_deal_close_is_not_accepted(self):
         client = Mock()
         client.activity.return_value = [{
-            "dealId": "foreign", "source": "SL", "status": "ACCEPTED", "level": 99,
+            "dealId": "foreign", "source": "SL", "type": "POSITION", "status": "ACCEPTED", "level": 99,
         }]
         result = NotificationHistoryWorker._resolve(client, {
             "waiting": {"deal_id": "wanted"}, "search_from_epoch": 1000,
@@ -3736,7 +3753,7 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
                 start = datetime.fromisoformat(kwargs["from_date"]).replace(tzinfo=timezone.utc).timestamp()
                 end = datetime.fromisoformat(kwargs["to_date"]).replace(tzinfo=timezone.utc).timestamp()
                 if deal_id == "legacy" and start <= event_time <= end:
-                    return [{"dealId": "legacy", "source": "SL", "status": "ACCEPTED",
+                    return [{"dealId": "legacy", "source": "SL", "type": "POSITION", "status": "ACCEPTED",
                              "level": 98, "dateUTC": "2026-09-17T11:59:00"}]
                 return []
 
@@ -3869,7 +3886,7 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
                 start = datetime.fromisoformat(kwargs["from_date"]).replace(tzinfo=timezone.utc).timestamp()
                 end = datetime.fromisoformat(kwargs["to_date"]).replace(tzinfo=timezone.utc).timestamp()
                 if deal_id == "buy-270" and start <= event_epoch <= end:
-                    return [{"dealId": "buy-270", "source": "SL", "status": "ACCEPTED",
+                    return [{"dealId": "buy-270", "source": "SL", "type": "POSITION", "status": "ACCEPTED",
                              "level": 98, "dateUTC": "2026-09-10T08:30:00"}]
                 return []
 
@@ -3902,7 +3919,7 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
         with patch("trader.notifications.time.time", return_value=now):
             self.assertIsNone(NotificationHistoryWorker._resolve(Client(), job))
             frozen = (job["search_from_epoch"], job["search_to_epoch"])
-            events.append({"dealId": "late", "source": "SL", "status": "ACCEPTED",
+            events.append({"dealId": "late", "source": "SL", "type": "POSITION", "status": "ACCEPTED",
                            "level": 97})
             self.assertEqual(
                 NotificationHistoryWorker._resolve(Client(), job),
@@ -3926,7 +3943,7 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
             def activity(self, deal_id="", last_period=86400, *, from_date="", to_date=""):
                 calls.append((deal_id, from_date, to_date, last_period))
                 if len(calls) == 6:
-                    return [{"dealId": "old-deal", "source": "SL", "status": "ACCEPTED",
+                    return [{"dealId": "old-deal", "source": "SL", "type": "POSITION", "status": "ACCEPTED",
                              "type": "POSITION", "level": 97}]
                 return []
 
@@ -4159,7 +4176,7 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
     def test_history_worker_resolves_late_close_without_trading_mutation(self):
         client = Mock()
         client.activity.return_value = [{
-            "dealId": "buy-270", "source": "SL", "status": "ACCEPTED",
+            "dealId": "buy-270", "source": "SL", "type": "POSITION", "status": "ACCEPTED",
             "type": "POSITION", "details": {"level": 4285.04},
         }]
         job = {"waiting": {"deal_id": "buy-270"}}
@@ -5437,7 +5454,7 @@ class BrokerEvidenceRegressionTest(unittest.TestCase):
                  "type": "WORKING_ORDER", "status": "EXECUTED"},
                 {"dateUTC": "2026-09-22T03:41:12.182Z", "dealId": "sell-old",
                  "type": "POSITION", "status": "ACCEPTED", "source": "SL",
-                 "details": {"level": 4341.40}},
+                 "details": {"level": 4341.40, "size": 10}},
             ]
             candidate = {"dealId": "buy-new", "workingOrderId": "buy-order",
                          "direction": "BUY", "level": 4340.18, "size": 10,
@@ -6444,11 +6461,16 @@ class Attempt286UnifiedLedgerRegressionTest(unittest.TestCase):
             self.assertIn("CYCLE_LEDGER_FINAL", archived)
             self.assertIn('"deal_history"', archived)
             self.assertEqual((bot.state.deal_history, bot.state.attempt_history,
-                              bot.state.pending_transaction_jobs), ([], [], []))
+                              len(bot.state.pending_transaction_jobs)), ([], [], 1))
             self.assertEqual(bot.state.completed_cycles, 1)
+            bot.notification_worker = None; bot.transaction_worker = Mock()
+            bot.transaction_worker.results.return_value = []
+            bot._queue_pending_reports = Mock()
+            bot._tick_notifications(now=1)
+            bot.transaction_worker.submit.assert_called_once()
             restored = CycleState.load(path)
             self.assertEqual((restored.deal_history, restored.attempt_history,
-                              restored.pending_transaction_jobs), ([], [], []))
+                              len(restored.pending_transaction_jobs)), ([], [], 1))
 
     def test_late_removed_transaction_job_result_cannot_change_new_cycle(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -6494,3 +6516,201 @@ class Attempt286UnifiedLedgerRegressionTest(unittest.TestCase):
             self.assertEqual(bot.state.broker_transaction_pnl, None)
             self.assertNotIn("amount", bot.state.pending_transaction_jobs[0])
             bot.transaction_worker.acknowledge.assert_called_once_with("stale")
+
+    def test_valid_completed_cycle_transaction_job_updates_summary_not_new_cycle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self.make_bot(str(Path(directory) / "state.json"))
+            bot.state.cycle_id = 287; bot.state.general_recovery = D("6.6")
+            bot.state.completed_attempt_summaries = [{"cycle_id": 286, "attempt_id": 286}]
+            bot.state.pending_transaction_jobs = [{"key": "old-valid", "cycle_id": 286,
+                "attempt_id": 286, "deal_ids": ["old"], "search_from_epoch": 1,
+                "generation": bot.state.transaction_generation, "next_check_at": 0}]
+            bot.notification_worker = None; bot.telegram = Mock(); bot._queue_pending_reports = Mock()
+            bot.transaction_worker = Mock()
+            bot.transaction_worker.results.return_value = [{"key": "old-valid", "result": {
+                "status": "COMPLETE_SNAPSHOT", "amount": D("-11.2"), "currency": "USD",
+                "components": [], "observed_to_epoch": 10}}]
+            before = (bot.state.general_recovery, bot.state.scenario,
+                      bot.state.long.deal_id, bot.state.short.deal_id)
+            bot._tick_notifications(now=10)
+            self.assertEqual((bot.state.general_recovery, bot.state.scenario,
+                              bot.state.long.deal_id, bot.state.short.deal_id), before)
+            summary = bot.state.completed_attempt_summaries[0]
+            self.assertEqual((summary["broker_transaction_status"],
+                              summary["broker_transaction_pnl"]),
+                             ("COMPLETE_SNAPSHOT", "-11.2"))
+
+    def test_trigger_create_confirmation_timeout_never_reposts_and_survives_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "state.json")
+            bot = self.make_bot(path)
+            stopped = bot.strategy.stopped("SELL", D("4291.43"), "sell-stop")
+            bot.capital.working_orders.return_value = []
+            bot.capital.working_stop.return_value = "trigger-ref"
+            bot.capital.wait_confirmation.side_effect = CapitalError("confirmation delayed")
+            bot.capital.quote.return_value = (D("4300"), D("4300.1"))
+            bot._create_trigger(stopped)
+            bot._create_trigger(stopped)
+            self.assertEqual(bot.capital.working_stop.call_count, 1)
+            self.assertEqual(stopped.pending_trigger_create_reference, "trigger-ref")
+
+            restored = CycleState.load(path)
+            bot.state = restored; bot.strategy = Strategy(bot.cfg, restored)
+            bot.capital.wait_confirmation.side_effect = None
+            bot.capital.wait_confirmation.return_value = {
+                "dealStatus": "ACCEPTED", "dealId": "trigger-order",
+            }
+            bot._create_trigger(restored.short)
+            self.assertEqual(restored.short.trigger_id, "trigger-order")
+            self.assertFalse(restored.short.pending_trigger_create)
+            self.assertEqual(bot.capital.working_stop.call_count, 1)
+
+    def test_trigger_post_timeout_blocks_repost_until_owned_order_is_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self.make_bot(str(Path(directory) / "state.json"))
+            stopped = bot.strategy.stopped("SELL", D("4291.43"), "sell-stop")
+            bot.capital.working_orders.return_value = []
+            bot.capital.working_stop.side_effect = CapitalError("transport timeout")
+            bot.capital.quote.return_value = (D("4300"), D("4300.1"))
+            bot._create_trigger(stopped); bot._create_trigger(stopped)
+            self.assertEqual(bot.capital.working_stop.call_count, 1)
+            self.assertTrue(stopped.pending_trigger_create_unknown_post)
+            bot.capital.working_orders.return_value = [{"workingOrderData": {
+                "dealId": "delayed-order", "epic": bot.cfg.epic, "direction": "SELL",
+                "orderLevel": 4290.36, "orderSize": 10,
+            }}]
+            bot._create_trigger(stopped)
+            self.assertEqual(stopped.trigger_id, "delayed-order")
+            self.assertEqual(bot.capital.working_stop.call_count, 1)
+
+    def test_unknown_tp_market_delete_is_resolved_from_owned_user_close_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "state.json")
+            bot = self.make_bot(path)
+            bot.state.short.open = False; bot.state.short.trigger_id = "owned-trigger"
+            bot.state.phase = "LONG_ONLY"
+            bot.capital.close_position.side_effect = CapitalError("response lost")
+            bot._close_reached_take_profit(bot.state.long)
+            self.assertEqual(bot.capital.close_position.call_count, 1)
+            self.assertTrue(bot.state.pending_close_unknown_delete)
+            event = {"dateUTC": "2026-01-01T00:00:01Z", "dealId": "buy-1",
+                     "source": "USER", "type": "POSITION", "status": "ACCEPTED",
+                     "details": {"direction": "SELL", "level": 4292, "size": 10}}
+            bot.capital.positions.return_value = []
+            bot.capital.activity.side_effect = lambda *args, **kwargs: [event]
+            bot.capital.delete_working_order.return_value = True
+            bot._tick_cycle()
+            self.assertFalse(bot.state.active)
+            self.assertEqual(bot.capital.close_position.call_count, 1)
+            self.assertEqual(bot.state.pending_close_direction, "")
+
+    def test_visible_partial_stop_uses_each_execution_identity_and_actual_size(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self.make_bot(str(Path(directory) / "state.json"))
+            bot.state.general_recovery = D("8")
+            leg = bot.state.long; leg.current_entry = D("100"); leg.size = D("10")
+            leg.stop = leg.confirmed_stop = D("99")
+            bot.state.short.current_entry = D("99.5"); bot.state.short.size = D("10")
+            first = {"id": "partial-7", "dateUTC": "2026-01-01T00:00:01Z",
+                     "dealId": "buy-1", "source": "SL", "type": "POSITION",
+                     "status": "ACCEPTED", "details": {"level": 98.9,
+                     "stopLevel": 99, "size": 7, "direction": "SELL"}}
+            bot.capital.positions.return_value = [
+                {"position": {"dealId": "buy-1", "direction": "BUY", "level": 100,
+                              "size": 3}, "market": {"epic": bot.cfg.epic}},
+                {"position": {"dealId": "sell-1", "direction": "SELL", "level": 99.5,
+                              "size": 10}, "market": {"epic": bot.cfg.epic}},
+            ]
+            bot.capital.activity.return_value = [first]
+            bot._tick_cycle()
+            self.assertEqual((leg.size, bot.state.general_recovery,
+                              bot.state.realized_loss_money), (D("3"), D("8.7"), D("7.7")))
+            final = {"id": "partial-3", "dateUTC": "2026-01-01T00:00:02Z",
+                     "dealId": "buy-1", "source": "SL", "type": "POSITION",
+                     "status": "ACCEPTED", "details": {"level": 98.8,
+                     "stopLevel": 99, "size": 3, "direction": "SELL"}}
+            bot.capital.positions.return_value = [
+                {"position": {"dealId": "sell-1", "direction": "SELL", "level": 99.5,
+                              "size": 10}, "market": {"epic": bot.cfg.epic}},
+            ]
+            bot.capital.activity.return_value = [final, first]
+            bot._apply_protection = Mock(return_value=True); bot._create_trigger = Mock()
+            with patch("trader.app.time.sleep"):
+                bot._tick_cycle()
+            self.assertEqual((bot.state.general_recovery, bot.state.realized_loss_money),
+                             (D("9.3"), D("11.3")))
+            self.assertEqual(bot.state.pending_recovery[0]["pending_d_value"], "10")
+            before = (bot.state.general_recovery, bot.state.realized_loss_money)
+            bot._tick_cycle()
+            self.assertEqual((bot.state.general_recovery, bot.state.realized_loss_money), before)
+
+    def test_close_event_requires_position_accepted_and_rejects_conflict(self):
+        base = {"dealId": "d", "source": "SL", "details": {"level": 99, "size": 1}}
+        self.assertIsNone(find_close_event([{**base, "type": "POSITION",
+                                             "status": "UNKNOWN"}], "d", "SL"))
+        self.assertIsNone(find_close_event([{**base, "type": "WORKING_ORDER",
+                                             "status": "ACCEPTED"}], "d", "SL"))
+        self.assertIsNone(find_close_event([{**base, "type": "POSITION"}], "d", "SL"))
+        accepted = find_close_event([{**base, "type": "POSITION",
+                                      "status": "ACCEPTED"}], "d", "SL")
+        self.assertIsNotNone(accepted)
+
+    def test_global_close_fallback_persists_full_evidence_across_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "state.json")
+            bot = self.make_bot(path)
+            event = {"id": "global-sl", "dateUTC": "2026-01-01T00:00:01Z",
+                     "dealId": "buy-1", "source": "SL", "type": "POSITION",
+                     "status": "ACCEPTED", "details": {"level": 4289.6,
+                     "stopLevel": 4289.72, "profitLevel": 4292, "size": 10}}
+            bot.capital.activity.side_effect = lambda deal_id="", **kwargs: ([] if deal_id else [event])
+            with patch("trader.app.time.sleep"):
+                self.assertEqual(bot._wait_closing_fill(bot.state.long, attempts=4), D("4289.6"))
+            bot.state.save(path)
+            restored = CycleState.load(path)
+            record = next(item for item in restored.deal_history if item["deal_id"] == "buy-1")
+            self.assertEqual((record["close_event_id"], record["close_size"],
+                              record["close_execution_time"], record["effective_stop"]),
+                             ("global-sl", "10", "2026-01-01T00:00:01+00:00", "4289.72"))
+            bot.state = restored; bot.strategy = Strategy(bot.cfg, restored)
+            bot.capital.activity.return_value = []
+            bot.capital.activity.side_effect = None
+            saved = bot._saved_close_event(restored.long, "SL")
+            self.assertEqual((saved.event_id, saved.size, saved.timestamp.isoformat()),
+                             ("global-sl", D("10"), "2026-01-01T00:00:01+00:00"))
+
+    def test_actual_attempt_result_sums_partial_prices_instead_of_last_fill(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self.make_bot(str(Path(directory) / "state.json"))
+            bot.state.pending_actual_attempt_id = 286
+            bot.state.pending_actual_deal_ids = ["buy-1"]
+            bot.state.attempt_history = [{"attempt_id": 286, "cycle_id": 286}]
+            record = next(item for item in bot.state.deal_history if item["deal_id"] == "buy-1")
+            record.update({"entry": "100", "size": "10", "close_level": "98.8",
+                           "close_source": "SL", "partial_closes": [{
+                               "event_id": "part-7", "source": "SL", "fill": "98.9",
+                               "size": "7", "execution_time": "2026-01-01T00:00:01+00:00"}]})
+            self.assertTrue(bot._refresh_actual_attempt_result())
+            self.assertEqual(bot.state.attempt_history[0]["actual_result"], "-11.3")
+
+    def test_scenario_nine_finalization_resumes_after_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "state.json")
+            bot = self.make_bot(path)
+            bot.state.active = False; bot.state.completed_cycles = 1
+            bot.state.scenario = 9; bot.state.phase = "COMPLETED"
+            bot.state.scenario_nine_long_fill = D("90")
+            bot.state.scenario_nine_short_fill = D("110")
+            bot.state.pending_finalization = {"kind": "SCENARIO_9", "attempt_id": 286,
+                "long_fill": "90", "short_fill": "110", "paused": False}
+            bot.state.save(path)
+            restored = CycleState.load(path)
+            bot.state = restored; bot.strategy = Strategy(bot.cfg, restored)
+            bot.capital.positions.return_value = []
+            bot.capital.working_orders.return_value = []
+            bot.reconcile_startup()
+            self.assertEqual((restored.phase, restored.armed), ("FILTER", True))
+            self.assertFalse(restored.pending_finalization)
+            self.assertEqual(len(restored.report_outbox), 1)
+            bot.reconcile_startup()
+            self.assertEqual((restored.completed_cycles, len(restored.report_outbox)), (1, 1))

@@ -140,6 +140,17 @@ diagnostic log записывается `CYCLE_LEDGER_FINAL` со сделкам
 и transaction jobs этого `cycle_id` очищаются. Агрегаты/counters и durable outbox сохраняются;
 late worker result с удалённым key/generation не может восстановить старую историю в новом цикле.
 
+Pending transaction job при этом не является рабочей торговой историей и не удаляется только из-за
+завершения цикла. Она хранит собственные `cycle_id`, `attempt_id`, deal IDs и generation, работает
+в background worker и обновляет отдельный summary завершённой попытки. Результат такой job не
+может менять GENERAL_RECOVERY или состояние нового активного цикла.
+
+Создание автоматического Trigger и MARKET-close достигнутого TP используют правило
+`persist intent → mutation → persist dealReference → confirmation/reconciliation`. Неизвестный
+ответ POST/DELETE сохраняет ownership и блокирует повторную mutation. Для chronology связанный
+`WORKING_ORDER/EXECUTED` имеет приоритет над более поздним `POSITION/ACCEPTED`; оба источника
+никогда не подменяются временем REST-получения или `position.createdDateUTC`.
+
 ## Scenario 9, actual P&L и migration
 
 S8 SL начисляет D + SL slippage; linked S8→S9 reentry обычно начисляет только Trigger slippage и

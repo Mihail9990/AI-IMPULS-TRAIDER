@@ -224,9 +224,7 @@ class Bot:
                         transaction_worker.acknowledge(completed["key"])
                     continue
                 if (int(job.get("generation", self.state.transaction_generation))
-                        != self.state.transaction_generation
-                        or int(job.get("cycle_id", self.state.cycle_id) or 0)
-                        != self.state.cycle_id):
+                        != self.state.transaction_generation):
                     if isinstance(transaction_worker, TransactionHistoryWorker):
                         transaction_worker.acknowledge(completed["key"])
                     continue
@@ -254,15 +252,29 @@ class Bot:
                     job["result_fingerprint"] = fingerprint
                     attempt = next((item for item in self.state.attempt_history
                                     if item.get("attempt_id") == job.get("attempt_id")), None)
+                    if attempt is None:
+                        attempt = next((item for item in self.state.completed_attempt_summaries
+                                        if item.get("attempt_id") == job.get("attempt_id")
+                                        and item.get("cycle_id") == job.get("cycle_id")), None)
                     if attempt is not None:
                         attempt["broker_transaction_status"] = job["status"]
                         attempt["broker_transaction_pnl"] = job["amount"]
                         attempt["broker_transaction_currency"] = job["currency"]
                         attempt["broker_transaction_components"] = list(job["components"])
-                    if job.get("attempt_id") == max(
+                        if attempt in self.state.completed_attempt_summaries:
+                            self._send_report(
+                                "💵 Поздняя сверка broker transactions завершённого цикла\n"
+                                f"Цикл: {job.get('cycle_id')}; попытка: {job.get('attempt_id')}\n"
+                                f"Статус: {job['status']}; P&L: {job['amount']} "
+                                f"{job['currency'] or 'account currency'}",
+                                key=f"transaction-result:{job['key']}:{fingerprint}",
+                            )
+                    if (int(job.get("cycle_id", 0) or 0) == self.state.cycle_id
+                            and not self.state.active
+                            and job.get("attempt_id") == max(
                         (int(item.get("attempt_id", 0) or 0)
                          for item in self.state.pending_transaction_jobs), default=0
-                    ):
+                    )):
                         self.state.broker_transaction_status = job["status"]
                         self.state.broker_transaction_pnl = (
                             D(job["amount"]) if job["amount"] is not None else None
@@ -404,6 +416,11 @@ class Bot:
         LOG.info("CYCLE_LEDGER_FINAL %s", json.dumps(archive, ensure_ascii=False, sort_keys=True))
         self.state.completed_cycle_report = report
         completed_cycle_id = self.state.cycle_id
+        for attempt in self.state.attempt_history:
+            if not any(item.get("cycle_id") == attempt.get("cycle_id")
+                       and item.get("attempt_id") == attempt.get("attempt_id")
+                       for item in self.state.completed_attempt_summaries):
+                self.state.completed_attempt_summaries.append(dict(attempt))
         self.state.deal_history.clear()
         self.state.attempt_history.clear()
         self.state.recovery_events.clear()
@@ -419,15 +436,10 @@ class Bot:
             job for job in self.state.pending_notification_jobs
             if int(job.get("cycle_id", 0) or 0) != completed_cycle_id
         ]
-        self.state.pending_transaction_jobs[:] = [
-            job for job in self.state.pending_transaction_jobs
-            if int(job.get("cycle_id", 0) or 0) != completed_cycle_id
-        ]
         self.state.broker_transaction_pnl = None
         self.state.broker_transaction_currency = ""
         self.state.broker_transaction_status = "UNAVAILABLE"
         self.state.broker_transaction_components.clear()
-        self.state.transaction_generation += 1
         self.state.long = self.state.short = None
 
     def _finish_failed_initial_attempt(
@@ -1487,7 +1499,7 @@ class Bot:
         if self.state.phase == "DOUBLE_SL_RECONCILING":
             self._tick_double_sl_reconciling()
             return
-        if self.state.pending_close_reference:
+        if self.state.pending_close_direction:
             self._resume_pending_close()
             return
         if self.state.pending_tp_direction and self.state.pending_tp_fill is not None:
@@ -1496,6 +1508,8 @@ class Bot:
         if self._resume_pending_market():
             return
         positions = self._cycle_positions()
+        if self._reconcile_visible_partial_closes(positions):
+            return
         if self.state.phase in {"LONG_ONLY", "SHORT_ONLY"}:
             survivor = self.state.long if self.state.phase == "LONG_ONLY" else self.state.short
             stopped = self.state.short if self.state.phase == "LONG_ONLY" else self.state.long
@@ -1830,6 +1844,61 @@ class Bot:
             return
         self._create_trigger(stopped)
         self.state.save(self.cfg.state_file)
+
+    def _reconcile_visible_partial_closes(self, positions: dict[str, dict]) -> bool:
+        """Apply exact broker partial executions before ordinary position-presence routing."""
+        changed = False
+        for leg in (self.state.long, self.state.short):
+            if not leg or not leg.open or leg.deal_id not in positions:
+                continue
+            remote_size_value = positions[leg.deal_id].get("size")
+            if remote_size_value is None:
+                continue
+            remote_size = D(str(remote_size_value))
+            if remote_size >= leg.size:
+                continue
+            reduction = leg.size - remote_size
+            try:
+                activity = self.capital.activity(leg.deal_id)
+                if not activity:
+                    activity = self.capital.activity()
+            except CapitalError:
+                return True
+            candidates = [event for event in normalize_events(activity)
+                          if event.deal_id == leg.deal_id
+                          and event.event_type == "POSITION"
+                          and event.status == "ACCEPTED"
+                          and event.source in {"SL", "TP"}
+                          and event.level is not None and event.size is not None
+                          and f"partial:{leg.deal_id}:{event.event_id}" not in self.state.processed_events]
+            selected, total = [], D("0")
+            for event in candidates:
+                if total + event.size <= reduction:
+                    selected.append(event); total += event.size
+            if total != reduction:
+                LOG.info("Partial close size awaits exact evidence dealId=%s local=%s remote=%s",
+                         leg.deal_id, leg.size, remote_size)
+                return True
+            for event in selected:
+                marker = f"partial:{leg.deal_id}:{event.event_id}"
+                if event.source == "SL":
+                    if self._apply_confirmed_stop_event(leg, event, activity) is None:
+                        return True
+                else:
+                    status = self._remember_close_event(leg, event,
+                                                        scenario_at_close=self.state.scenario)
+                    if status == "CONFLICT":
+                        self._manual(f"Конфликт partial TP evidence для {leg.deal_id}")
+                        return True
+                    leg.size -= event.size
+                    leg.size_confirmation = "broker_partial_close"
+                    if self.state.long and self.state.short:
+                        self.strategy.refresh_targets()
+                self.state.processed_events.append(marker)
+                changed = True
+        if changed:
+            self.state.save(self.cfg.state_file)
+        return changed
 
     def _resume_pending_market(self) -> bool:
         """Resolve every submitted MARKET before ordinary SL/TP logic can complete a cycle."""
@@ -2201,7 +2270,9 @@ class Bot:
             (item for item in reversed(self.state.deal_history)
              if item.get("deal_id") == leg.deal_id), None,
         )
-        opened_scenario = int((opened_record or {}).get("scenario", self.state.scenario))
+        if opened_record is None:
+            return 1 if self.state.scenario == 1 else None
+        opened_scenario = int(opened_record.get("scenario", self.state.scenario))
         if self.state.scenario <= opened_scenario:
             return self.state.scenario
         unknown = datetime.min.replace(tzinfo=timezone.utc)
@@ -2308,7 +2379,7 @@ class Bot:
         fully_closed = close_event.size == leg.size
         return self.strategy.stopped(
             leg.direction, close_event.level,
-            f"stop:{leg.deal_id}:{close_event.level}",
+            f"stop:{leg.deal_id}:{close_event.event_id}",
             scenario_at_close=scenario,
             broker_execution_time=close_event.timestamp.isoformat(),
             actual_closed_size=close_event.size, fully_closed=fully_closed,
@@ -2421,19 +2492,23 @@ class Bot:
         if survivor_sl is None or survivor_sl.level is None:
             return False
         opened = find_trigger_open_event(activity, stopped.trigger_id, stopped.direction)
-        if opened is not None and opened.deal_id == str(candidate.get("dealId", "")):
-            opened_time = opened.timestamp
-        else:
-            executed = find_working_order_execution(activity, stopped.trigger_id)
-            if (executed is None
-                    or str(candidate.get("workingOrderId", "")) != stopped.trigger_id
-                    or str(candidate.get("direction", "")) != stopped.direction
-                    or not str(candidate.get("dealId", ""))):
-                LOG.info("Trigger execution activity is still synchronizing: %s", stopped.trigger_id)
-                return False
-            # WORKING_ORDER/EXECUTED is the broker execution clock. Position.createdDateUTC is a
-            # later publication/creation field and is deliberately not used as a substitute.
+        executed = find_working_order_execution(activity, stopped.trigger_id)
+        if (str(candidate.get("workingOrderId", "")) != stopped.trigger_id
+                or str(candidate.get("direction", "")) != stopped.direction
+                or not str(candidate.get("dealId", ""))
+                or (opened is not None
+                    and opened.deal_id != str(candidate.get("dealId", "")))):
+            LOG.info("Trigger execution identity is still synchronizing: %s", stopped.trigger_id)
+            return False
+        # Execution always wins over the later POSITION publication event when both are linked.
+        if executed is not None:
             opened_time = executed.timestamp
+            opened_time_source = "WORKING_ORDER_EXECUTED"
+        elif opened is not None:
+            opened_time = opened.timestamp
+            opened_time_source = "POSITION_ACCEPTED"
+        else:
+            return False
         if (survivor_sl.timestamp == datetime.min.replace(tzinfo=timezone.utc)
                 or opened_time == datetime.min.replace(tzinfo=timezone.utc)
                 or survivor_sl.timestamp == opened_time):
@@ -2446,10 +2521,6 @@ class Bot:
         reopened_fill = D(str(candidate["level"]))
         reopened_id = str(candidate["dealId"])
         previous_scenario = self.state.scenario
-        close_scenario = (
-            previous_scenario if survivor_sl.timestamp < opened_time
-            else previous_scenario + 1
-        )
         self.strategy.reopened(
             stopped.direction,
             reopened_fill,
@@ -2457,15 +2528,13 @@ class Bot:
             f"reopen:{reopened_id}",
             actual_size=(D(str(candidate["size"])) if candidate.get("size") is not None else None),
             working_order_id=stopped.trigger_id,
+            broker_execution_time=opened_time.isoformat(),
         )
+        transition = self.state.scenario_transitions[-1]
+        transition["time_source"] = opened_time_source
         stopped.deal_reference = str(candidate.get("dealReference") or stopped.deal_reference)
-        self.strategy.stopped(
-            survivor.direction,
-            stop_fill,
-            f"stop:{survivor.deal_id}:{stop_fill}",
-            scenario_at_close=close_scenario,
-            broker_execution_time=survivor_sl.timestamp.isoformat(),
-        )
+        if self._apply_confirmed_stop_event(survivor, survivor_sl, activity) is None:
+            return True
         if self.state.scenario == self.cfg.max_scenarios:
             self._enter_manual_nine()
             return True
@@ -2496,6 +2565,10 @@ class Bot:
         opened = find_trigger_open_event(activity, stopped.trigger_id, stopped.direction)
         if opened is None or opened.level is None or not opened.deal_id:
             return False
+        executed = find_working_order_execution(activity, stopped.trigger_id)
+        opened_clock = executed or opened
+        opened_time_source = ("WORKING_ORDER_EXECUTED" if executed is not None
+                              else "POSITION_ACCEPTED")
 
         survivor_sl = find_close_event(activity, survivor.deal_id, "SL")
         survivor_tp = find_close_event(activity, survivor.deal_id, "TP")
@@ -2537,8 +2610,8 @@ class Bot:
             return False
 
         unknown_time = datetime.min.replace(tzinfo=timezone.utc)
-        if (survivor_sl.timestamp == unknown_time or opened.timestamp == unknown_time
-                or survivor_sl.timestamp == opened.timestamp):
+        if (survivor_sl.timestamp == unknown_time or opened_clock.timestamp == unknown_time
+                or survivor_sl.timestamp == opened_clock.timestamp):
             self._manual(
                 "Broker chronology Trigger/reentry и survivor SL неоднозначна; "
                 "scenario_at_close не угадан"
@@ -2549,19 +2622,14 @@ class Bot:
             self.strategy.reopened(
                 stopped.direction, opened.level, opened.deal_id, reopen_key,
                 actual_size=opened.size, working_order_id=stopped.trigger_id,
+                broker_execution_time=opened_clock.timestamp.isoformat(),
             )
+            self.state.scenario_transitions[-1]["time_source"] = opened_time_source
             stopped.deal_reference = opened.deal_reference or stopped.deal_reference
         survivor_stop_key = f"stop:{survivor.deal_id}:{survivor_sl.level}"
         if survivor_stop_key not in self.state.processed_events:
-            close_scenario = (
-                self.state.scenario - 1
-                if survivor_sl.timestamp < opened.timestamp else self.state.scenario
-            )
-            self.strategy.stopped(
-                survivor.direction, survivor_sl.level, survivor_stop_key,
-                scenario_at_close=close_scenario,
-                broker_execution_time=survivor_sl.timestamp.isoformat(),
-            )
+            if self._apply_confirmed_stop_event(survivor, survivor_sl, activity) is None:
+                return True
 
         if reopened_tp is not None and reopened_tp.level is not None:
             self._complete_cycle(stopped.direction, reopened_tp.level)
@@ -2646,26 +2714,78 @@ class Bot:
                 leg, projected_target, leg.pending_market_reason or "ожидание confirmation"
             )
             return
+        def accept(order_id: str, reference: str = "") -> None:
+            leg.trigger_id = order_id
+            leg.trigger_reference = reference or leg.pending_trigger_create_reference
+            leg.pending_trigger_create = False
+            leg.pending_trigger_create_reference = ""
+            leg.pending_trigger_create_unknown_post = False
+            leg.pending_trigger_create_cycle_id = 0
+            leg.pending_trigger_create_attempt = 0
+            self._link_pending_closure_trigger(leg)
+            if order_id not in self.state.cycle_trigger_ids:
+                self.state.cycle_trigger_ids.append(order_id)
+            self.state.save(self.cfg.state_file)
+
+        # A prior POST remains the only mutation until its fate is proved. A single empty
+        # /workingorders snapshot is normal eventual consistency, not permission for another POST.
+        if leg.pending_trigger_create:
+            if (leg.pending_trigger_create_cycle_id != self.state.cycle_id
+                    or leg.pending_trigger_create_attempt != self.state.cycle_attempt):
+                self._manual(
+                    f"Pending Trigger {leg.direction} принадлежит другому cycle/attempt; "
+                    "повторный POST заблокирован"
+                )
+                return
+            existing = self._find_order(leg)
+            if existing and existing.get("dealId"):
+                accept(str(existing["dealId"]))
+                return
+            reference = leg.pending_trigger_create_reference
+            if not reference:
+                self.state.save(self.cfg.state_file)
+                return
+            try:
+                result = self.capital.wait_confirmation(reference)
+            except Exception as exc:
+                LOG.info("Trigger confirmation remains pending reference=%s: %s", reference, exc)
+                self.state.save(self.cfg.state_file)
+                return
+            if result.get("dealStatus") == "ACCEPTED" and result.get("dealId"):
+                accept(str(result["dealId"]), reference)
+                return
+            if result.get("dealStatus") != "REJECTED":
+                self.state.save(self.cfg.state_file)
+                return
+            last_error = result.get("reason") or last_error
+            leg.pending_trigger_create = False
+            leg.pending_trigger_create_reference = ""
+            leg.pending_trigger_create_unknown_post = False
+            self.state.save(self.cfg.state_file)
+            if self._trigger_level_passed(leg) and self._is_crossed_level_rejection(last_error):
+                self._open_passed_trigger_at_market(leg, projected_target, last_error)
+            return
         for _ in range(self.execution_policy.attempts):
             existing = self._find_order(leg)
             if existing:
-                leg.trigger_id = str(existing["dealId"])
-                self._link_pending_closure_trigger(leg)
-                if leg.trigger_id not in self.state.cycle_trigger_ids:
-                    self.state.cycle_trigger_ids.append(leg.trigger_id)
+                accept(str(existing["dealId"]))
                 return
+            leg.pending_trigger_create = True
+            leg.pending_trigger_create_unknown_post = True
+            leg.pending_trigger_create_cycle_id = self.state.cycle_id
+            leg.pending_trigger_create_attempt = self.state.cycle_attempt
+            self.state.save(self.cfg.state_file)
             try:
                 reference = self.capital.working_stop(
                     self.cfg.epic, leg.direction, projected_size, leg.original_trigger_level,
                     projected_stop, projected_target
                 )
+                leg.pending_trigger_create_reference = reference
+                leg.pending_trigger_create_unknown_post = False
+                self.state.save(self.cfg.state_file)
                 result = self.capital.wait_confirmation(reference)
                 if result.get("dealStatus") == "ACCEPTED" and result.get("dealId"):
-                    leg.trigger_reference = reference
-                    leg.trigger_id = str(result["dealId"])
-                    self._link_pending_closure_trigger(leg)
-                    if leg.trigger_id not in self.state.cycle_trigger_ids:
-                        self.state.cycle_trigger_ids.append(leg.trigger_id)
+                    accept(str(result["dealId"]), reference)
                     self._send_report(
                         f"📌 {cycle_heading(self.state, 'Trigger создан и подтверждён брокером', next_scenario=self.state.scenario + 1)}\n"
                         f"Сторона={leg.direction}; orderId={leg.trigger_id}; объём будущей позиции="
@@ -2681,14 +2801,24 @@ class Bot:
                     )
                     return
                 last_error = result.get("reason") or last_error
+                if result.get("dealStatus") == "REJECTED":
+                    leg.pending_trigger_create = False
+                    leg.pending_trigger_create_reference = ""
+                    leg.pending_trigger_create_unknown_post = False
+                    self.state.save(self.cfg.state_file)
                 if self._trigger_level_passed(leg) and self._is_crossed_level_rejection(last_error):
                     self._open_passed_trigger_at_market(leg, projected_target, last_error)
                     return
             except Exception as exc:
                 last_error = str(exc)
                 if self._trigger_level_passed(leg) and self._is_crossed_level_rejection(last_error):
+                    leg.pending_trigger_create = False
+                    leg.pending_trigger_create_reference = ""
+                    leg.pending_trigger_create_unknown_post = False
                     self._open_passed_trigger_at_market(leg, projected_target, last_error)
                     return
+                self.state.save(self.cfg.state_file)
+                return
         self._manual(f"Trigger {leg.direction} не создан после 4 попыток: {last_error}")
 
     def _link_pending_closure_trigger(self, leg: Leg) -> None:
@@ -3189,6 +3319,10 @@ class Bot:
             ) from position_error
 
     def reconcile_startup(self) -> None:
+        if self.state.pending_finalization:
+            self._resume_scenario_nine_finalization()
+            self.reconciled = True
+            return
         positions = self._cycle_positions()
         if self.state.active and not positions:
             # Immediately after creates/updates Capital.com can briefly return an empty list.
@@ -3234,6 +3368,10 @@ class Bot:
     def _recover_active_cycle(self, positions: dict[str, dict], orders: list[dict]) -> None:
         """Replay unambiguous stop/TP/trigger events that happened while the bot was offline."""
         self._migrate_recovery_model()
+        if self.state.pending_close_direction:
+            self._resume_pending_close()
+            if self.state.pending_close_direction or not self.state.active:
+                return
         if self.state.pending_tp_direction and self.state.pending_tp_fill is not None:
             self._finish_reached_take_profit()
             return
@@ -3273,8 +3411,14 @@ class Bot:
                             raise RuntimeError(
                                 f"закрытие {survivor.deal_id} по TP не подтверждено"
                             )
-                        if stopped.trigger_id and stopped.trigger_id in gold_orders:
-                            self.capital.delete_working_order(stopped.trigger_id)
+                        if stopped.trigger_id:
+                            self.state.pending_tp_direction = survivor.direction
+                            self.state.pending_tp_fill = fill
+                            self.state.save(self.cfg.state_file)
+                            self._finish_reached_take_profit()
+                            if self.state.active:
+                                return
+                            break
                         self._complete_cycle(survivor.direction, fill)
                         self.state.armed = not self.state.paused
                         self.state.phase = "FILTER" if self.state.armed else "PAUSED"
@@ -3480,6 +3624,13 @@ class Bot:
         scenario_nine_deals = list(dict.fromkeys(self.state.attempt_deal_ids))
         attempt_id = self.state.active_attempt_id
         self.strategy.complete_scenario_nine(long_fill, short_fill, extra_loss)
+        self.state.pending_finalization = {
+            "kind": "SCENARIO_9", "attempt_id": attempt_id,
+            "long_fill": str(long_fill), "short_fill": str(short_fill),
+            "paused": self.state.paused, "deal_ids": scenario_nine_deals,
+            "search_from_epoch": time.time() - 86400,
+        }
+        self.state.save(self.cfg.state_file)
         self._get_continuation().release()
         self.state.remember_attempt(
             "COMPLETED_SCENARIO_9", self.state.net_cycle_result,
@@ -3509,19 +3660,56 @@ class Bot:
             leg.open = False
             leg.stop = leg.take_profit = None
             leg.trigger_id = leg.trigger_reference = ""
-        self.state.armed = not self.state.paused
-        self.state.phase = "FILTER" if self.state.armed else "PAUSED"
         LOG.info(
             "TRADING ATTEMPT %s COMPLETED scenario=9 calculated_result=%s",
             attempt_id, self.state.net_cycle_result,
         )
         self.state.active_attempt_id = 0
+        self._resume_scenario_nine_finalization()
+
+    def _resume_scenario_nine_finalization(self) -> None:
+        operation = self.state.pending_finalization
+        if not operation or operation.get("kind") != "SCENARIO_9":
+            return
+        long_fill = D(str(operation["long_fill"]))
+        short_fill = D(str(operation["short_fill"]))
+        attempt_id = int(operation.get("attempt_id", 0) or 0)
+        deal_ids = list(operation.get("deal_ids", self.state.pending_actual_deal_ids))
+        if attempt_id and not any(item.get("attempt_id") == attempt_id
+                                  for item in self.state.attempt_history):
+            saved_active_attempt = self.state.active_attempt_id
+            self.state.active_attempt_id = attempt_id
+            self.state.remember_attempt(
+                "COMPLETED_SCENARIO_9", self.state.net_cycle_result,
+                include_in_total=False, result_kind="STRATEGY_CALCULATED_NOT_BROKER_PNL",
+                completed_cycle=self.state.completed_cycles,
+            )
+            self.state.active_attempt_id = saved_active_attempt
+        self.state.pending_actual_attempt_id = attempt_id
+        self.state.pending_actual_deal_ids = deal_ids
+        transaction_key = f"transactions:{self.state.cycle_id}:{attempt_id}"
+        if attempt_id and not any(job.get("key") == transaction_key
+                                  for job in self.state.pending_transaction_jobs):
+            self.state.pending_transaction_jobs.append({
+                "key": transaction_key, "cycle_id": self.state.cycle_id,
+                "attempt_id": attempt_id, "deal_ids": deal_ids,
+                "search_from_epoch": float(operation.get("search_from_epoch", time.time() - 86400)),
+                "status": "PENDING", "amount": None, "currency": "", "components": [],
+                "next_check_at": 0, "retry_count": 0,
+                "generation": self.state.transaction_generation,
+            })
+        self._refresh_actual_attempt_result()
+        self.state.paused = bool(operation.get("paused", self.state.paused))
+        self.state.armed = not self.state.paused
+        self.state.phase = "FILTER" if self.state.armed else "PAUSED"
         scenario_report = scenario_nine_result_text(self.state, long_fill, short_fill) + (
             "\nДальнейший режим: PAUSED до /start из-за /stop."
             if self.state.paused else "\nДальнейший режим: FILTER нового цикла."
         )
         self._store_report(scenario_report, f"scenario-9-complete:{attempt_id}")
-        self._archive_and_clear_completed_cycle(scenario_report)
+        if self.state.deal_history or self.state.attempt_history:
+            self._archive_and_clear_completed_cycle(scenario_report)
+        self.state.pending_finalization = {}
         self.state.save(self.cfg.state_file)
         end_diagnostic_cycle(
             self.cfg.diagnostic_log_file, self.state.attempt_counter + 1,
@@ -3572,9 +3760,21 @@ class Bot:
                 missing.append(deal_id)
                 continue
             entry, close = D(str(item["entry"])), D(str(item["close_level"]))
+            original_size = (D(str(item.get("size", self.cfg.size)))
+                             if self.cfg.scenario_sizes else self.cfg.size)
+            partial_size = D("0")
+            for partial in item.get("partial_closes", []):
+                part_size = D(str(partial["size"])); part_close = D(str(partial["fill"]))
+                part_points = (part_close - entry if item["direction"] == "BUY"
+                               else entry - part_close)
+                total += part_points * part_size
+                partial_size += part_size
+            final_size = original_size - partial_size
+            if final_size < 0:
+                missing.append(deal_id)
+                continue
             points = close - entry if item["direction"] == "BUY" else entry - close
-            size = D(str(item.get("size", self.cfg.size))) if self.cfg.scenario_sizes else self.cfg.size
-            total += points * size
+            total += points * final_size
         attempt = next(
             (item for item in self.state.attempt_history if item.get("attempt_id") == attempt_id),
             None,
@@ -4067,15 +4267,27 @@ class Bot:
 
     def _close_reached_take_profit(self, leg: Leg) -> None:
         """Realize a target crossed before Capital accepted the absolute TP level."""
-        reference = self.capital.close_position(leg.deal_id)
         self.state.pending_close_direction = leg.direction
-        self.state.pending_close_reference = reference
+        self.state.pending_close_deal_id = leg.deal_id
+        self.state.pending_close_reference = ""
         self.state.pending_close_reason = "TP_REACHED_MARKET_CLOSE"
+        self.state.pending_close_unknown_delete = True
+        self.state.save(self.cfg.state_file)
+        try:
+            reference = self.capital.close_position(leg.deal_id)
+        except Exception as exc:
+            self.state.pending_close_reason = f"TP_REACHED_MARKET_CLOSE: {exc}"
+            self.state.save(self.cfg.state_file)
+            return
+        self.state.pending_close_reference = reference
+        self.state.pending_close_unknown_delete = False
         self.state.save(self.cfg.state_file)
         result = self.capital.wait_confirmation(reference)
         if result.get("dealStatus") != "ACCEPTED":
             self.state.pending_close_direction = self.state.pending_close_reference = ""
             self.state.pending_close_reason = ""
+            self.state.pending_close_deal_id = ""
+            self.state.pending_close_unknown_delete = False
             self.state.save(self.cfg.state_file)
             raise CapitalError(result.get("reason") or "Закрытие достигнутого TP отклонено")
         fill = self._confirmation_close_level(result, leg.deal_id)
@@ -4089,6 +4301,8 @@ class Bot:
             return
         self.state.pending_close_direction = self.state.pending_close_reference = ""
         self.state.pending_close_reason = ""
+        self.state.pending_close_deal_id = ""
+        self.state.pending_close_unknown_delete = False
         # Persist the confirmed close before resolving the trigger race. If Android stops here, the
         # next tick/restart must not send a second DELETE or lose the actual fill.
         self.state.pending_tp_direction = leg.direction
@@ -4099,19 +4313,39 @@ class Bot:
     def _resume_pending_close(self) -> None:
         direction = self.state.pending_close_direction
         leg = self.state.long if direction == "BUY" else self.state.short
-        if not leg or not leg.deal_id:
+        expected_deal = self.state.pending_close_deal_id or (leg.deal_id if leg else "")
+        if not leg or not expected_deal or leg.deal_id != expected_deal:
             self._manual("Pending close не связан с локальной позицией")
             return
         try:
-            result = self.capital.wait_confirmation(self.state.pending_close_reference)
-            if result.get("dealStatus") == "REJECTED":
-                self.state.pending_close_direction = self.state.pending_close_reference = ""
-                self.state.pending_close_reason = ""
-                self.state.save(self.cfg.state_file)
-                return
-            fill = self._confirmation_close_level(result, leg.deal_id)
+            reference = self.state.pending_close_reference
+            fill = None
+            if reference:
+                result = self.capital.wait_confirmation(reference)
+                if result.get("dealStatus") == "REJECTED":
+                    self.state.pending_close_direction = self.state.pending_close_reference = ""
+                    self.state.pending_close_reason = self.state.pending_close_deal_id = ""
+                    self.state.pending_close_unknown_delete = False
+                    self.state.save(self.cfg.state_file)
+                    return
+                fill = self._confirmation_close_level(result, expected_deal)
             if fill is None:
-                fill = self._wait_any_closing_fill(leg, attempts=20, delay=0.5)
+                positions = self._cycle_positions()
+                if expected_deal in positions:
+                    return
+                activity = self.capital.activity(expected_deal)
+                if not activity:
+                    activity = self.capital.activity()
+                close_direction = "SELL" if direction == "BUY" else "BUY"
+                event = next((item for item in reversed(normalize_events(activity))
+                              if item.deal_id == expected_deal
+                              and item.event_type == "POSITION"
+                              and item.status == "ACCEPTED" and item.source in {"USER", "TP"}
+                              and (item.source == "TP" or item.direction == close_direction)
+                              and item.level is not None and item.size is not None
+                              and item.size == leg.size), None)
+                if event is not None:
+                    fill = event.level
         except Exception as exc:
             self.state.pending_close_reason = str(exc)
             self.state.save(self.cfg.state_file)
@@ -4120,6 +4354,8 @@ class Bot:
             return
         self.state.pending_close_direction = self.state.pending_close_reference = ""
         self.state.pending_close_reason = ""
+        self.state.pending_close_deal_id = ""
+        self.state.pending_close_unknown_delete = False
         self.state.pending_tp_direction = direction
         self.state.pending_tp_fill = fill
         self.state.save(self.cfg.state_file)
@@ -4389,7 +4625,8 @@ class Bot:
         except CapitalError:
             event = None
         if event and event.level is not None:
-            self._remember_close_event(leg, event)
+            if self._remember_close_event(leg, event) == "CONFLICT":
+                return None
             return event.level
         saved = self._saved_close_event(leg, expected_source)
         if saved is not None:
@@ -4412,7 +4649,8 @@ class Bot:
             return fill
         event = find_close_event(global_activity, leg.deal_id, expected_source)
         if event and event.level is not None:
-            self._remember_close_event(leg, event)
+            if self._remember_close_event(leg, event) == "CONFLICT":
+                return None
             LOG.info(
                 "Close resolved from global activity: dealId=%s source=%s fill=%s",
                 leg.deal_id, expected_source, event.level,
@@ -4424,14 +4662,16 @@ class Bot:
                                global_activity: list[dict]):
         event = find_close_event(global_activity, leg.deal_id, expected_source)
         if event is not None:
-            self._remember_close_event(leg, event)
+            if self._remember_close_event(leg, event) == "CONFLICT":
+                return None
             return event
         try:
             event = find_close_event(
                 self.capital.activity(leg.deal_id), leg.deal_id, expected_source
             )
             if event is not None:
-                self._remember_close_event(leg, event)
+                if self._remember_close_event(leg, event) == "CONFLICT":
+                    return None
                 return event
             return self._saved_close_event(leg, expected_source)
         except CapitalError:
@@ -4467,10 +4707,10 @@ class Bot:
                         self.capital.activity(), leg.deal_id, expected_source
                     )
                     if event and event.level is not None:
-                        self.state.remember_deal(leg)
-                        self.state.remember_close(
-                            leg.deal_id, expected_source, event.level
-                        )
+                        status = self._remember_close_event(leg, event)
+                        if status == "CONFLICT":
+                            LOG.warning("Conflicting global close evidence dealId=%s", leg.deal_id)
+                            return None
                         LOG.info(
                             "Close resolved from global activity: dealId=%s source=%s "
                             "fill=%s attempt=%s/%s",

@@ -22,6 +22,11 @@ class Leg:
     pending_trigger_cancel_unknown: bool = False
     pending_trigger_action: str = ""
     trigger_recreation_suppressed: bool = False
+    pending_trigger_create: bool = False
+    pending_trigger_create_reference: str = ""
+    pending_trigger_create_unknown_post: bool = False
+    pending_trigger_create_cycle_id: int = 0
+    pending_trigger_create_attempt: int = 0
     pending_race_close_reference: str = ""
     pending_race_close_deal_id: str = ""
     pending_race_close_unknown: bool = False
@@ -110,6 +115,8 @@ class CycleState:
     pending_close_direction: str = ""
     pending_close_reference: str = ""
     pending_close_reason: str = ""
+    pending_close_deal_id: str = ""
+    pending_close_unknown_delete: bool = False
     long: Leg | None = None
     short: Leg | None = None
     phase: str = "IDLE"
@@ -153,6 +160,8 @@ class CycleState:
     scenario_transitions: list[dict] = field(default_factory=list)
     trigger_race_results: list[dict] = field(default_factory=list)
     completed_cycle_report: str = ""
+    pending_finalization: dict = field(default_factory=dict)
+    completed_attempt_summaries: list[dict] = field(default_factory=list)
     # Durable broker ledger for the active logical cycle. Leg.deal_id changes after every trigger
     # fill, so prior permanent IDs remain here through reentries and continuation attempts. The
     # completion path archives this ledger before reset clears it for the next logical cycle.
@@ -353,6 +362,11 @@ class CycleState:
                 leg.setdefault("legacy_missing_fields", missing)
                 leg.setdefault("pending_trigger_action", "")
                 leg.setdefault("trigger_recreation_suppressed", False)
+                leg.setdefault("pending_trigger_create", False)
+                leg.setdefault("pending_trigger_create_reference", "")
+                leg.setdefault("pending_trigger_create_unknown_post", False)
+                leg.setdefault("pending_trigger_create_cycle_id", 0)
+                leg.setdefault("pending_trigger_create_attempt", 0)
                 leg.setdefault("pending_race_close_reference", "")
                 leg.setdefault("pending_race_close_deal_id", "")
                 leg.setdefault("pending_race_close_unknown", False)
@@ -395,6 +409,7 @@ class CycleState:
         self.scenario_transitions.clear()
         self.trigger_race_results.clear()
         self.completed_cycle_report = ""
+        self.pending_finalization.clear()
         self.recovery_migration_error = ""
         self.realized_losses = self.realized_loss_money = D("0")
         self.gross_take_profit = self.net_cycle_result = self.net_cycle_money = D("0")
@@ -405,13 +420,13 @@ class CycleState:
         self.pending_tp_direction = ""
         self.pending_tp_fill = None
         self.pending_close_direction = self.pending_close_reference = self.pending_close_reason = ""
+        self.pending_close_deal_id = ""
+        self.pending_close_unknown_delete = False
         self.broker_transaction_pnl = None
         self.broker_transaction_currency = ""
         self.broker_transaction_status = "UNAVAILABLE"
         self.broker_transaction_components.clear()
-        self.pending_transaction_jobs.clear()
         self.pending_notification_jobs.clear()
-        self.transaction_generation += 1
         self.last_trigger_resolution = "Нет связанного Trigger."
         self.long = self.short = None
         self.phase = "IDLE"

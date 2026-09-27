@@ -158,7 +158,7 @@ class CycleContinuation:
     def handle_active_scenario(self) -> None:
         """Continuation-owned scenario dispatcher for the current scenario (1 through 9)."""
         self.bot._resume_pending_trigger_cancel()
-        if self.state.pending_close_reference:
+        if self.state.pending_close_direction:
             self.bot._resume_pending_close()
             return
         if self.state.pending_tp_direction and self.state.pending_tp_fill is not None:
@@ -179,6 +179,14 @@ class CycleContinuation:
         if self.state.scenario >= self.bot.cfg.max_scenarios:
             self.bot._enter_manual_nine()
             return
+        if self.state.phase in {"LONG_ONLY", "SHORT_ONLY"}:
+            survivor = self.state.long if self.state.phase == "LONG_ONLY" else self.state.short
+            stopped = self.state.short if self.state.phase == "LONG_ONLY" else self.state.long
+            if survivor and stopped and survivor.deal_id not in positions:
+                if self.bot._recover_trigger_fill_then_stop(positions, survivor, stopped):
+                    return
+                if self.bot._recover_trigger_round_trip_from_activity(survivor, stopped):
+                    return
         open_legs = [leg for leg in (self.state.long, self.state.short) if leg and leg.open]
         missing = [leg for leg in open_legs if leg.deal_id not in positions]
         if not missing:
