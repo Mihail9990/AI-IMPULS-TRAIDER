@@ -6737,7 +6737,7 @@ class Attempt286UnifiedLedgerRegressionTest(unittest.TestCase):
             self.assertEqual((restored.completed_cycles, len(restored.report_outbox)), (1, 1))
 
 
-class SQLiteStateStoreRegressionTest(unittest.TestCase):
+class ScenarioNineCleanupRegressionTest(unittest.TestCase):
     def test_two_scenario_nine_finalizations_do_not_reuse_close_operations(self):
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "state.json")
@@ -6764,6 +6764,10 @@ class SQLiteStateStoreRegressionTest(unittest.TestCase):
                     "deal_ids": [],
                 }
                 bot._resume_scenario_nine_finalization()
+                self.assertEqual(bot.state.scenario_nine_close_operations, {})
+                self.assertEqual((bot.state.phase, bot.state.armed), ("FILTER", True))
+                bot.strategy.begin(D("100.2"), D("100"))
+                self.assertEqual(bot.state.scenario, 1)
                 self.assertEqual(bot.state.scenario_nine_close_operations, {})
 
 
@@ -6880,16 +6884,100 @@ class SuccessfulCycleBroker:
 
 
 class SuccessfulCycleEndToEndTest(unittest.TestCase):
-    def make_bot(self, path):
+    def make_bot(self, path, *, sizes=None):
         cfg = Settings(dry_run=False, api_key="key", identifier="id", password="pw",
                        state_file=path, diagnostic_log_file=path + ".log",
-                       scenario_sizes=(D("10"),) * 9,
+                       scenario_sizes=sizes or (D("10"),) * 9,
                        scenario_stop_distances=tuple(D(str(i)) for i in range(1, 10)),
                        target_profit=D("0.3"))
         bot = Bot.__new__(Bot); bot.cfg = cfg; bot.state = CycleState()
         bot.strategy = Strategy(cfg, bot.state); bot.capital = SuccessfulCycleBroker(cfg.epic)
         bot.telegram = Mock(); bot.execution_policy = ExecutionPolicy(); bot._flat_checks = 0
         return bot
+
+    def test_full_volume_tp_matrix_s1_to_s8_both_winners_and_reentry_orders(self):
+        sizes = (D("10"),) + (D("20"),) * 8
+        cases = ((scenario, winner, pattern)
+                 for scenario in range(1, 9)
+                 for winner in ("BUY", "SELL")
+                 for pattern in ("same", "alternating"))
+        for scenario, winner_direction, pattern in cases:
+            with self.subTest(scenario=scenario, winner=winner_direction, pattern=pattern), \
+                    tempfile.TemporaryDirectory() as directory:
+                bot = self.make_bot(str(Path(directory) / "state.json"), sizes=sizes)
+                broker = bot.capital
+                bot._start_pair_common("successful candle", continuation=False,
+                                       preflight_done=True)
+                first_cycle_id = bot.state.cycle_id
+                expected_general = D("5.0")  # 0.2 spread*10 + 0.3 target*10
+                stop_direction = "SELL" if winner_direction == "BUY" else "BUY"
+                for current in range(1, scenario):
+                    leg = bot.state.short if stop_direction == "SELL" else bot.state.long
+                    closed_size = leg.size
+                    effective_distance = abs(leg.current_entry - leg.confirmed_stop)
+                    stop_fill = leg.stop + (D("0.1") if stop_direction == "SELL" else D("-0.1"))
+                    broker.emit_close(leg.deal_id, "SL", stop_fill)
+                    bot._tick_cycle()
+                    expected_general += D("0.1") * closed_size
+                    if current >= 2:
+                        expected_general += effective_distance * closed_size
+                    order_id = leg.trigger_id
+                    trigger_fill = leg.original_trigger_level + (
+                        D("0.05") if stop_direction == "BUY" else D("-0.05")
+                    )
+                    broker.execute_order(order_id, trigger_fill)
+                    bot._tick_cycle()
+                    if current == 1:
+                        expected_general += effective_distance * closed_size
+                    expected_general += D("0.05") * sizes[current]
+                    self.assertEqual(bot.state.scenario, current + 1)
+                    if pattern == "alternating":
+                        stop_direction = "BUY" if stop_direction == "SELL" else "SELL"
+
+                winner = bot.state.long if winner_direction == "BUY" else bot.state.short
+                loser = bot.state.short if winner_direction == "BUY" else bot.state.long
+                loser_size = loser.size
+                loser_effective_distance = abs(loser.current_entry - loser.confirmed_stop)
+                loser_fill = loser.stop + (
+                    D("0.1") if loser.direction == "SELL" else D("-0.1")
+                )
+                broker.emit_close(loser.deal_id, "SL", loser_fill)
+                bot._tick_cycle()
+                expected_general += D("0.1") * loser_size
+                if scenario >= 2:
+                    expected_general += loser_effective_distance * loser_size
+                trigger_id = loser.trigger_id
+                tp_fill = winner.take_profit
+                broker.emit_close(winner.deal_id, "TP", tp_fill)
+                expected_actual = sum(broker.executions, D("0"))
+                mutations_before_completion = len(broker.mutations)
+                bot._tick_cycle()
+
+                self.assertEqual(bot.state.scenario, scenario)
+                self.assertEqual(bot.state.general_recovery, expected_general)
+                self.assertEqual(bot.state.completed_cycles, 1)
+                self.assertEqual(bot.state.phase, "FILTER")
+                self.assertNotIn(trigger_id, broker.orders)
+                self.assertIn(("DELETE_STOP", trigger_id), broker.mutations)
+                summary = next(item for item in bot.state.completed_attempt_summaries
+                               if item.get("status") == "COMPLETED_CYCLE")
+                self.assertEqual(D(summary["result"]), expected_actual)
+                self.assertFalse(any(item[0] in {"POST_STOP", "POST_POSITION", "PUT"}
+                                     for item in broker.mutations[mutations_before_completion:]))
+                before = (bot.state.general_recovery, bot.state.completed_cycles,
+                          len(bot.state.report_outbox), len(broker.mutations))
+                bot.tick()
+                self.assertEqual(before, (bot.state.general_recovery, bot.state.completed_cycles,
+                                          len(bot.state.report_outbox), len(broker.mutations)))
+
+                # Exercise the real candle filter and all three flat preflight reads before the
+                # next logical cycle creates a fresh initial pair.
+                broker.candle_ranges = lambda epic, minutes: (D("0"), D("4"))
+                for _ in range(4):
+                    bot.tick()
+                self.assertTrue(bot.state.active)
+                self.assertEqual(bot.state.scenario, 1)
+                self.assertNotEqual(bot.state.cycle_id, first_cycle_id)
 
     def test_s8_trigger_then_survivor_sl_and_reopened_tp_uses_terminal_s9_both_mirrors(self):
         for final_direction, owner in (("SELL", "normal"), ("BUY", "normal"),
@@ -6901,9 +6989,14 @@ class SuccessfulCycleEndToEndTest(unittest.TestCase):
                 self.assertEqual(bot.state.scenario, 1)
                 # Seven full SL -> owned Trigger -> actual fill transitions produce S2..S8.
                 direction = "SELL" if final_direction == "SELL" else "BUY"
+                expected_prior_losses = D("0")
                 for expected in range(2, 9):
                     leg = bot.state.short if direction == "SELL" else bot.state.long
                     stop_fill = leg.stop + (D("0.1") if direction == "SELL" else D("-0.1"))
+                    expected_prior_losses += (
+                        stop_fill - leg.current_entry if direction == "SELL"
+                        else leg.current_entry - stop_fill
+                    )
                     broker.emit_close(leg.deal_id, "SL", stop_fill)
                     bot._tick_cycle()
                     order_id = leg.trigger_id
@@ -6919,20 +7012,25 @@ class SuccessfulCycleEndToEndTest(unittest.TestCase):
                 reopened = bot.state.short if final_direction == "SELL" else bot.state.long
                 survivor = bot.state.long if final_direction == "SELL" else bot.state.short
                 first_fill = reopened.stop + (D("0.1") if final_direction == "SELL" else D("-0.1"))
+                expected_prior_losses += (
+                    first_fill - reopened.current_entry if reopened.direction == "SELL"
+                    else reopened.current_entry - first_fill
+                )
                 broker.emit_close(reopened.deal_id, "SL", first_fill)
                 bot._tick_cycle()
                 order_id = reopened.trigger_id
                 new_position = broker.execute_order(order_id, reopened.original_trigger_level)
                 survivor_fill = survivor.stop + (D("-0.1") if survivor.direction == "BUY" else D("0.1"))
+                expected_prior_losses += (
+                    survivor.current_entry - survivor_fill if survivor.direction == "BUY"
+                    else survivor_fill - survivor.current_entry
+                )
                 survivor_event = broker.emit_close(survivor.deal_id, "SL", survivor_fill)
                 tp_fill = new_position["profitLevel"]
                 tp_event = broker.emit_close(new_position["dealId"], "TP", tp_fill)
                 mutation_count = len(broker.mutations)
                 expected_deal_ids = set(bot.state.attempt_deal_ids) | {new_position["dealId"]}
                 expected_actual_pnl = sum(broker.executions, D("0"))
-                expected_prior_losses = sum(
-                    (-result / D("10") for result in broker.executions if result < 0), D("0")
-                )
                 with patch("trader.app.LOG.info") as info_log:
                     if owner == "continuation":
                         bot.state.continuation_managed = True
@@ -6978,11 +7076,9 @@ class SuccessfulCycleEndToEndTest(unittest.TestCase):
                 self.assertEqual(before, (bot.state.completed_cycles, len(bot.state.report_outbox),
                                           len(bot.state.pending_transaction_jobs),
                                           len(broker.mutations)))
-                self.assertEqual((bot.state.phase, bot.state.armed), ("FILTER", True))
-                bot.strategy.begin(D("100.2"), D("100"))
-                self.assertEqual(bot.state.scenario, 1)
-                self.assertEqual(bot.state.scenario_nine_close_operations, {})
 
+
+class SQLiteStateStoreRegressionTest(unittest.TestCase):
     def test_actual_result_accepts_partial_execution_ledger_not_last_fill_times_full_size(self):
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "state.json")

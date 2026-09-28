@@ -120,7 +120,10 @@ def install(archive_url: str = ARCHIVE_URL, install_dir: Path | None = None) -> 
     print("\nInstallation completed successfully.")
     print(f"Project: {target}")
     print(f"Installed work version: {version}")
-    print("Created bot_config.json." if created else "Preserved existing bot_config.json and bot_state.json.")
+    print("Created bot_config.json." if created else (
+        "Preserved existing settings and runtime state: bot_config.json, legacy JSON, "
+        "SQLite/WAL/SHM/backups and diagnostic history."
+    ))
     print("Next: open bot_config.json, enter DEMO credentials, then run main.py in Pydroid 3.")
     return target
 
