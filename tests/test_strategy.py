@@ -6778,6 +6778,7 @@ class SuccessfulCycleBroker:
         self.epic = epic; self.positions_by_id = {}; self.orders = {}; self.events = []
         self.confirmations = {}; self.sequence = 0; self.mutations = []
         self.executions = []
+        self.deal_journal = {}
 
     def _id(self, prefix):
         self.sequence += 1
@@ -6811,6 +6812,10 @@ class SuccessfulCycleBroker:
                     "direction": direction, "level": level, "size": size,
                     "stopLevel": level - D("1") if direction == "BUY" else level + D("1")}
         self.positions_by_id[deal_id] = position
+        self.deal_journal[deal_id] = {
+            "deal_id": deal_id, "direction": direction, "entry": level,
+            "size": D(str(size)), "close": None, "source": "",
+        }
         self.confirmations[reference] = {
             "dealStatus": "ACCEPTED", "dealId": deal_id, "level": level, "size": size,
             "affectedDeals": [{"dealId": deal_id, "status": "OPENED"}],
@@ -6845,6 +6850,20 @@ class SuccessfulCycleBroker:
         self.orders.pop(order_id, None); self.mutations.append(("DELETE_STOP", order_id))
         return True
 
+    def close_position(self, deal_id):
+        position = self.positions_by_id[deal_id]
+        # Successful controlled closes use a deterministic fill distinct from entry while
+        # retaining the exact permanent deal identity in confirmation and activity.
+        fill = position["level"] + (D("0.2") if position["direction"] == "BUY" else D("-0.2"))
+        self.emit_close(deal_id, "USER", fill)
+        reference = self._id("close-ref")
+        self.confirmations[reference] = {
+            "dealStatus": "ACCEPTED", "dealId": deal_id, "level": fill,
+            "affectedDeals": [{"dealId": deal_id, "status": "CLOSED"}],
+        }
+        self.mutations.append(("DELETE_POSITION", deal_id, reference))
+        return reference
+
     def activity(self, deal_id="", last_period=86400):
         return [item for item in self.events if not deal_id or item.get("dealId") == deal_id]
 
@@ -6864,6 +6883,7 @@ class SuccessfulCycleBroker:
         points = (fill - position["level"] if position["direction"] == "BUY"
                   else position["level"] - fill)
         self.executions.append(points * D(str(position["size"])))
+        self.deal_journal[deal_id].update({"close": fill, "source": source})
         return event
 
     def execute_order(self, order_id, fill):
@@ -6876,6 +6896,11 @@ class SuccessfulCycleBroker:
                     "level": fill, "size": order["orderSize"],
                     "stopLevel": order["stopLevel"], "profitLevel": order["profitLevel"]}
         self.positions_by_id[deal_id] = position
+        self.deal_journal[deal_id] = {
+            "deal_id": deal_id, "direction": order["direction"], "entry": fill,
+            "size": D(str(order["orderSize"])), "close": None, "source": "",
+            "working_order_id": order_id,
+        }
         self.events.append({"id": self._id("open"), "dateUTC": self._time(),
             "dealId": deal_id, "workingOrderId": order_id, "source": "USER",
             "type": "POSITION", "status": "ACCEPTED", "direction": order["direction"],
@@ -6909,6 +6934,10 @@ class SuccessfulCycleEndToEndTest(unittest.TestCase):
                 bot._start_pair_common("successful candle", continuation=False,
                                        preflight_done=True)
                 first_cycle_id = bot.state.cycle_id
+                immutable_anchors = {
+                    "BUY": bot.state.long.original_trigger_level,
+                    "SELL": bot.state.short.original_trigger_level,
+                }
                 expected_general = D("5.0")  # 0.2 spread*10 + 0.3 target*10
                 stop_direction = "SELL" if winner_direction == "BUY" else "BUY"
                 for current in range(1, scenario):
@@ -6936,6 +6965,7 @@ class SuccessfulCycleEndToEndTest(unittest.TestCase):
 
                 winner = bot.state.long if winner_direction == "BUY" else bot.state.short
                 loser = bot.state.short if winner_direction == "BUY" else bot.state.long
+                winner_identity = (winner.deal_id, winner.current_entry, winner.size)
                 loser_size = loser.size
                 loser_effective_distance = abs(loser.current_entry - loser.confirmed_stop)
                 loser_fill = loser.stop + (
@@ -6946,10 +6976,34 @@ class SuccessfulCycleEndToEndTest(unittest.TestCase):
                 expected_general += D("0.1") * loser_size
                 if scenario >= 2:
                     expected_general += loser_effective_distance * loser_size
+                scenario_distance = D(str(scenario))
+                if scenario == 1:
+                    recovery_distance = expected_general / winner.size
+                else:
+                    base = scenario_distance * winner.size
+                    recovery_distance = max(D("0"), expected_general - base) / winner.size
+                total_distance = scenario_distance + recovery_distance
+                expected_tp = (winner.current_entry + total_distance
+                               if winner.direction == "BUY"
+                               else winner.current_entry - total_distance)
+                self.assertEqual(winner.take_profit, expected_tp)
+                winner_puts = [item for item in broker.mutations
+                               if item[0] == "PUT" and item[1] == winner.deal_id]
+                self.assertTrue(winner_puts)
+                self.assertEqual(winner_puts[-1][3], expected_tp)
+                self.assertEqual(broker.positions_by_id[winner.deal_id]["profitLevel"], expected_tp)
+                self.assertEqual((winner.deal_id, winner.current_entry, winner.size), winner_identity)
                 trigger_id = loser.trigger_id
-                tp_fill = winner.take_profit
+                self.assertEqual(loser.original_trigger_level,
+                                 immutable_anchors[loser.direction])
+                tp_fill = expected_tp
                 broker.emit_close(winner.deal_id, "TP", tp_fill)
-                expected_actual = sum(broker.executions, D("0"))
+                expected_actual = sum(
+                    ((item["close"] - item["entry"]) * item["size"]
+                     if item["direction"] == "BUY"
+                     else (item["entry"] - item["close"]) * item["size"])
+                    for item in broker.deal_journal.values() if item["close"] is not None
+                )
                 mutations_before_completion = len(broker.mutations)
                 bot._tick_cycle()
 
@@ -7076,6 +7130,179 @@ class SuccessfulCycleEndToEndTest(unittest.TestCase):
                 self.assertEqual(before, (bot.state.completed_cycles, len(bot.state.report_outbox),
                                           len(bot.state.pending_transaction_jobs),
                                           len(broker.mutations)))
+
+    def test_real_double_sl_continuation_filter_preflight_reentry_and_tp_both_mirrors(self):
+        for stopped_direction in ("BUY", "SELL"):
+            with self.subTest(stopped_direction=stopped_direction), \
+                    tempfile.TemporaryDirectory() as directory:
+                bot = self.make_bot(str(Path(directory) / "state.json")); broker = bot.capital
+                bot._start_pair_common("initial filter", continuation=False, preflight_done=True)
+                cycle_id = bot.state.cycle_id
+                initial_target_component = bot.cfg.target_profit * D("10")
+                initial_general = bot.state.general_recovery
+                initial_attempt = bot.state.active_attempt_id
+
+                # Both authoritative SL executions arrive between two polls. The normal owner
+                # must account them and hand the same logical cycle to CycleContinuation.
+                broker.emit_close(bot.state.long.deal_id, "SL", bot.state.long.stop - D("0.1"))
+                broker.emit_close(bot.state.short.deal_id, "SL", bot.state.short.stop + D("0.1"))
+                bot._tick_cycle()
+                self.assertEqual(bot.state.continuation_stage, "PAUSE")
+                self.assertTrue(bot.state.continuation_managed)
+                general_after_double_sl = bot.state.general_recovery
+                pending_once = sum(D(item.get("value", "0")) for item in bot.state.recovery_events
+                                   if item.get("component") == "DOUBLE_SL_PENDING_D")
+
+                # A controlled clock releases the non-blocking five-minute pause. The real
+                # candle-filter and exactly three consecutive flat preflight reads follow.
+                broker.candle_ranges = lambda epic, minutes: (D("0"), D("4"))
+                pause_until = bot.state.continuation_pause_until
+                with patch("trader.app.time.time", return_value=pause_until + 1):
+                    bot.tick()
+                self.assertEqual(bot.state.continuation_stage, "FILTER")
+                bot.tick()
+                self.assertEqual(bot.state.continuation_stage, "PREFLIGHT")
+                posts_before = len([item for item in broker.mutations
+                                    if item[0] == "POST_POSITION"])
+                bot.tick(); self.assertEqual(bot.state.continuation_flat_checks, 1)
+                bot.tick(); self.assertEqual(bot.state.continuation_flat_checks, 2)
+                self.assertEqual(len([item for item in broker.mutations
+                                      if item[0] == "POST_POSITION"]), posts_before)
+                bot.tick()
+                self.assertEqual(bot.state.continuation_stage, "ACTIVE")
+                self.assertEqual(len([item for item in broker.mutations
+                                      if item[0] == "POST_POSITION"]), posts_before + 2)
+                self.assertEqual(bot.state.cycle_id, cycle_id)
+                self.assertNotEqual(bot.state.active_attempt_id, initial_attempt)
+                continuation_attempt = bot.state.active_attempt_id
+                # Continuation adds only its actual spread (0.2*10), never initial target again.
+                self.assertEqual(bot.state.general_recovery,
+                                 general_after_double_sl + D("2"))
+                self.assertNotEqual(initial_target_component, D("0"))
+                self.assertEqual(
+                    sum(D(item.get("value", "0")) for item in bot.state.recovery_events
+                        if item.get("component") == "DOUBLE_SL_PENDING_D"), pending_once,
+                )
+
+                stopped = bot.state.long if stopped_direction == "BUY" else bot.state.short
+                survivor = bot.state.short if stopped_direction == "BUY" else bot.state.long
+                broker.emit_close(stopped.deal_id, "SL", stopped.stop + (
+                    D("-0.1") if stopped.direction == "BUY" else D("0.1")))
+                bot.tick()
+                order_id = stopped.trigger_id
+                broker.execute_order(order_id, stopped.original_trigger_level + (
+                    D("0.05") if stopped.direction == "BUY" else D("-0.05")))
+                bot.tick()
+                self.assertEqual(bot.state.scenario, 2)
+                if stopped_direction == "SELL":
+                    bot.command("/stop")
+                    self.assertTrue(bot.state.continuation_stopped_by_user)
+                reopened = bot.state.long if stopped_direction == "BUY" else bot.state.short
+                broker.emit_close(reopened.deal_id, "SL", reopened.stop + (
+                    D("-0.1") if reopened.direction == "BUY" else D("0.1")))
+                bot.tick()
+                trigger_id = reopened.trigger_id
+                broker.emit_close(survivor.deal_id, "TP", survivor.take_profit)
+                bot.tick()
+
+                self.assertEqual(bot.state.completed_cycles, 1)
+                self.assertEqual(bot.state.phase,
+                                 "PAUSED" if stopped_direction == "SELL" else "FILTER")
+                self.assertFalse(bot.state.continuation_managed)
+                self.assertEqual(bot.state.active_attempt_id, 0)
+                self.assertNotIn(trigger_id, broker.orders)
+                self.assertTrue(any(item.get("attempt_id") == continuation_attempt
+                                    for item in bot.state.completed_attempt_summaries))
+
+    def test_stop_command_keeps_active_cycle_managed_and_finishes_paused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self.make_bot(str(Path(directory) / "state.json")); broker = bot.capital
+            bot._start_pair_common("initial filter", continuation=False, preflight_done=True)
+            bot.command("/stop")
+            self.assertTrue(bot.state.paused)
+            broker.emit_close(bot.state.long.deal_id, "SL", bot.state.long.stop - D("0.1"))
+            bot._tick_cycle()
+            broker.emit_close(bot.state.short.deal_id, "TP", bot.state.short.take_profit)
+            bot._tick_cycle()
+            self.assertEqual(bot.state.phase, "PAUSED")
+            post_count = len([item for item in broker.mutations if item[0] == "POST_POSITION"])
+            for _ in range(4):
+                bot.tick()
+            self.assertEqual(len([item for item in broker.mutations
+                                  if item[0] == "POST_POSITION"]), post_count)
+
+    def test_sl_then_opposite_tp_between_polls_completes_without_recovery_trigger(self):
+        for winner_direction in ("BUY", "SELL"):
+            with self.subTest(winner=winner_direction), tempfile.TemporaryDirectory() as directory:
+                bot = self.make_bot(str(Path(directory) / "state.json")); broker = bot.capital
+                bot._start_pair_common("initial filter", continuation=False, preflight_done=True)
+                winner = bot.state.long if winner_direction == "BUY" else bot.state.short
+                loser = bot.state.short if winner_direction == "BUY" else bot.state.long
+                broker.emit_close(loser.deal_id, "SL", loser.stop + (
+                    D("-0.1") if loser.direction == "BUY" else D("0.1")))
+                broker.emit_close(winner.deal_id, "TP", winner.take_profit)
+                stop_posts = len([item for item in broker.mutations if item[0] == "POST_STOP"])
+                bot._tick_cycle()
+                self.assertEqual(bot.state.completed_cycles, 1)
+                self.assertEqual(bot.state.phase, "FILTER")
+                self.assertEqual(len([item for item in broker.mutations
+                                      if item[0] == "POST_STOP"]), stop_posts)
+                self.assertFalse(broker.positions_by_id)
+                self.assertFalse(broker.orders)
+
+    def test_two_complete_s1_to_s9_controlled_close_cycles_use_fresh_ownership(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self.make_bot(str(Path(directory) / "state.json")); broker = bot.capital
+            cycle_ids = []; cycle_deal_sets = []
+            for cycle_number in (1, 2):
+                journal_before = set(broker.deal_journal)
+                if cycle_number == 1:
+                    bot._start_pair_common("initial filter", continuation=False,
+                                           preflight_done=True)
+                else:
+                    broker.candle_ranges = lambda epic, minutes: (D("0"), D("4"))
+                    for expected_flat_checks in (1, 2, 3):
+                        posts_before = len([item for item in broker.mutations
+                                            if item[0] == "POST_POSITION"])
+                        bot.tick()
+                        if expected_flat_checks < 3:
+                            self.assertEqual(len([item for item in broker.mutations
+                                                  if item[0] == "POST_POSITION"]), posts_before)
+                    self.assertTrue(bot.state.active)
+                    self.assertEqual(bot.state.scenario, 1)
+                cycle_ids.append(bot.state.cycle_id)
+                for transition in range(1, 9):
+                    direction = "BUY" if transition % 2 else "SELL"
+                    leg = bot.state.long if direction == "BUY" else bot.state.short
+                    broker.emit_close(leg.deal_id, "SL", leg.stop + (
+                        D("-0.1") if direction == "BUY" else D("0.1")))
+                    bot._tick_cycle()
+                    order_id = leg.trigger_id
+                    broker.execute_order(order_id, leg.original_trigger_level + (
+                        D("0.05") if direction == "BUY" else D("-0.05")))
+                    bot._tick_cycle()
+                    if transition < 8:
+                        self.assertEqual(bot.state.scenario, transition + 1)
+
+                self.assertEqual(bot.state.scenario, 9)
+                self.assertFalse(bot.state.active)
+                self.assertEqual(bot.state.phase, "FILTER")
+                self.assertEqual(bot.state.completed_cycles, cycle_number)
+                self.assertEqual(bot.state.scenario_nine_close_operations, {})
+                self.assertFalse(broker.positions_by_id)
+                self.assertFalse(broker.orders)
+                cycle_deals = set(broker.deal_journal) - journal_before
+                cycle_deal_sets.append(cycle_deals)
+                job = next(item for item in bot.state.pending_transaction_jobs
+                           if item["cycle_id"] == cycle_ids[-1])
+                self.assertEqual(set(job["deal_ids"]), cycle_deals)
+                mutation_count = len(broker.mutations)
+                bot.tick()
+                self.assertEqual(len(broker.mutations), mutation_count)
+
+            self.assertNotEqual(cycle_ids[0], cycle_ids[1])
+            self.assertTrue(cycle_deal_sets[0].isdisjoint(cycle_deal_sets[1]))
+            self.assertEqual(len(bot.state.pending_transaction_jobs), 2)
 
 
 class SQLiteStateStoreRegressionTest(unittest.TestCase):
