@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from pathlib import Path
 import sqlite3
 from typing import Callable
@@ -274,27 +273,3 @@ def encoded_subset(payload: dict, prefix: str) -> str:
         {key: value for key, value in payload.items() if key.startswith(prefix)},
         ensure_ascii=False, sort_keys=True,
     )
-
-
-class WriterLock:
-    """Process-lifetime advisory lock preventing two Bot writers for one database."""
-
-    def __init__(self, state_path: str | Path):
-        import fcntl
-        self.path = Path(str(database_path(state_path)) + ".lock")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
-        try:
-            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            os.close(self.fd)
-            self.fd = None
-            raise RuntimeError(f"Another trading instance owns state database {database_path(state_path)}")
-
-    def close(self) -> None:
-        if getattr(self, "fd", None) is not None:
-            os.close(self.fd)
-            self.fd = None
-
-    def __del__(self):  # pragma: no cover - interpreter shutdown path
-        self.close()

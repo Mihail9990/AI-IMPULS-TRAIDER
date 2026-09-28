@@ -84,9 +84,11 @@ confirmation либо `/positions` read-back; pending D вычисляется �
 authoritative-хранилище теперь находится рядом в `bot_state.sqlite3`. При первом запуске старый
 JSON импортируется одной транзакцией, его SHA отмечается в metadata, а сам исходный файл не
 изменяется и повторно поверх более новой базы не импортируется. Денежные `Decimal` продолжают
-храниться строками. Один process writer удерживает advisory lock; второй экземпляр с той же базой
-не начинает торговлю. Для согласованной копии работающей WAL-базы используется SQLite online
-backup, а не копирование только основного файла.
+храниться строками. Отдельная process-level блокировка экземпляра не используется; наличие старого
+`bot_state.sqlite3.lock` не мешает запуску. Это не означает поддержку согласованной торговли из
+нескольких процессов: штатные транзакции и блокировки SQLite сохранены, а запускать следует один
+экземпляр бота. Для согласованной копии работающей WAL-базы используется SQLite online backup, а
+не копирование только основного файла.
 
 Нормализация broker evidence, изменение Scenario/Recovery/остатков, durable command intent и
 notification outbox сохраняются одним владельцем состояния. Сетевые Capital.com и Telegram I/O
@@ -594,8 +596,8 @@ python tools/capture_demo_api.py after_take_profit
 - `bot_config.example.json` — шаблон настроек без настоящих секретов;
 - `trader/config.py` — настройки и проверка переменных окружения;
 - `trader/model.py` — позиции и модель состояния цикла;
-- `trader/storage.py` — authoritative SQLite snapshot, schema migration, durable indexes,
-  process writer-lock и согласованное online backup;
+- `trader/storage.py` — authoritative SQLite snapshot, schema migration, durable indexes и
+  согласованное online backup;
 - `trader/engine.py` — чистая математика сценариев 1–9;
 - `trader/events.py` — нормализация activity/transaction в единые брокерские события;
 - `trader/execution.py` — политика повторов и правила пройденного trigger;

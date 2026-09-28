@@ -3,6 +3,8 @@ from datetime import datetime, timezone
 import json
 import os
 import sqlite3
+import sys
+import types
 from pathlib import Path
 import tempfile
 import time
@@ -39,7 +41,7 @@ from trader.reporting import (
     recovery_snapshot, transaction_result_fingerprint,
 )
 from trader.streaming import PriceWatch, QuoteStream
-from trader.storage import StateStore, StorageFailure, WriterLock, database_path
+from trader.storage import StateStore, StorageFailure, database_path
 from trader.telegram import Telegram
 
 
@@ -7518,6 +7520,58 @@ class SuccessfulCycleEndToEndTest(unittest.TestCase):
 
 
 class SQLiteStateStoreRegressionTest(unittest.TestCase):
+    def initialize_bot_without_network(self, cfg):
+        capital = Mock(); capital.streaming_tokens = Mock()
+        with patch("trader.app.CapitalClient", return_value=capital), \
+                patch("trader.app.QuoteStream", return_value=Mock()), \
+                patch("trader.app.Telegram", return_value=Mock()), \
+                patch("trader.app.NotificationHistoryWorker", return_value=Mock()), \
+                patch("trader.app.TransactionHistoryWorker", return_value=Mock()):
+            return Bot(cfg)
+
+    def test_bot_initialization_ignores_unsupported_flock_and_legacy_lock_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = str(Path(directory) / "state.json")
+            cfg = Settings(
+                dry_run=True, state_file=state_path,
+                diagnostic_log_file=str(Path(directory) / "diagnostic.log"),
+            )
+            saved = CycleState(
+                active=True, scenario=4, cycle_id=17, cycle_attempt=2,
+                active_attempt_id=18, general_recovery=D("42.75"),
+                deal_history=[{"deal_id": "deal-17", "direction": "BUY",
+                               "entry": "100", "size": "10"}],
+                pending_transaction_jobs=[{"key": "tx-17", "deal_ids": ["deal-17"]}],
+                scenario_nine_close_operations={
+                    "BUY": {"operation_id": "pending-close", "deal_id": "deal-17"}
+                },
+            )
+            saved.save(state_path)
+            legacy_lock = Path(str(database_path(state_path)) + ".lock")
+            legacy_lock.write_text("left by an older release", encoding="utf-8")
+            unsupported_flock = Mock(side_effect=OSError(38, "Function not implemented"))
+            fake_fcntl = types.SimpleNamespace(
+                flock=unsupported_flock, LOCK_EX=2, LOCK_NB=4,
+            )
+
+            with patch.dict(sys.modules, {"fcntl": fake_fcntl}):
+                first = self.initialize_bot_without_network(cfg)
+                second = self.initialize_bot_without_network(cfg)
+
+            unsupported_flock.assert_not_called()
+            self.assertFalse(hasattr(first, "_state_writer_lock"))
+            self.assertFalse(hasattr(second, "_state_writer_lock"))
+            for bot in (first, second):
+                self.assertEqual(bot.state.scenario, 4)
+                self.assertEqual(bot.state.general_recovery, D("42.75"))
+                self.assertEqual(bot.state.deal_history[0]["deal_id"], "deal-17")
+                self.assertEqual(bot.state.pending_transaction_jobs[0]["key"], "tx-17")
+                self.assertEqual(
+                    bot.state.scenario_nine_close_operations["BUY"]["operation_id"],
+                    "pending-close",
+                )
+            self.assertTrue(legacy_lock.exists())
+
     def test_actual_result_accepts_partial_execution_ledger_not_last_fill_times_full_size(self):
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "state.json")
@@ -7677,16 +7731,10 @@ class SQLiteStateStoreRegressionTest(unittest.TestCase):
             self.assertEqual(state.general_recovery, D("8"))
             self.assertEqual(CycleState.load(path).general_recovery, D("8"))
 
-    def test_writer_lock_rejects_second_instance_and_backup_is_consistent(self):
+    def test_online_backup_is_consistent(self):
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "state.json")
             CycleState(general_recovery=D("12.34")).save(path)
-            first = WriterLock(path)
-            try:
-                with self.assertRaisesRegex(RuntimeError, "Another trading instance"):
-                    WriterLock(path)
-            finally:
-                first.close()
             backup = Path(directory) / "snapshot.sqlite3"
             StateStore(path).backup(backup)
             with sqlite3.connect(backup) as db:

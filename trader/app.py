@@ -38,7 +38,6 @@ from .reporting import (
     recovery_snapshot, scenario_nine_result_text, status_text, transaction_result_fingerprint,
 )
 from .streaming import PriceWatch, QuoteStream
-from .storage import WriterLock
 from .telegram import Telegram
 
 
@@ -49,7 +48,6 @@ D = Decimal
 class Bot:
     def __init__(self, cfg: Settings):
         self.cfg = cfg
-        self._state_writer_lock = WriterLock(cfg.state_file)
         self.state = CycleState.load(cfg.state_file)
         if migrate_notification_jobs(self.state.pending_notification_jobs):
             # Only the main Bot thread owns and persists CycleState.  The history worker receives
