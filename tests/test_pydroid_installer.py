@@ -8,33 +8,27 @@ import pydroid_installer as installer
 
 
 class PydroidInstallerPathTest(unittest.TestCase):
-    def choose(self, answers):
-        iterator = iter(answers)
-        output = []
-        selected = installer.choose_install_dir(
-            input_fn=lambda _prompt: next(iterator), output_fn=output.append
-        )
-        return selected, output
+    def test_main_starts_install_directly_without_input(self):
+        target = Path("/tmp/automatic-install").resolve()
+        with patch.object(installer, "install", return_value=target) as install, \
+                patch("builtins.input", side_effect=AssertionError("input must not be called")):
+            self.assertEqual(installer.main(), target)
+        install.assert_called_once_with()
 
-    def test_standard_path_can_be_selected_and_confirmed(self):
-        standard = Path("/tmp/Download/AI-IMPULS-TRAIDER").resolve()
-        with patch.object(installer, "default_install_dir", return_value=standard):
-            selected, output = self.choose(["", "yes"])
-        self.assertEqual(selected, standard)
-        self.assertTrue(any(str(standard) in line for line in output))
+    def test_download_is_selected_automatically_when_writable(self):
+        working = Path("/tmp/elsewhere")
+        with patch("pydroid_installer.Path.cwd", return_value=working), \
+                patch("pydroid_installer.Path.is_dir", return_value=True), \
+                patch("pydroid_installer.os.access", return_value=True):
+            selected = installer.default_install_dir()
+        self.assertEqual(selected, Path("/storage/emulated/0/Download") / installer.PROJECT_NAME)
 
-    def test_explicit_existing_path_is_not_modified_or_nested(self):
-        with tempfile.TemporaryDirectory() as directory:
-            existing = Path(directory) / "live-bot"
-            selected, _ = self.choose([str(existing), "y"])
-        self.assertEqual(selected, existing.resolve())
-
-    def test_explicit_path_wins_even_when_download_is_available(self):
-        explicit = Path("/tmp/my-existing-bot").resolve()
-        with patch.object(installer, "default_install_dir",
-                          return_value=Path("/storage/emulated/0/Download") / installer.PROJECT_NAME):
-            selected, _ = self.choose([str(explicit), "yes"])
-        self.assertEqual(selected, explicit)
+    def test_current_directory_fallback_when_download_is_unavailable(self):
+        working = Path("/tmp/writable-place")
+        with patch("pydroid_installer.Path.cwd", return_value=working), \
+                patch("pydroid_installer.Path.is_dir", return_value=False):
+            selected = installer.default_install_dir()
+        self.assertEqual(selected, working / installer.PROJECT_NAME)
 
     def test_running_inside_project_suggests_current_project_not_nested_copy(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -43,12 +37,6 @@ class PydroidInstallerPathTest(unittest.TestCase):
             with patch("pydroid_installer.Path.cwd", return_value=project), \
                     patch("pydroid_installer.Path.is_dir", return_value=False):
                 self.assertEqual(installer.default_install_dir(), project.resolve())
-
-    def test_cancel_happens_before_installation(self):
-        selected, output = self.choose(["q"])
-        self.assertIsNone(selected)
-        self.assertTrue(any("cancelled" in line for line in output))
-
 
 class PydroidInstallerUpdateTest(unittest.TestCase):
     def make_archive(self, path: Path) -> None:

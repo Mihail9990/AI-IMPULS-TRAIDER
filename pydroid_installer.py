@@ -45,28 +45,6 @@ def default_install_dir() -> Path:
     return root / PROJECT_NAME
 
 
-def choose_install_dir(*, input_fn=input, output_fn=print) -> Path | None:
-    """Interactively select and confirm the project directory before changing any files."""
-    suggested = default_install_dir().resolve()
-    while True:
-        output_fn("\nChoose the AI-IMPULS-TRAIDER project folder.")
-        output_fn(f"Press Enter for the suggested folder: {suggested}")
-        output_fn("Or enter the full path of an existing installation; Q cancels.")
-        answer = input_fn("Project folder: ").strip()
-        if answer.lower() in {"q", "quit", "cancel"}:
-            output_fn("Installation cancelled before any files were changed.")
-            return None
-        target = (Path(answer).expanduser() if answer else suggested).resolve()
-        output_fn(f"Final absolute project path: {target}")
-        confirmation = input_fn("Use this folder? [y]es / [n]o / [q]uit: ").strip().lower()
-        if confirmation in {"y", "yes"}:
-            return target
-        if confirmation in {"q", "quit", "cancel"}:
-            output_fn("Installation cancelled before any files were changed.")
-            return None
-        output_fn("Path was not confirmed; choose it again.")
-
-
 def download(url: str, destination: Path) -> None:
     request = Request(url, headers={"User-Agent": "AI-IMPULS-TRAIDER-Pydroid-Installer"})
     with urlopen(request, timeout=60) as response, destination.open("wb") as output:
@@ -155,11 +133,14 @@ def install(archive_url: str = ARCHIVE_URL, install_dir: Path | None = None) -> 
     return target
 
 
+def main() -> Path:
+    """Run the fully automatic Pydroid installation/update flow."""
+    return install()
+
+
 if __name__ == "__main__":
     try:
-        selected = choose_install_dir()
-        if selected is not None:
-            install(install_dir=selected)
+        main()
     except Exception as error:
         print(f"\nINSTALLATION FAILED: {error}")
         print("Check internet/storage permission and run this file again.")
