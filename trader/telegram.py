@@ -47,6 +47,7 @@ class Telegram:
         ("profit200", "Целевой profit следующих 200 циклов"),
         ("cycleinfo", "Последние события"),
         ("automode", "Выйти из ручного режима"), ("sendlog", "Отправить диагностический файл"),
+        ("resetcycle", "DEMO: сбросить broker-flat цикл"),
         ("menu", "Показать кнопочную клавиатуру"),
         ("hidemenu", "Свернуть кнопочную клавиатуру"), ("help", "Все команды"),
     ]
@@ -57,6 +58,7 @@ class Telegram:
             [{"text": "/dealhistory"}], [{"text": "/profit200 0.4"}],
             [{"text": "/cycleinfo"}, {"text": "/help"}],
             [{"text": "/automode"}],
+            [{"text": "/resetcycle"}],
             [{"text": "/sendlog"}], [{"text": "/hidemenu"}],
         ],
         "resize_keyboard": True, "is_persistent": False,

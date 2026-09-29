@@ -12,11 +12,10 @@ D = Decimal
 
 def cycle_heading(state: CycleState, event: str, *, next_scenario: int | None = None) -> str:
     transition = f" → следующий сценарий {next_scenario}" if next_scenario is not None else ""
-    return (
-        f"Цикл №{state.cycle_id or state.diagnostic_cycle_number or '-'}; "
-        f"попытка {state.cycle_attempt or '-'}; сценарий {state.scenario}{transition}\n"
-        f"Событие: {event}"
-    )
+    # Cycle identity remains complete in logs/state/durable keys. User event cards show it only
+    # in the initial-pair message; repeating it on every protection/SL/Trigger notification made
+    # the operational content difficult to scan.
+    return f"{event}\n\nСценарий {state.scenario}{transition}"
 
 
 def recovery_snapshot(state: CycleState) -> dict:

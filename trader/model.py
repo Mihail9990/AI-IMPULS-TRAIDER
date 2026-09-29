@@ -35,6 +35,11 @@ class Leg:
     pending_market_kind: str = ""
     pending_market_unknown_post: bool = False
     pending_market_preexisting_ids: list[str] = field(default_factory=list)
+    last_market_operation_kind: str = ""
+    last_market_outcome: str = ""
+    last_market_http_status: int | None = None
+    last_market_error_code: str = ""
+    last_market_error: str = ""
     stop: Decimal | None = None
     take_profit: Decimal | None = None
     confirmed_stop: Decimal | None = None

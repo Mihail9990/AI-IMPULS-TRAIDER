@@ -2279,6 +2279,261 @@ class EntryRetryTest(unittest.TestCase):
         self.assertTrue(bot.state.active)
         self.assertFalse(bot.state.manual)
 
+    def test_market_validation_rejection_clears_only_its_pending_operation(self):
+        bot = self.make_bot()
+        stopped = bot.strategy.stopped("SELL", D("4011.10"))
+        before = (bot.state.scenario, bot.state.general_recovery,
+                  len(bot.state.recovery_events))
+        bot.capital.open_position.side_effect = CapitalError(
+            'Capital API 400: {"errorCode":"error.invalid.takeprofit.maxvalue: 4153.55"}',
+            http_status=400,
+            error_code="error.invalid.takeprofit.maxvalue: 4153.55",
+            outcome="REJECTED",
+        )
+        bot._dispatch_owned_cycle = Mock()
+
+        bot._open_passed_trigger_at_market(
+            stopped, D("4153.59"), "error.validation.stop.price"
+        )
+
+        self.assertEqual(stopped.pending_market_kind, "")
+        self.assertFalse(stopped.pending_market_unknown_post)
+        self.assertEqual(stopped.last_market_outcome, "REJECTED")
+        self.assertEqual(stopped.last_market_http_status, 400)
+        self.assertEqual(
+            stopped.last_market_error_code,
+            "error.invalid.takeprofit.maxvalue: 4153.55",
+        )
+        self.assertEqual(before, (bot.state.scenario, bot.state.general_recovery,
+                                  len(bot.state.recovery_events)))
+        bot.capital.open_position.assert_called_once()
+        bot._dispatch_owned_cycle.assert_called_once()
+
+    def test_legacy_validation_pending_is_resolved_after_reload(self):
+        bot = self.make_bot()
+        stopped = bot.strategy.stopped("SELL", D("4011.10"))
+        stopped.pending_market_kind = "FALLBACK"
+        stopped.pending_market_unknown_post = True
+        stopped.pending_market_reason = (
+            'Capital API 400: {"errorCode":"error.invalid.takeprofit.maxvalue: 4153.55"}'
+        )
+        bot.state.save(bot.cfg.state_file)
+        bot.state = CycleState.load(bot.cfg.state_file)
+        bot.strategy = Strategy(bot.cfg, bot.state)
+        bot._dispatch_owned_cycle = Mock()
+
+        self.assertTrue(bot._resume_pending_market())
+
+        restored = bot.state.short
+        self.assertEqual(restored.pending_market_kind, "")
+        self.assertEqual(restored.last_market_outcome, "REJECTED")
+        bot.capital.open_position.assert_not_called()
+        bot._dispatch_owned_cycle.assert_called_once()
+
+    def test_trigger_reentry_uses_new_positions_reference_and_survives_reload(self):
+        bot = self.make_bot()
+        bot.state.short.deal_id = "old-sell"
+        bot.state.short.deal_reference = "old-position-reference"
+        stopped = bot.strategy.stopped("SELL", D("4011.10"), "old-stop")
+        stopped.trigger_id = "owned-order"
+        candidate = {
+            "dealId": "new-sell", "dealReference": "new-position-reference",
+            "workingOrderId": "owned-order", "direction": "SELL",
+            "level": "4009.95", "size": "0.1",
+        }
+        bot.capital.activity.return_value = [{
+            "id": "owned-execution", "dealId": "owned-order", "source": "USER",
+            "type": "WORKING_ORDER", "status": "EXECUTED",
+            "dateUTC": "2026-09-28T12:03:17.204Z",
+        }]
+        bot._apply_protection = Mock(return_value=True)
+
+        bot._detect_trigger_fill({"new-sell": candidate})
+        bot.state.save(bot.cfg.state_file)
+        restored = CycleState.load(bot.cfg.state_file)
+
+        record = next(item for item in restored.deal_history
+                      if item["deal_id"] == "new-sell")
+        self.assertEqual(restored.short.deal_reference, "new-position-reference")
+        self.assertEqual(record["deal_reference"], "new-position-reference")
+        old = next(item for item in restored.deal_history
+                   if item.get("deal_id") == "old-sell")
+        self.assertNotEqual(old.get("deal_reference"), "new-position-reference")
+
+    def test_resetcycle_demo_archives_flat_cycle_and_is_idempotent(self):
+        bot = self.make_bot()
+        bot.state.cycle_id = bot.state.active_attempt_id = 91
+        bot.state.cycle_attempt = 1
+        bot.state.completed_cycles = 12
+        bot.state.pending_transaction_jobs = [{
+            "key": "old-transaction", "cycle_id": 2, "attempt_id": 2,
+            "deal_ids": ["old-deal"],
+        }]
+        bot.state.report_outbox = [{"id": "older-report", "text": "kept"}]
+        bot.capital.positions.return_value = []
+        bot.capital.working_orders.return_value = []
+
+        bot.command("/resetcycle")
+
+        self.assertEqual(bot.state.phase, "PAUSED")
+        self.assertTrue(bot.state.paused)
+        self.assertFalse(bot.state.active)
+        self.assertEqual(bot.state.completed_cycles, 12)
+        self.assertEqual(bot.state.pending_transaction_jobs[0]["key"], "old-transaction")
+        self.assertEqual(len(bot.state.report_outbox), 2)
+        self.assertTrue(any(item.get("status") == "RESET_BY_USER"
+                            for item in bot.state.completed_attempt_summaries))
+        reports = len(bot.state.report_outbox)
+        bot.command("/resetcycle")
+        self.assertEqual(len(bot.state.report_outbox), reports)
+        self.assertEqual(bot.state.completed_cycles, 12)
+
+    def test_resetcycle_rejects_real_exposure_api_failure_and_unknown_mutation(self):
+        for case in ("real", "position", "order", "api", "unknown"):
+            with self.subTest(case=case):
+                bot = self.make_bot()
+                if case == "real":
+                    bot.cfg = Settings(
+                        dry_run=False, demo=False, api_key="key",
+                        identifier="id", password="password",
+                    )
+                elif case == "position":
+                    bot.capital.positions.return_value = [{
+                        "position": {"dealId": "foreign-open", "direction": "BUY"},
+                        "market": {"epic": bot.cfg.epic},
+                    }]
+                    bot.capital.working_orders.return_value = []
+                elif case == "order":
+                    bot.capital.positions.return_value = []
+                    bot.capital.working_orders.return_value = [{
+                        "workingOrderData": {"dealId": "owned-order", "epic": bot.cfg.epic}
+                    }]
+                elif case == "api":
+                    bot.capital.positions.side_effect = CapitalError("positions unavailable")
+                else:
+                    bot.capital.positions.return_value = []
+                    bot.capital.working_orders.return_value = []
+                    bot.state.short.pending_market_kind = "FALLBACK"
+                    bot.state.short.pending_market_unknown_post = True
+                before = (bot.state.scenario, bot.state.general_recovery,
+                          bot.state.completed_cycles, list(bot.state.deal_history))
+                with self.assertRaises(RuntimeError):
+                    bot.command("/resetcycle")
+                self.assertEqual(
+                    before,
+                    (bot.state.scenario, bot.state.general_recovery,
+                     bot.state.completed_cycles, bot.state.deal_history),
+                )
+
+    def test_resetcycle_pending_finalization_resumes_on_startup(self):
+        bot = self.make_bot()
+        bot.state.cycle_id = bot.state.active_attempt_id = 92
+        bot.state.cycle_attempt = 1
+        bot.state.pending_finalization = {
+            "kind": "RESET_BY_USER", "cycle_id": bot.state.cycle_id,
+            "attempt_id": bot.state.active_attempt_id,
+        }
+        bot.state.paused = True
+        bot.state.save(bot.cfg.state_file)
+        bot.state = CycleState.load(bot.cfg.state_file)
+        bot.strategy = Strategy(bot.cfg, bot.state)
+        bot.capital.positions.return_value = []
+        bot.capital.working_orders.return_value = []
+
+        bot.reconcile_startup()
+
+        self.assertTrue(bot.reconciled)
+        self.assertEqual(bot.state.phase, "PAUSED")
+        self.assertFalse(bot.state.pending_finalization)
+        self.assertEqual(len([item for item in bot.state.report_outbox
+                              if str(item.get("key", "")).startswith("cycle-reset:")]), 1)
+
+    def test_missing_survivor_after_protection_failure_does_not_create_trigger(self):
+        bot = self.make_bot()
+        bot.state.long.deal_id, bot.state.short.deal_id = "buy-survivor", "sell-stopped"
+        bot.capital.positions.return_value = [{
+            "position": {"dealId": "buy-survivor", "direction": "BUY", "size": "0.1",
+                         "level": "4010.30", "stopLevel": "4009.30",
+                         "profitLevel": str(bot.state.long.take_profit)},
+            "market": {"epic": bot.cfg.epic},
+        }]
+        bot.capital.activity.return_value = [{
+            "id": "sell-sl", "dateUTC": "2026-09-28T12:04:18.850Z",
+            "dealId": "sell-stopped", "source": "SL", "type": "POSITION",
+            "status": "ACCEPTED", "details": {"level": "4011.10", "size": "0.1"},
+        }]
+        bot._apply_protection = Mock(return_value=False)
+        bot._create_trigger = Mock()
+
+        with patch("trader.app.time.sleep"):
+            bot._tick_cycle()
+
+        bot._apply_protection.assert_called_once_with(bot.state.long)
+        bot._create_trigger.assert_not_called()
+
+    def test_protection_not_found_switches_to_history_without_repeating_put(self):
+        bot = self.make_bot()
+        leg = bot.state.long
+        leg.deal_id = "missing-buy"
+        bot.capital.quote.return_value = D("4010.00"), D("4010.20")
+        bot.capital.update_position.side_effect = CapitalError(
+            'Capital API 404: {"errorCode":"error.not-found.dealId"}',
+            http_status=404, error_code="error.not-found.dealId", outcome="REJECTED",
+        )
+        bot.capital.positions.return_value = []
+        bot.capital.activity.return_value = []
+
+        self.assertFalse(bot._apply_protection(leg))
+        self.assertFalse(bot._apply_protection(leg))
+
+        bot.capital.update_position.assert_called_once()
+        bot.capital.activity.assert_any_call("missing-buy")
+
+    def test_attempt_289_rejection_chain_does_not_leave_false_market_pending(self):
+        bot = self.make_bot()
+        bot.state.long.deal_id = "buy-4156"
+        bot.state.long.current_entry = bot.state.long.original_trigger_level = D("4156.37")
+        bot.state.long.stop, bot.state.long.take_profit = D("4155.37"), D("4158.44")
+        bot.state.short.deal_id = "sell-4155"
+        bot.state.short.current_entry = bot.state.short.original_trigger_level = D("4155.66")
+        bot.state.short.stop = D("4156.66")
+        bot.state.remember_deal(bot.state.long, 1)
+        bot.state.remember_deal(bot.state.short, 1)
+        stopped = bot.strategy.stopped("SELL", D("4156.72"), "sell-sl-289")
+        bot.capital.quote.return_value = D("4155.20"), D("4155.70")
+        bot.capital.positions.return_value = []
+        bot.capital.activity.return_value = []  # BUY close is deliberately unknown.
+        bot.capital.update_position.side_effect = CapitalError(
+            'Capital API 404: {"errorCode":"error.not-found.dealId"}',
+            http_status=404, error_code="error.not-found.dealId", outcome="REJECTED",
+        )
+        bot.capital.working_orders.return_value = []
+        bot.capital.working_stop.side_effect = CapitalError(
+            'Capital API 400: {"errorCode":"error.validation.stop.price"}',
+            http_status=400, error_code="error.validation.stop.price", outcome="REJECTED",
+        )
+        bot.capital.open_position.side_effect = CapitalError(
+            'Capital API 400: {"errorCode":"error.invalid.takeprofit.maxvalue: 4153.55"}',
+            http_status=400,
+            error_code="error.invalid.takeprofit.maxvalue: 4153.55",
+            outcome="REJECTED",
+        )
+        bot._dispatch_owned_cycle = Mock()
+        before = (bot.state.scenario, bot.state.general_recovery)
+
+        self.assertFalse(bot._apply_protection(bot.state.long))
+        bot._create_trigger(stopped)
+
+        self.assertEqual(stopped.pending_market_kind, "")
+        self.assertFalse(stopped.pending_market_unknown_post)
+        self.assertEqual(stopped.last_market_outcome, "REJECTED")
+        self.assertEqual(before, (bot.state.scenario, bot.state.general_recovery))
+        bot.capital.open_position.assert_called_once()
+        # No synthetic close/fill was invented for the vanished BUY.
+        buy_record = next(item for item in bot.state.deal_history
+                          if item.get("deal_id") == "buy-4156")
+        self.assertIsNone(buy_record.get("close_level"))
+
     def test_initial_unknown_market_survives_tick_and_state_reload(self):
         bot = self.make_bot()
         bot.capital.open_position.side_effect = CapitalError("write timed out")
@@ -2929,6 +3184,28 @@ class DiagnosticHistoryTest(unittest.TestCase):
 
 
 class CapitalClientTest(unittest.TestCase):
+    def test_check_classifies_concrete_validation_rejection_but_not_generic_400(self):
+        rejected = Mock(ok=False, status_code=400, content=b"x")
+        rejected.text = '{"errorCode":"error.invalid.takeprofit.maxvalue: 4153.55"}'
+        rejected.json.return_value = {
+            "errorCode": "error.invalid.takeprofit.maxvalue: 4153.55"
+        }
+        with self.assertRaises(CapitalError) as captured:
+            CapitalClient._check(rejected)
+        self.assertTrue(captured.exception.rejected)
+        self.assertEqual(captured.exception.http_status, 400)
+        self.assertEqual(
+            captured.exception.error_code,
+            "error.invalid.takeprofit.maxvalue: 4153.55",
+        )
+
+        ambiguous = Mock(ok=False, status_code=400, content=b"x", text="bad request")
+        ambiguous.json.return_value = {"message": "bad request"}
+        with self.assertRaises(CapitalError) as captured:
+            CapitalClient._check(ambiguous)
+        self.assertFalse(captured.exception.rejected)
+        self.assertEqual(captured.exception.outcome, "UNKNOWN")
+
     def test_activity_uses_explicit_one_day_utc_range_without_last_period(self):
         client = CapitalClient(Settings(api_key="key", identifier="id", password="password"))
         client.request = Mock(return_value={"activities": []})

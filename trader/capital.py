@@ -22,7 +22,18 @@ SENSITIVE_KEYS = {
 
 
 class CapitalError(RuntimeError):
-    pass
+    """Capital failure with a machine-readable broker outcome classification."""
+
+    def __init__(self, message: str, *, http_status: int | None = None,
+                 error_code: str = "", outcome: str = "UNKNOWN"):
+        super().__init__(message)
+        self.http_status = http_status
+        self.error_code = error_code
+        self.outcome = outcome
+
+    @property
+    def rejected(self) -> bool:
+        return self.outcome == "REJECTED"
 
 
 class CapitalClient:
@@ -207,7 +218,22 @@ class CapitalClient:
     @staticmethod
     def _check(response: requests.Response) -> None:
         if not response.ok:
-            raise CapitalError(f"Capital API {response.status_code}: {response.text[:500]}")
+            try:
+                payload = response.json()
+            except (TypeError, ValueError):
+                payload = {}
+            error_code = str(payload.get("errorCode", "")) if isinstance(payload, dict) else ""
+            # A concrete Capital errorCode in a final 4xx response proves rejection of this
+            # request. A generic/malformed response or server failure remains UNKNOWN.
+            outcome = (
+                "REJECTED"
+                if 400 <= response.status_code < 500 and error_code
+                else "UNKNOWN"
+            )
+            raise CapitalError(
+                f"Capital API {response.status_code}: {response.text[:500]}",
+                http_status=response.status_code, error_code=error_code, outcome=outcome,
+            )
 
     def quote(self, epic: str) -> tuple[Decimal, Decimal]:
         market = self.request("GET", f"/markets/{epic}")["snapshot"]

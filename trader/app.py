@@ -593,6 +593,7 @@ class Bot:
                 "/status /start /startcycle /pause /stop /resume /positions /orders /pnl /cycleinfo\n"
                 "/menu — показать клавиатуру /hidemenu — свернуть клавиатуру\n"
                 "/automode — безопасно выйти из ручного режима\n"
+                "/resetcycle — DEMO: сбросить локальный цикл после broker-flat проверки\n"
                 "/profit200 VALUE — личный profit следующих 200 завершённых циклов\n"
                 "/dealhistory [DEAL_ID] — история сохранённых сделок или точного ID\n"
                 "/sendlog — прислать текущий диагностический файл\n"
@@ -623,6 +624,8 @@ class Bot:
             self._deal_history(args)
         elif command == "/automode":
             self._exit_manual_mode()
+        elif command == "/resetcycle":
+            self._reset_cycle_command()
         elif command == "/sendlog":
             self._send_diagnostic_log()
         elif command == "/profit200":
@@ -672,6 +675,107 @@ class Bot:
             self._manual_command(command, args)
         else:
             self.telegram.send("Неизвестная или неполная команда. /help")
+
+    def _unknown_cycle_mutations(self) -> list[str]:
+        unknown = []
+        for leg in (self.state.long, self.state.short):
+            if not leg:
+                continue
+            if leg.pending_market_kind:
+                unknown.append(f"{leg.direction} pending MARKET")
+            if leg.pending_trigger_create or leg.pending_trigger_cancel_unknown:
+                unknown.append(f"{leg.direction} pending Trigger mutation")
+            if leg.pending_race_close_unknown:
+                unknown.append(f"{leg.direction} pending race close")
+        if self.state.pending_close_unknown_delete:
+            unknown.append("pending position close")
+        for direction, operation in self.state.scenario_nine_close_operations.items():
+            if operation.get("state") not in {"CONFIRMED", "RECONCILED"}:
+                unknown.append(f"{direction} pending Scenario-9 close")
+        return unknown
+
+    def _verified_flat_for_reset(self) -> None:
+        unknown = self._unknown_cycle_mutations()
+        if unknown:
+            raise RuntimeError("сброс заблокирован: " + "; ".join(unknown))
+        # Two consecutive successful reads prevent a single transient empty response from being
+        # treated as proof. No mutation is issued by this command.
+        for check in range(2):
+            positions = self._cycle_positions()
+            orders = [item for item in self.capital.working_orders()
+                      if self._order_epic(item) == self.cfg.epic]
+            if positions or orders:
+                raise RuntimeError(
+                    f"сброс запрещён: broker exposure на проверке {check + 1}/2; "
+                    f"позиции={len(positions)}, ордера={len(orders)}"
+                )
+
+    def _reset_cycle_command(self) -> None:
+        if not self.cfg.demo:
+            raise RuntimeError("/resetcycle доступна только в DEMO")
+        if (not self.state.active and not self.state.deal_history
+                and not self.state.pending_finalization):
+            self.state.paused = True
+            self.state.armed = False
+            self.state.phase = "PAUSED"
+            self.state.save(self.cfg.state_file)
+            self.telegram.send("ℹ️ Активного локального цикла нет. Режим уже PAUSED.")
+            return
+        self.state.paused = True
+        self.state.armed = False
+        self.state.save(self.cfg.state_file)
+        try:
+            self._verified_flat_for_reset()
+        except CapitalError as exc:
+            raise RuntimeError(f"broker-flat проверка недоступна: {exc}") from exc
+        self.state.pending_finalization = {
+            "kind": "RESET_BY_USER", "cycle_id": self.state.cycle_id,
+            "attempt_id": self.state.active_attempt_id,
+        }
+        self.state.save(self.cfg.state_file)
+        self._resume_cycle_reset()
+
+    def _resume_cycle_reset(self) -> None:
+        operation = self.state.pending_finalization
+        if not operation or operation.get("kind") != "RESET_BY_USER":
+            return
+        self._verified_flat_for_reset()
+        cycle_id = int(operation.get("cycle_id", self.state.cycle_id) or 0)
+        archive = {
+            "reason": "RESET_BY_USER", "cycle_id": cycle_id,
+            "attempt_id": operation.get("attempt_id"),
+            "scenario": self.state.scenario,
+            "general_recovery": str(self.state.general_recovery),
+            "deal_history": self.state.deal_history,
+            "attempt_history": self.state.attempt_history,
+            "recovery_events": self.state.recovery_events,
+            "scenario_transitions": self.state.scenario_transitions,
+            "actual_result_status": self.state.broker_transaction_status,
+        }
+        LOG.info("CYCLE_LEDGER_RESET %s", json.dumps(archive, ensure_ascii=False, sort_keys=True))
+        report = (
+            "🧹 Локальный цикл сброшен пользователем\n\n"
+            f"Сценарий до сброса: {self.state.scenario}\n"
+            f"GENERAL до сброса: {self.state.general_recovery}\n"
+            "Broker-flat подтверждён двумя чтениями positions/working orders.\n"
+            "Финансовые данные сохранены как доступные; отсутствующие fills не выдумывались.\n"
+            "Дальнейшее действие: PAUSED. Новый S1 — только через /start."
+        )
+        self._store_report(report, f"cycle-reset:{cycle_id}:{operation.get('attempt_id', 0)}")
+        attempt_id = int(operation.get("attempt_id", 0) or 0)
+        if attempt_id and not any(
+            item.get("attempt_id") == attempt_id and item.get("status") == "RESET_BY_USER"
+            for item in self.state.completed_attempt_summaries
+        ):
+            self.state.completed_attempt_summaries.append({
+                "cycle_id": cycle_id, "attempt_id": attempt_id,
+                "status": "RESET_BY_USER", "actual_result_status": "INCOMPLETE",
+            })
+        self.state.reset()
+        self.state.paused = True
+        self.state.armed = False
+        self.state.phase = "PAUSED"
+        self.state.save(self.cfg.state_file)
 
     def _deal_history(self, args: list[str]) -> None:
         """Show the durable local ledger or query Capital activity for one exact dealId."""
@@ -1862,12 +1966,15 @@ class Bot:
             "До broker confirmation Trigger считается только запланированным."
         )
         if not self._apply_protection(survivor):
-            # If TP completion did not finish the cycle, the survivor itself closed during its
-            # protection PUT. Preserve strategy order by creating the already-required trigger
-            # for the first stopped side; the next tick will classify the survivor's SL/TP.
-            if self.state.active and not stopped.trigger_id:
-                self._create_trigger(stopped)
-                self.state.save(self.cfg.state_file)
+            # A failed read-back/404 can mean that the survivor closed while protection was
+            # changing. Never create a Trigger from the stale local ``open`` flag. Re-enter the
+            # ordinary broker-evidence dispatcher, which checks positions and deal history first.
+            LOG.info(
+                "FOLLOW-UP DEFERRED survivor=%s dealId=%s reason=protection_not_confirmed "
+                "next=reconcile_positions_activity; no Trigger/MARKET submitted",
+                survivor.direction, survivor.deal_id,
+            )
+            self.state.save(self.cfg.state_file)
             return
         self._create_trigger(stopped)
         self.state.save(self.cfg.state_file)
@@ -1959,6 +2066,22 @@ class Bot:
             return False
         preexisting_ids = set(leg.pending_market_preexisting_ids)
         if leg.pending_market_kind == "FALLBACK":
+            # Migration for the 289 failure: older code persisted a concrete validation response
+            # as UNKNOWN, but retained the exact Capital error in pending_market_reason.
+            reason = leg.pending_market_reason.lower()
+            if (leg.pending_market_unknown_post and not leg.pending_market_reference
+                    and "capital api 4" in reason
+                    and ("error.invalid." in reason or "error.validation." in reason)):
+                self._record_market_rejection(
+                    leg, error_code=next(
+                        (part.rstrip('"}') for part in reason.replace(':', ' ').split()
+                         if part.startswith("error.")),
+                        "legacy.validation.rejection",
+                    ), http_status=400, message=leg.pending_market_reason,
+                )
+                self._clear_pending_market(leg)
+                self._dispatch_owned_cycle()
+                return True
             _, projected_distance, projected_recovery = self.strategy.projected_reopen(leg.direction)
             projected_target = target_for(
                 leg.direction, leg.original_trigger_level,
@@ -1972,10 +2095,11 @@ class Bot:
         # Initial POST without a conclusive result must never fall through to BOTH_OPEN handling:
         # the opposite side may not have been submitted at all.
         try:
-            continuation_rounds = 1 if self.state.continuation_managed else 20
-            position = self._resolve_unknown_market_position(
-                leg.direction, preexisting_ids, attempts=continuation_rounds
-            ) if leg.pending_market_unknown_post else None
+            continuation_rounds = 1
+            if leg.pending_market_unknown_post and not leg.pending_market_reference:
+                self._cycle_positions()
+                return True
+            position = None
             if position is None and leg.pending_market_reference:
                 confirmation = self._wait_market_submission(
                     leg.pending_market_reference,
@@ -2095,6 +2219,33 @@ class Bot:
             f"dealId={leg.deal_id}. Противоположный вход автоматически не отправлен."
         )
         return True
+
+    def _record_market_rejection(self, leg: Leg, *, error_code: str,
+                                 http_status: int | None, message: str) -> None:
+        """Persist a final broker rejection without changing Scenario or Recovery."""
+        leg.last_market_operation_kind = leg.pending_market_kind or "FALLBACK"
+        leg.last_market_outcome = "REJECTED"
+        leg.last_market_http_status = http_status
+        leg.last_market_error_code = error_code
+        leg.last_market_error = message
+        marker = (
+            f"market-rejected:{self.state.cycle_id}:{self.state.cycle_attempt}:"
+            f"{leg.direction}:{error_code}"
+        )
+        if marker not in self.state.processed_events:
+            self.state.processed_events.append(marker)
+            self.state.events.append(
+                f"MARKET_REJECTED direction={leg.direction} status={http_status} "
+                f"error_code={error_code}; scenario/general unchanged="
+                f"{self.state.scenario}/{self.state.general_recovery}"
+            )
+        self.state.save(self.cfg.state_file)
+        LOG.info(
+            "BROKER DECISION handler=MARKET_FALLBACK outcome=REJECTED cycle=%s attempt=%s "
+            "direction=%s status=%s error_code=%s next=reconcile_positions_and_activity",
+            self.state.cycle_id, self.state.cycle_attempt, leg.direction,
+            http_status, error_code,
+        )
 
     def _close_trigger_that_raced_with_tp(self, leg: Leg) -> Decimal | None:
         """Close an owned TP/cancel-race position and return its separate signed result."""
@@ -2259,6 +2410,9 @@ class Bot:
             trigger_level = leg.original_trigger_level
             executed_trigger_id = leg.trigger_id
             actual_size = D(str(candidate["size"])) if candidate.get("size") is not None else None
+            # A reentry is a new position. Never inherit the prior position's reference when the
+            # linked /positions payload publishes its own opening identity (or no reference).
+            leg.deal_reference = str(candidate.get("dealReference") or "")
             execution_time = ""
             try:
                 execution = find_working_order_execution(
@@ -2951,25 +3105,31 @@ class Bot:
         for _ in range(self.execution_policy.attempts):
             if leg.pending_market_unknown_post and not leg.pending_market_reference:
                 try:
-                    resolved_position = self._resolve_unknown_market_position(
-                        leg.direction, preexisting_ids, attempts=20
-                    )
-                except Exception as exc:
+                    positions = self._cycle_positions()
+                except CapitalError as exc:
                     leg.pending_market_reason = str(exc)
                     self.state.save(self.cfg.state_file)
-                    LOG.warning("Unknown MARKET fallback reconciliation delayed: %s", exc)
+                    LOG.info(
+                        "Unknown MARKET fallback read delayed direction=%s error=%s",
+                        leg.direction, exc,
+                    )
                     return
-                if resolved_position is None:
-                    return
-                accepted = {
-                    "dealStatus": "ACCEPTED",
-                    "dealId": str(resolved_position["dealId"]),
-                    "affectedDeals": [{
-                        "dealId": str(resolved_position["dealId"]), "status": "OPENED",
-                    }],
-                    "level": resolved_position.get("level"),
-                }
-                break
+                opposite = self.state.short if leg.direction == "BUY" else self.state.long
+                try:
+                    if opposite and opposite.deal_id and opposite.deal_id not in positions:
+                        activity = self.capital.activity(opposite.deal_id)
+                        if not activity:
+                            self.capital.activity()
+                except CapitalError as exc:
+                    leg.pending_market_reason = str(exc)
+                    self.state.save(self.cfg.state_file)
+                LOG.info(
+                    "BROKER DECISION handler=MARKET_FALLBACK outcome=UNKNOWN cycle=%s "
+                    "attempt=%s direction=%s reference=none next=bounded positions/activity; "
+                    "required_evidence=broker correlation or explicit rejection",
+                    self.state.cycle_id, self.state.cycle_attempt, leg.direction,
+                )
+                return
             if leg.pending_market_reference:
                 reference = leg.pending_market_reference
             else:
@@ -2991,32 +3151,59 @@ class Bot:
                     leg.pending_market_reference = reference
                     leg.pending_market_unknown_post = False
                     self.state.save(self.cfg.state_file)
-                except Exception as exc:
+                except CapitalError as exc:
+                    if exc.rejected:
+                        self._record_market_rejection(
+                            leg, error_code=exc.error_code,
+                            http_status=exc.http_status, message=str(exc),
+                        )
+                        self._clear_pending_market(leg)
+                        self._send_report(
+                            "⛔ MARKET fallback отклонён брокером\n\n"
+                            f"Сценарий {self.state.scenario}\n"
+                            f"Сторона: {leg.direction}\nHTTP: {exc.http_status}\n"
+                            f"Код Capital: {exc.error_code}\n"
+                            "Scenario и GENERAL не изменены. Следующее действие: свежая "
+                            "сверка positions/activity; повторный POST сейчас не отправляется."
+                        )
+                        self._dispatch_owned_cycle()
+                        return
+                    leg.pending_market_reason = str(exc)
+                    self.state.save(self.cfg.state_file)
+                    LOG.info(
+                        "BROKER DECISION handler=MARKET_FALLBACK outcome=UNKNOWN "
+                        "direction=%s evidence=%s next=positions/activity",
+                        leg.direction, exc,
+                    )
+                    # One bounded read per turn keeps closure discovery alive without the old
+                    # 20-request loop. No reference means no safe identity for a found position.
                     try:
-                        resolved_position = self._resolve_unknown_market_position(
-                            leg.direction, preexisting_ids, attempts=20
-                        )
-                    except Exception as reconcile_exc:
-                        leg.pending_market_reason = str(reconcile_exc)
-                        self.state.save(self.cfg.state_file)
-                        LOG.warning(
-                            "MARKET POST and follow-up position reconciliation are unavailable: %s",
-                            reconcile_exc,
-                        )
-                        return
-                    if resolved_position is None:
-                        leg.pending_market_reason = str(exc)
+                        self._cycle_positions()
+                    except CapitalError as read_exc:
+                        leg.pending_market_reason = str(read_exc)
                         self.state.save(self.cfg.state_file)
                         return
-                    accepted = {
-                        "dealStatus": "ACCEPTED",
-                        "dealId": str(resolved_position["dealId"]),
-                        "affectedDeals": [{
-                            "dealId": str(resolved_position["dealId"]), "status": "OPENED",
-                        }],
-                        "level": resolved_position.get("level"),
-                    }
-                    break
+                    try:
+                        self.capital.activity(
+                            (self.state.short if leg.direction == "BUY" else self.state.long).deal_id
+                        )
+                    except (CapitalError, AttributeError):
+                        pass
+                    return
+                except Exception as exc:
+                    leg.pending_market_reason = str(exc)
+                    self.state.save(self.cfg.state_file)
+                    LOG.info(
+                        "BROKER DECISION handler=MARKET_FALLBACK outcome=UNKNOWN "
+                        "direction=%s reference=none; duplicate POST blocked",
+                        leg.direction,
+                    )
+                    try:
+                        self._cycle_positions()
+                    except CapitalError as read_exc:
+                        leg.pending_market_reason = str(read_exc)
+                        self.state.save(self.cfg.state_file)
+                    return
             try:
                 result = self._wait_market_submission(reference, rounds=3)
             except Exception as exc:
@@ -3453,6 +3640,8 @@ class Bot:
         if self.state.pending_finalization:
             if self.state.pending_finalization.get("kind") == "SCENARIO_9":
                 self._resume_scenario_nine_finalization()
+            elif self.state.pending_finalization.get("kind") == "RESET_BY_USER":
+                self._resume_cycle_reset()
             else:
                 self._resume_normal_finalization()
             self.reconciled = True
@@ -4405,6 +4594,21 @@ class Bot:
 
     def _apply_protection(self, leg: Leg | None) -> bool:
         if leg and leg.open and leg.deal_id:
+            if leg.protection_confirmation == "NOT_FOUND_RECONCILE":
+                positions = self._cycle_positions()
+                if leg.deal_id not in positions:
+                    try:
+                        activity = self.capital.activity(leg.deal_id)
+                        if not activity:
+                            self.capital.activity()
+                    except CapitalError:
+                        LOG.info("Protection 404 history is not published yet dealId=%s", leg.deal_id)
+                    return False
+                # The list endpoint proves the same permanent position is visible again; only
+                # now may the exact protection revision be attempted anew.
+                leg.protection_confirmation = ""
+                leg.protection_unknown = False
+                self.state.save(self.cfg.state_file)
             if self._take_profit_already_reached(leg):
                 self._close_reached_take_profit(leg)
                 return False
@@ -4457,6 +4661,7 @@ class Bot:
                 # strategy target having been reached and close the surviving leg at market.
                 text = str(exc).lower()
                 if "error.not-found.dealid" in text:
+                    leg.protection_confirmation = "NOT_FOUND_RECONCILE"
                     LOG.info(
                         "Protection deferred because dealId is not currently visible; "
                         "closure is not inferred from 404: direction=%s "

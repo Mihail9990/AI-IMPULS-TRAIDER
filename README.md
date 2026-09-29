@@ -222,6 +222,7 @@ deal history показывается как неполная детализац
 /settp long|short PRICE
 /profit200 0.4
 /automode
+/resetcycle
 /removesl long|short
 /removetp long|short
 /canceltrigger long|short
@@ -230,6 +231,13 @@ deal history показывается как неполная детализац
 
 Ручные команды применяются сразу, без дополнительного `/confirm`, но только после проверки
 стороны, позиции и подтверждения Capital.com.
+
+`/resetcycle` доступна только в DEMO и не закрывает позиции/ордера. Команда сначала запрещает
+новые входы, дважды подтверждает отсутствие позиций и working orders, проверяет отсутствие
+неразрешённых broker mutations, сохраняет доступный ledger с причиной `RESET_BY_USER`, затем
+очищает только активный цикл и оставляет режим `PAUSED`. Общие counters, durable outbox и
+независимые transaction jobs сохраняются. В REAL, при ошибке API, открытой экспозиции или unknown
+mutation команда отклоняется без сброса. Новый S1 после сброса запускается обычной `/start`.
 
 Получение команд, отправка сообщений и загрузка файлов выполняются тремя независимыми фоновыми
 Telegram-потоками. Основной торговый поток только забирает уже полученные строки команд и ставит
@@ -259,6 +267,13 @@ stale ручное состояние также автоматически оч
 `/canceltrigger` сохраняет ownership старого Trigger до положительного CANCELLED либо восстановления
 EXECUTED-позиции. Неизвестная отмена блокирует только конфликтующую mutation, а survivor продолжает
 сопровождаться. Подтверждённая ручная отмена подавляет автоматическое немедленное пересоздание заявки.
+
+Broker validation response с конкретным HTTP status и `errorCode` хранится как подтверждённый
+`REJECTED` именно этой операции, а не как transport-unknown. Ложный pending MARKET снимается без
+изменения Scenario/GENERAL, после чего выполняется свежая сверка positions/activity. Timeout или
+потерянный ответ остаются `UNKNOWN`: повторный POST запрещён, а одно пустое `/positions` не
+разрешает операцию. После 404 protection бот не повторяет одинаковый PUT к исчезнувшему dealId,
+а переходит к deal-specific/global activity и обычной классификации SL/TP.
 
 Transaction reconciliation принимает как прежние `transactionId/type/amount`, так и фактические
 Capital payloads `reference/transactionType/size` для `TRADE`. `size` считается денежным только для
