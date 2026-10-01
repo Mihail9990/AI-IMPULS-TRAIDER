@@ -204,6 +204,13 @@ class Bot:
                     continue
                 waiting = dict(job["waiting"])
                 waiting.update(completed["result"])
+                applied = self._apply_delayed_initial_pair_result(job, completed["result"])
+                if job.get("financial_deals") and not applied:
+                    # Do not discard the sole durable ownership/evidence snapshot merely because
+                    # this history publication lacks size/time or conflicts with saved evidence.
+                    if isinstance(worker, NotificationHistoryWorker):
+                        worker.acknowledge(completed["key"])
+                    continue
                 self._send_report(
                     self._initial_pair_report_text(job["closed"], waiting, final=True, meta=job),
                     key=f"{job['key']}:final",
@@ -422,6 +429,7 @@ class Bot:
 
     def _archive_and_clear_completed_cycle(self, report: str) -> None:
         """Write one self-contained final ledger, then remove cycle-detail working state."""
+        self._enrich_attempt_summaries_from_ledger()
         archive = {
             "cycle_id": self.state.cycle_id, "completed_cycles": self.state.completed_cycles,
             "report": report, "deal_history": self.state.deal_history,
@@ -455,10 +463,6 @@ class Bot:
         self.state.processed_events.clear()
         self.state.pending_actual_attempt_id = 0
         self.state.pending_actual_deal_ids.clear()
-        self.state.pending_notification_jobs[:] = [
-            job for job in self.state.pending_notification_jobs
-            if int(job.get("cycle_id", 0) or 0) != completed_cycle_id
-        ]
         self.state.broker_transaction_pnl = None
         self.state.broker_transaction_currency = ""
         self.state.broker_transaction_status = "UNAVAILABLE"
@@ -741,6 +745,7 @@ class Bot:
             return
         self._verified_flat_for_reset()
         cycle_id = int(operation.get("cycle_id", self.state.cycle_id) or 0)
+        self._enrich_attempt_summaries_from_ledger()
         archive = {
             "reason": "RESET_BY_USER", "cycle_id": cycle_id,
             "attempt_id": operation.get("attempt_id"),
@@ -1241,12 +1246,26 @@ class Bot:
         self, closed: Leg, source: str, fill: Decimal, waiting: Leg,
     ) -> None:
         key = f"initial-pair-history:{closed.deal_id}:{waiting.deal_id}:{fill}"
+        for leg in (closed, waiting):
+            self.state.remember_deal(leg, scenario=1)
+        closed_record = next(
+            (item for item in self.state.deal_history if item.get("deal_id") == closed.deal_id),
+            None,
+        )
         if not any(item.get("key") == key for item in self.state.pending_notification_jobs):
             self.state.pending_notification_jobs.append({
                 "key": key, "cycle_id": self.state.cycle_id,
+                "attempt_id": self.state.active_attempt_id or self.state.diagnostic_cycle_number,
                 "cycle_attempt": self.state.cycle_attempt, "scenario": self.state.scenario,
                 "closed": self._leg_report_snapshot(closed, source, fill),
                 "waiting": self._leg_report_snapshot(waiting),
+                "financial_deals": [dict(closed_record or {}), {
+                    "deal_id": waiting.deal_id, "deal_reference": waiting.deal_reference,
+                    "direction": waiting.direction, "entry": str(waiting.current_entry),
+                    "size": str(waiting.size), "scenario": 1,
+                    "attempt_id": self.state.active_attempt_id or self.state.diagnostic_cycle_number,
+                    "cycle_id": self.state.cycle_id, "cycle_attempt": self.state.cycle_attempt,
+                }],
                 "created_at": time.time(), "search_from_epoch": time.time() - 3600,
                 "search_to_epoch": time.time() + 86400,
                 "original_decision": "MANUAL: начальная пара не была подтверждена",
@@ -1258,6 +1277,132 @@ class Bot:
                 self._leg_report_snapshot(waiting), final=False,
             ), key=f"{key}:pending",
         )
+
+    @staticmethod
+    def _validated_delayed_close(job: dict, result: dict) -> dict | None:
+        """Return normalized full-close evidence, or None without weakening broker validation."""
+        waiting = job.get("waiting", {})
+        if (str(result.get("deal_id", "")) != str(waiting.get("deal_id", ""))
+                or result.get("source") not in {"SL", "TP"}
+                or result.get("type") != "POSITION"
+                or result.get("status") != "ACCEPTED"
+                or not result.get("event_id") or not result.get("execution_time")):
+            return None
+        try:
+            fill = D(str(result["fill"])); size = D(str(result["size"]))
+            expected_size = D(str(waiting["size"]))
+            timestamp = datetime.fromisoformat(
+                str(result["execution_time"]).replace("Z", "+00:00")
+            )
+        except (ArithmeticError, KeyError, TypeError, ValueError):
+            return None
+        if (not fill.is_finite() or not size.is_finite() or size <= 0
+                or size != expected_size or timestamp == datetime.min.replace(tzinfo=timezone.utc)):
+            return None
+        return {
+            "event_id": str(result["event_id"]), "deal_id": str(result["deal_id"]),
+            "source": str(result["source"]), "type": str(result["type"]),
+            "status": str(result["status"]), "fill": str(fill), "size": str(size),
+            "execution_time": timestamp.isoformat(),
+        }
+
+    def _apply_delayed_initial_pair_result(self, job: dict, result: dict) -> bool:
+        """Atomically stage one late initial-pair result in the durable attempt statistics."""
+        close = self._validated_delayed_close(job, result)
+        deals = [dict(item) for item in job.get("financial_deals", [])]
+        if close is None or len(deals) != 2:
+            return False
+        target = next((item for item in deals if item.get("deal_id") == close["deal_id"]), None)
+        if target is None:
+            return False
+        target.update({
+            "close_source": close["source"], "close_level": close["fill"],
+            "close_size": close["size"], "close_event_id": close["event_id"],
+            "close_event_type": close["type"], "close_event_status": close["status"],
+            "close_execution_time": close["execution_time"],
+        })
+        ownership = (
+            int(job.get("cycle_id", 0) or 0), int(job.get("cycle_attempt", 0) or 0),
+            int(job.get("attempt_id", 0) or 0),
+        )
+        normalized = []
+        total = D("0")
+        for item in deals:
+            if (int(item.get("cycle_id", 0) or 0), int(item.get("cycle_attempt", 0) or 0),
+                    int(item.get("attempt_id", 0) or 0)) != ownership:
+                return False
+            required = ("deal_id", "direction", "entry", "size", "close_source",
+                        "close_level", "close_size", "close_event_id", "close_event_type",
+                        "close_event_status", "close_execution_time")
+            if any(item.get(name) in (None, "") for name in required):
+                return False
+            if item["direction"] not in {"BUY", "SELL"} \
+                    or item["close_source"] not in {"SL", "TP"} \
+                    or item["close_event_type"] != "POSITION" \
+                    or item["close_event_status"] != "ACCEPTED":
+                return False
+            try:
+                entry, fill = D(str(item["entry"])), D(str(item["close_level"]))
+                size, close_size = D(str(item["size"])), D(str(item["close_size"]))
+                timestamp = datetime.fromisoformat(
+                    str(item["close_execution_time"]).replace("Z", "+00:00")
+                )
+            except (ArithmeticError, TypeError, ValueError):
+                return False
+            if (not all(value.is_finite() for value in (entry, fill, size, close_size))
+                    or size <= 0 or close_size != size
+                    or timestamp == datetime.min.replace(tzinfo=timezone.utc)):
+                return False
+            signed = (fill - entry if item["direction"] == "BUY" else entry - fill) * size
+            total += signed
+            normalized.append({
+                "event_id": str(item["close_event_id"]), "deal_id": str(item["deal_id"]),
+                "direction": str(item["direction"]), "entry": str(entry), "fill": str(fill),
+                "size": str(size), "source": str(item["close_source"]),
+                "type": str(item["close_event_type"]), "status": str(item["close_event_status"]),
+                "execution_time": timestamp.isoformat(), "result": str(signed),
+            })
+        attempt_id = ownership[2]
+        if not attempt_id:
+            return False
+        summary = next(
+            (item for item in self.state.completed_attempt_summaries
+             if int(item.get("attempt_id", 0) or 0) == attempt_id
+             and int(item.get("cycle_id", 0) or 0) == ownership[0]), None,
+        )
+        if summary is not None:
+            if D(str(summary.get("result", "0"))) != total:
+                self._diagnostic_decision_once(
+                    f"delayed-attempt-conflict:{ownership[0]}:{attempt_id}",
+                    f"delayed initial attempt result conflict: saved={summary.get('result')} "
+                    f"broker={total}",
+                )
+                return False
+            if summary.get("financial_result_applied"):
+                return True
+        else:
+            summary = {
+                "cycle_id": ownership[0], "cycle_attempt": ownership[1],
+                "attempt_id": attempt_id, "status": "INITIAL_PAIR_CLOSED_DURING_FORMATION",
+                "completed_cycle": None,
+            }
+            self.state.completed_attempt_summaries.append(summary)
+        summary.update({
+            "result": str(total), "actual_result": str(total),
+            "actual_result_status": "CONFIRMED", "financial_result_applied": True,
+            "closes": normalized,
+        })
+        self.state.attempt_result_total += total
+        job["financial_deals"] = deals
+        job["financial_result_applied"] = True
+        # Keep the active ledger useful until /automode, but never attach old evidence to new legs.
+        if self.state.cycle_id == ownership[0] and self.state.active:
+            for saved in deals:
+                record = next((item for item in self.state.deal_history
+                               if item.get("deal_id") == saved["deal_id"]), None)
+                if record is not None:
+                    record.update(saved)
+        return True
 
     def _initial_pair_report_text(
         self, first: dict, second: dict, *, final: bool, meta: dict | None = None,
@@ -1295,12 +1440,18 @@ class Bot:
             )
         first_line, first_value = line(first)
         second_line, second_value = line(second)
+        accounting = (
+            "Фактический итог атомарно сохранён в attempt_result_total и durable summary; "
+            "GENERAL_RECOVERY не изменён."
+            if meta.get("financial_result_applied") else
+            "Этот информационный итог НЕ добавлен в attempt_result_total и Recovery."
+        )
         return (
             f"⛔ {heading}\nСобытие: обе стороны начальной пары закрылись при формировании\n"
             "Подтверждение: отдельные broker history/activity события для каждой позиции.\n"
             f"{first_line}\n{second_line}\n"
             f"Итог двух позиций={first_value} + {second_value} = {first_value + second_value}.\n"
-            "Этот информационный итог НЕ добавлен в attempt_result_total и Recovery.\n"
+            f"{accounting}\n"
             f"Решение в момент события: {meta.get('original_decision', 'MANUAL: initial-пара не сформирована')}. "
             f"Это отложенный отчёт старой попытки; текущее состояние бота: phase={self.state.phase}, "
             f"active={self.state.active}, manual={self.state.manual}. Оно могло измениться после события."
@@ -3402,17 +3553,24 @@ class Bot:
             points = fill - leg.current_entry if leg.direction == "BUY" else leg.current_entry - fill
             size = leg.size if leg.size else self.cfg.size
             details.append((leg, fill, points * size))
-        close_money = sum((item[2] for item in details), D("0"))
+        complete_closes = self._attempt_closes_from_ledger(
+            self.state.cycle_id, self.state.cycle_attempt,
+            self.state.active_attempt_id or self.state.diagnostic_cycle_number,
+            source="SL",
+        )
+        close_money = sum((D(item["result"]) for item in complete_closes), D("0"))
         money = -(
             self.state.realized_loss_money - self.state.cycle_attempt_start_loss_money
         )
-        self.state.remember_attempt(
-            "DOUBLE_SL_CONTINUATION", money, scenario=self.state.scenario,
-            closes=[{"direction": leg.direction, "deal_id": leg.deal_id,
-                     "fill": str(fill), "result": str(result)}
-                    for leg, fill, result in details],
-            completed_cycle=None,
-        )
+        try:
+            self.state.remember_attempt(
+                "DOUBLE_SL_CONTINUATION", money, scenario=self.state.scenario,
+                closes=complete_closes,
+                completed_cycle=None,
+            )
+        except RuntimeError as exc:
+            self._manual(f"Конфликт attempt summary при double-SL: {exc}")
+            return
         pending_d_added = self.strategy.account_double_sl_pending()
         self.state.active = True
         self.state.armed = False
@@ -3441,6 +3599,72 @@ class Bot:
             f"Пауза до {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.state.continuation_pause_until))}. "
             "Затем бот перейдёт к обычному входному фильтру этого же цикла."
         )
+
+    def _attempt_closes_from_ledger(
+        self, cycle_id: int, cycle_attempt: int, attempt_id: int, *, source: str = ""
+    ) -> list[dict]:
+        """Build a complete attempt-owned execution summary from immutable local evidence."""
+        closes = []
+        for item in self.state.deal_history:
+            if (int(item.get("cycle_id", 0) or 0) != int(cycle_id)
+                    or int(item.get("cycle_attempt", 0) or 0) != int(cycle_attempt)
+                    or int(item.get("attempt_id", 0) or 0) != int(attempt_id)
+                    or item.get("close_evidence_conflict")):
+                continue
+            if source and item.get("close_source") != source:
+                continue
+            required = ("deal_id", "direction", "entry", "size", "close_source",
+                        "close_level", "close_size", "close_event_id", "close_event_type",
+                        "close_event_status", "close_execution_time")
+            if any(item.get(name) in (None, "") for name in required):
+                continue
+            try:
+                entry, fill = D(str(item["entry"])), D(str(item["close_level"]))
+                size, close_size = D(str(item["size"])), D(str(item["close_size"]))
+            except (ArithmeticError, TypeError, ValueError):
+                continue
+            if close_size != size or size <= 0:
+                continue
+            result = (fill - entry if item["direction"] == "BUY" else entry - fill) * size
+            closes.append({
+                "event_id": str(item["close_event_id"]), "deal_id": str(item["deal_id"]),
+                "direction": str(item["direction"]), "entry": str(entry), "fill": str(fill),
+                "size": str(size), "source": str(item["close_source"]),
+                "type": str(item["close_event_type"]), "status": str(item["close_event_status"]),
+                "execution_time": str(item["close_execution_time"]), "result": str(result),
+            })
+        return sorted(closes, key=lambda item: (item["execution_time"], item["event_id"]))
+
+    def _enrich_attempt_summaries_from_ledger(self) -> None:
+        """Repair locally provable legacy close lists without changing monetary aggregates."""
+        for attempt in self.state.attempt_history:
+            if attempt.get("status") != "DOUBLE_SL_CONTINUATION":
+                continue
+            closes = self._attempt_closes_from_ledger(
+                int(attempt.get("cycle_id", 0) or 0),
+                int(attempt.get("cycle_attempt", 0) or 0),
+                int(attempt.get("attempt_id", 0) or 0), source="SL",
+            )
+            if not closes:
+                continue
+            ledger_total = sum((D(item["result"]) for item in closes), D("0"))
+            if ledger_total != D(str(attempt.get("result", "0"))):
+                self._diagnostic_decision_once(
+                    f"attempt-summary-conflict:{attempt.get('cycle_id')}:{attempt.get('attempt_id')}",
+                    f"attempt summary conflict: saved={attempt.get('result')} ledger={ledger_total}",
+                )
+                continue
+            saved_total = self.state.attempt_result_total
+            active_attempt = self.state.active_attempt_id
+            self.state.active_attempt_id = int(attempt.get("attempt_id", 0) or 0)
+            try:
+                self.state.remember_attempt(
+                    str(attempt["status"]), ledger_total, closes=closes,
+                    scenario=attempt.get("scenario"), completed_cycle=attempt.get("completed_cycle"),
+                )
+            finally:
+                self.state.active_attempt_id = active_attempt
+            self.state.attempt_result_total = saved_total
 
     def _tick_continuation_pause(self) -> None:
         if time.time() < self.state.continuation_pause_until:

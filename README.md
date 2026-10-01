@@ -158,8 +158,20 @@ read-only задание и следует прежней безопасной �
 `notification-history` использует собственный Capital API client/session, читает только
 deal-specific/global history и может дополнить информационный итог после перехода в manual или
 перезапуска. Снимок задания содержит исходные dealId, entry, size и уровни, поэтому следующий цикл
-не подменяет данные отчёта. Фоновый обработчик не отправляет заявки, не запускает continuation и
-не включает результат несформированной пары в `attempt_result_total`.
+не подменяет данные отчёта. Фоновый обработчик не отправляет заявки и не запускает continuation.
+Он возвращает главному потоку полное accepted execution evidence: permanent dealId, устойчивую
+event identity, source/type/status, fill, actual size и broker UTC execution time. Только главный
+поток проверяет полноту двух закрытий, одним SQLite commit создаёт
+`INITIAL_PAIR_CLOSED_DURING_FORMATION` в `completed_attempt_summaries` и ровно один раз добавляет
+fill-based результат в `attempt_result_total`. Этот статистический результат не начисляется в
+`GENERAL_RECOVERY`, не завершает успешный цикл и не меняет manual/Scenario. Pending snapshot
+переживает `/automode`, новый цикл и restart; Telegram outbox удаляется после доставки независимо
+от финансовой записи.
+
+Attempt summary для double-SL строится не только из закрытий текущего handler-вызова, а из полного
+локального `deal_history` с точным `cycle_id/cycle_attempt/attempt_id`. Повторная обработка и
+архивация обогащают legacy summary недостающими broker executions по event identity, не меняя
+повторно `attempt_result_total`, realized losses, GENERAL или Recovery.
 
 Capital.com ограничивает один запрос `/history/activity` диапазоном 24 часа и
 `lastPeriod <= 86400`. Поэтому восстановленное старое задание использует сохранённые UTC-границы

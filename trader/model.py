@@ -254,7 +254,39 @@ class CycleState:
     ) -> None:
         """Persist one unique trading attempt without feeding it into strategy recovery."""
         attempt_id = self.active_attempt_id or self.diagnostic_cycle_number
-        if not attempt_id or any(item.get("attempt_id") == attempt_id for item in self.attempt_history):
+        existing = next(
+            (item for item in self.attempt_history if item.get("attempt_id") == attempt_id), None
+        )
+        if not attempt_id:
+            return
+        if existing is not None:
+            if existing.get("status") != status or existing.get("result") in (None, ""):
+                return
+            if D(str(existing.get("result", "0"))) != result:
+                raise RuntimeError(
+                    f"Conflicting attempt result for {attempt_id}: "
+                    f"saved={existing.get('result')}, received={result}"
+                )
+            incoming_closes = details.get("closes") or []
+            saved_closes = existing.setdefault("closes", [])
+            for close in incoming_closes:
+                prior = next((item for item in saved_closes
+                              if close.get("event_id") and item.get("event_id") == close["event_id"]), None)
+                if prior is None:
+                    # Legacy summaries did not persist broker event identity/size/time.  A matching
+                    # owned deal and fill is safe to enrich; a different fill remains a conflict.
+                    prior = next((item for item in saved_closes
+                                  if item.get("deal_id") == close.get("deal_id")), None)
+                if prior is not None:
+                    for key, value in close.items():
+                        if key in prior and prior[key] not in (None, "") and prior[key] != value:
+                            raise RuntimeError(
+                                f"Conflicting close evidence for attempt {attempt_id}: "
+                                f"{close.get('event_id') or close.get('deal_id')}"
+                            )
+                    prior.update(close)
+                    continue
+                saved_closes.append(dict(close))
             return
         self.attempt_history.append({
             "attempt_id": attempt_id,
@@ -445,7 +477,9 @@ class CycleState:
         self.broker_transaction_currency = ""
         self.broker_transaction_status = "UNAVAILABLE"
         self.broker_transaction_components.clear()
-        self.pending_notification_jobs.clear()
+        # Read-only history jobs carry immutable snapshots of attempts whose second close may be
+        # published after /automode, a new cycle, or a restart.  They are removed by the main
+        # owner only after their financial evidence has been durably applied.
         self.last_trigger_resolution = "Нет связанного Trigger."
         self.long = self.short = None
         self.phase = "IDLE"

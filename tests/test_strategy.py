@@ -3990,7 +3990,8 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
             "waiting": {"deal_id": "buy-old"}, "search_from_epoch": started,
             "search_to_epoch": started + 86400,
         })
-        self.assertEqual(result, {"source": "TP", "fill": "105"})
+        self.assertEqual({key: result[key] for key in ("source", "fill")},
+                         {"source": "TP", "fill": "105"})
         first = client.activity.call_args_list[0]
         self.assertIn("from_date", first.kwargs)
         self.assertIn("to_date", first.kwargs)
@@ -4008,7 +4009,8 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
             "waiting": {"deal_id": "wanted"}, "search_from_epoch": 1000,
             "search_to_epoch": 2000,
         })
-        self.assertEqual(result, {"source": "SL", "fill": "99"})
+        self.assertEqual({key: result[key] for key in ("source", "fill")},
+                         {"source": "SL", "fill": "99"})
         client.activity.assert_called_once()
         self.assertEqual(client.activity.call_args.args[0], "wanted")
 
@@ -4026,7 +4028,8 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
             "waiting": {"deal_id": "wanted"}, "search_from_epoch": 1000,
             "search_to_epoch": 2000,
         })
-        self.assertEqual(result, {"source": "TP", "fill": "103"})
+        self.assertEqual({key: result[key] for key in ("source", "fill")},
+                         {"source": "TP", "fill": "103"})
         self.assertEqual(client.activity.call_count, 1)
 
     def test_foreign_deal_close_is_not_accepted(self):
@@ -4059,7 +4062,8 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
         job = {"waiting": {"deal_id": "legacy"}}
         with patch("trader.notifications.time.time", return_value=now):
             result = NotificationHistoryWorker._resolve(FilteringClient(), job)
-        self.assertEqual(result, {"source": "SL", "fill": "98"})
+        self.assertEqual({key: result[key] for key in ("source", "fill")},
+                         {"source": "SL", "fill": "98"})
         self.assertEqual(job["search_from_epoch"], now - 86400)
         self.assertEqual(job["search_to_epoch"], now)
         self.assertTrue(job["history_range_uncertain"])
@@ -4190,10 +4194,9 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
                 return []
 
         with patch("trader.notifications.time.time", return_value=event_epoch + 86400):
-            self.assertEqual(
-                NotificationHistoryWorker._resolve(FilteringClient(), repaired),
-                {"source": "SL", "fill": "98"},
-            )
+            result = NotificationHistoryWorker._resolve(FilteringClient(), repaired)
+            self.assertEqual({key: result[key] for key in ("source", "fill")},
+                             {"source": "SL", "fill": "98"})
 
     def test_unverifiable_old_attempt_snapshot_range_is_marked_uncertain_not_shifted(self):
         job = {
@@ -4220,10 +4223,9 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
             frozen = (job["search_from_epoch"], job["search_to_epoch"])
             events.append({"dealId": "late", "source": "SL", "type": "POSITION", "status": "ACCEPTED",
                            "level": 97})
-            self.assertEqual(
-                NotificationHistoryWorker._resolve(Client(), job),
-                {"source": "SL", "fill": "97"},
-            )
+            result = NotificationHistoryWorker._resolve(Client(), job)
+            self.assertEqual({key: result[key] for key in ("source", "fill")},
+                             {"source": "SL", "fill": "97"})
         self.assertEqual((job["search_from_epoch"], job["search_to_epoch"]), frozen)
 
     def test_history_api_error_does_not_invent_a_result(self):
@@ -4251,7 +4253,8 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
             "waiting": {"deal_id": "old-deal"}, "search_from_epoch": started,
             "search_to_epoch": started + 3 * 86400,
         })
-        self.assertEqual(result, {"source": "SL", "fill": "97"})
+        self.assertEqual({key: result[key] for key in ("source", "fill")},
+                         {"source": "SL", "fill": "97"})
         self.assertEqual(len(calls), 6)
         for _, start_text, end_text, _ in calls:
             start_value = datetime.fromisoformat(start_text).replace(tzinfo=timezone.utc)
@@ -4480,7 +4483,8 @@ class DetailedNotificationRegressionTest(unittest.TestCase):
         }]
         job = {"waiting": {"deal_id": "buy-270"}}
         result = NotificationHistoryWorker._resolve(client, job)
-        self.assertEqual(result, {"source": "SL", "fill": "4285.04"})
+        self.assertEqual({key: result[key] for key in ("source", "fill")},
+                         {"source": "SL", "fill": "4285.04"})
         client.open_position.assert_not_called()
         client.update_position.assert_not_called()
 
@@ -7794,6 +7798,229 @@ class SuccessfulCycleEndToEndTest(unittest.TestCase):
                         summary = next(item for item in bot.state.completed_attempt_summaries
                                        if item.get("status") == "COMPLETED_CYCLE")
                         self.assertEqual(D(summary["result"]), expected_actual)
+
+
+class AttemptFinancialAccountingRegressionTest(unittest.TestCase):
+    def make_bot(self, path: str, *, mirror: bool = False) -> tuple[Bot, Leg, Leg]:
+        bot = Bot.__new__(Bot)
+        bot.cfg = Settings(
+            dry_run=False, demo=True, api_key="key", identifier="id", password="password",
+            size=D("10"), state_file=path, diagnostic_log_file=str(Path(path).with_suffix(".log")),
+        )
+        bot.capital = Mock()
+        bot.capital.positions.return_value = []
+        bot.capital.working_orders.return_value = []
+        bot.telegram = Mock()
+        bot.notification_worker = None
+        bot.transaction_worker = None
+        bot._queued_report_parts = set()
+        bot._queued_log_parts = set()
+        bot.state = CycleState(active=True, scenario=1, phase="BOTH_OPEN")
+        bot.state.cycle_id = bot.state.active_attempt_id = bot.state.diagnostic_cycle_number = 291
+        bot.state.cycle_attempt = 1
+        bot.state.attempt_counter = 291
+        buy = Leg("BUY", D("4147.32"), D("4147.32"), deal_id="buy-291",
+                  deal_reference="buy-ref", size=D("10"), stop_distance=D("1"),
+                  stop=D("4146.32"))
+        sell = Leg("SELL", D("4145.78"), D("4145.78"), deal_id="sell-291",
+                   deal_reference="sell-ref", size=D("10"), stop_distance=D("1"),
+                   stop=D("4146.78"))
+        bot.state.long, bot.state.short = buy, sell
+        bot.strategy = Strategy(bot.cfg, bot.state)
+        first, waiting = (buy, sell) if mirror else (sell, buy)
+        first_fill = D("4146.23") if mirror else D("4146.80")
+        first_event = normalize_event({
+            "id": "buy-close" if mirror else "sell-close",
+            "dateUTC": "2026-09-29T07:39:37.901Z" if mirror else "2026-09-29T07:39:38.605Z",
+            "dealId": first.deal_id, "source": "SL", "type": "POSITION",
+            "status": "ACCEPTED", "details": {
+                "level": str(first_fill), "size": 10, "direction": (
+                    "SELL" if first.direction == "BUY" else "BUY"
+                ), "stopLevel": str(first.stop),
+            },
+        })
+        bot._remember_close_event(first, first_event, scenario_at_close=1)
+        bot._schedule_initial_pair_report(first, "SL", first_fill, waiting)
+        bot.state.manual = True
+        bot.state.phase = "MANUAL"
+        bot.state.save(path)
+        return bot, first, waiting
+
+    @staticmethod
+    def result_for(leg: Leg) -> dict:
+        buy = leg.direction == "BUY"
+        return {
+            "deal_id": leg.deal_id, "event_id": "buy-close" if buy else "sell-close",
+            "source": "SL", "type": "POSITION", "status": "ACCEPTED",
+            "fill": "4146.23" if buy else "4146.80", "size": "10",
+            "execution_time": (
+                "2026-09-29T07:39:37.901+00:00" if buy
+                else "2026-09-29T07:39:38.605+00:00"
+            ),
+        }
+
+    def apply_worker_result(self, bot: Bot, waiting: Leg, *, repeat: bool = False) -> None:
+        worker = Mock(spec=NotificationHistoryWorker)
+        completed = {"key": bot.state.pending_notification_jobs[0]["key"],
+                     "result": self.result_for(waiting)}
+        worker.results.return_value = [completed]
+        bot.notification_worker = worker
+        bot._tick_notifications()
+        if repeat:
+            worker.results.return_value = [completed]
+            bot._tick_notifications()
+
+    def test_delayed_initial_double_sl_is_accounted_once_and_survives_cleanup_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "state.json")
+            bot, _, waiting = self.make_bot(path)
+            general_before = bot.state.general_recovery
+            bot.state = CycleState.load(path)
+            bot.strategy = Strategy(bot.cfg, bot.state)
+            waiting = bot.state.long
+            self.apply_worker_result(bot, waiting, repeat=True)
+
+            self.assertEqual(bot.state.attempt_result_total, D("-21.10"))
+            summary = bot.state.completed_attempt_summaries[0]
+            self.assertEqual((summary["cycle_id"], summary["attempt_id"],
+                              summary["cycle_attempt"]), (291, 291, 1))
+            self.assertEqual(summary["actual_result_status"], "CONFIRMED")
+            self.assertEqual({item["deal_id"] for item in summary["closes"]},
+                             {"buy-291", "sell-291"})
+            self.assertEqual(sum((D(item["result"]) for item in summary["closes"]), D("0")),
+                             D("-21.10"))
+            self.assertEqual(bot.state.general_recovery, general_before)
+            self.assertEqual(len(bot.state.deal_history), 2)
+            self.assertIn("сохранён в attempt_result_total", bot.telegram.send.call_args.args[0])
+
+            # A delivered report disappears independently of the financial summary.
+            bot.state.report_outbox = [{"id": "delayed", "key": "delayed", "parts": [
+                {"number": 1, "text": "-21.10", "status": "pending"},
+            ]}]
+            telegram = Mock(spec=Telegram)
+            telegram.delivery_acks.return_value = [
+                {"report_id": "delayed", "part": 1, "status": "delivered"}
+            ]
+            telegram.document_acks.return_value = []
+            bot.telegram = telegram
+            bot.notification_worker = None
+            bot._tick_notifications()
+            self.assertEqual(bot.state.report_outbox, [])
+            self.assertEqual(bot.state.completed_attempt_summaries[0]["result"], "-21.10")
+
+            bot.telegram = Mock()
+            bot._exit_manual_mode()
+            self.assertEqual(bot.state.deal_history, [])
+            self.assertEqual(bot.state.attempt_result_total, D("-21.10"))
+            self.assertEqual(bot.state.completed_attempt_summaries[0]["result"], "-21.10")
+            bot.strategy.begin(D("4200.5"), D("4200"))
+            self.assertEqual(bot.state.general_recovery, D("0"))
+            bot.state.save(path)
+            restored = CycleState.load(path)
+            self.assertEqual(restored.attempt_result_total, D("-21.10"))
+            self.assertEqual(restored.completed_attempt_summaries[0]["result"], "-21.10")
+
+    def test_mirrored_order_and_late_result_use_original_snapshot_not_new_legs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "state.json")
+            bot, _, waiting = self.make_bot(path, mirror=True)
+            job = bot.state.pending_notification_jobs[0]
+            bot.state.cycle_id = 292
+            bot.state.active_attempt_id = 292
+            bot.state.long = Leg("BUY", D("5000"), D("5000"), deal_id="new-buy", size=D("20"))
+            bot.state.short = Leg("SELL", D("4999"), D("4999"), deal_id="new-sell", size=D("20"))
+            self.assertTrue(bot._apply_delayed_initial_pair_result(job, self.result_for(waiting)))
+            self.assertEqual(bot.state.attempt_result_total, D("-21.10"))
+            summary = bot.state.completed_attempt_summaries[0]
+            self.assertEqual(summary["cycle_id"], 291)
+            self.assertNotIn("new-buy", {item["deal_id"] for item in summary["closes"]})
+            self.assertEqual(bot.state.long.deal_id, "new-buy")
+
+    def test_incomplete_or_conflicting_delayed_evidence_stays_pending(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot, _, waiting = self.make_bot(str(Path(directory) / "state.json"))
+            job = bot.state.pending_notification_jobs[0]
+            incomplete = self.result_for(waiting); incomplete["size"] = None
+            self.assertFalse(bot._apply_delayed_initial_pair_result(job, incomplete))
+            conflicting = self.result_for(waiting); conflicting["deal_id"] = "foreign"
+            self.assertFalse(bot._apply_delayed_initial_pair_result(job, conflicting))
+            self.assertEqual(bot.state.attempt_result_total, D("0"))
+            self.assertEqual(bot.state.completed_attempt_summaries, [])
+            self.assertEqual(len(bot.state.pending_notification_jobs), 1)
+
+    def double_sl_bot(self, path: str) -> Bot:
+        bot = self.make_bot(path)[0]
+        bot.state.pending_notification_jobs.clear()
+        bot.state.manual = False
+        bot.state.long.current_entry, bot.state.short.current_entry = D("100"), D("99.5")
+        bot.state.long.deal_id, bot.state.short.deal_id = "buy", "sell"
+        bot.state.long.size = bot.state.short.size = D("10")
+        bot.state.long.stop, bot.state.short.stop = D("99"), D("100.5")
+        bot.state.deal_history.clear()
+        bot.state.attempt_result_total = D("0")
+        bot.state.realized_loss_money = D("0")
+        bot.state.realized_losses = D("0")
+        events = [
+            normalize_event({"id": "buy-sl", "dateUTC": "2026-09-28T12:04:18Z",
+                             "dealId": "buy", "source": "SL", "type": "POSITION",
+                             "status": "ACCEPTED", "details": {"level": 99, "size": 10,
+                                                                    "stopLevel": 99}}),
+            normalize_event({"id": "sell-sl", "dateUTC": "2026-09-28T12:04:20Z",
+                             "dealId": "sell", "source": "SL", "type": "POSITION",
+                             "status": "ACCEPTED", "details": {"level": 100.6, "size": 10,
+                                                                    "stopLevel": 100.5}}),
+        ]
+        raw = [event.raw for event in events]
+        bot.capital.activity.return_value = raw
+        bot._apply_confirmed_stop_event(bot.state.long, events[0], raw)
+        bot._apply_confirmed_stop_event(bot.state.short, events[1], raw)
+        return bot
+
+    def test_sequential_double_sl_summary_uses_complete_owned_ledger(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self.double_sl_bot(str(Path(directory) / "state.json"))
+            with patch("trader.app.time.time", return_value=1000):
+                bot._begin_double_sl_pause([(bot.state.short, D("100.6"))])
+            summary = bot.state.attempt_history[0]
+            self.assertEqual(summary["result"], "-21.0")
+            self.assertEqual({item["event_id"] for item in summary["closes"]},
+                             {"buy-sl", "sell-sl"})
+            self.assertEqual(bot.state.attempt_result_total, D("-21.0"))
+
+    def test_legacy_single_close_summary_is_enriched_without_reaccounting_or_cross_attempt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "state.json")
+            bot = self.double_sl_bot(path)
+            bot.state.attempt_history = [{
+                "attempt_id": 291, "cycle_id": 291, "cycle_attempt": 1,
+                "status": "DOUBLE_SL_CONTINUATION", "result": "-21.0", "scenario": 1,
+                "closes": [{"deal_id": "buy", "direction": "BUY", "fill": "99",
+                            "result": "-10"}],
+            }]
+            bot.state.attempt_result_total = D("-21")
+            bot.state.deal_history.append({
+                "deal_id": "foreign", "direction": "BUY", "entry": "10", "size": "10",
+                "cycle_id": 291, "cycle_attempt": 2, "attempt_id": 292,
+                "close_source": "SL", "close_level": "9", "close_size": "10",
+                "close_event_id": "foreign-sl", "close_event_type": "POSITION",
+                "close_event_status": "ACCEPTED", "close_execution_time": "2026-09-28T12:05:00+00:00",
+            })
+            bot.state.save(path)
+            bot.state = CycleState.load(path); bot.strategy = Strategy(bot.cfg, bot.state)
+            before = bot.state.attempt_result_total
+            bot._enrich_attempt_summaries_from_ledger()
+            summary = bot.state.attempt_history[0]
+            self.assertEqual(bot.state.attempt_result_total, before)
+            self.assertEqual({item["deal_id"] for item in summary["closes"]}, {"buy", "sell"})
+
+            bot.state.pending_finalization = {"kind": "RESET_BY_USER", "cycle_id": 291,
+                                              "attempt_id": 291}
+            bot.state.active = True
+            with self.assertLogs("trader.app", level="INFO") as captured:
+                bot._resume_cycle_reset()
+            archive = next(line for line in captured.output if "CYCLE_LEDGER_RESET" in line)
+            self.assertIn('"deal_id": "sell"', archive)
+            self.assertEqual(bot.state.attempt_result_total, before)
 
 
 class SQLiteStateStoreRegressionTest(unittest.TestCase):

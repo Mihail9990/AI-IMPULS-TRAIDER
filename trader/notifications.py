@@ -213,7 +213,16 @@ class NotificationHistoryWorker:
             for source in ("SL", "TP"):
                 event = find_close_event(activity, deal_id, source)
                 if event is not None and event.level is not None:
-                    return {"source": source, "fill": str(event.level)}
+                    return {
+                        "deal_id": event.deal_id,
+                        "event_id": event.event_id,
+                        "source": event.source,
+                        "type": event.event_type,
+                        "status": event.status,
+                        "fill": str(event.level),
+                        "size": str(event.size) if event.size is not None else None,
+                        "execution_time": event.timestamp.isoformat(),
+                    }
             return None
 
         window_start = started
