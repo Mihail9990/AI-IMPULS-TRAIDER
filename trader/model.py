@@ -89,11 +89,20 @@ class CycleState:
     paused: bool = False
     manual: bool = False
     scenario: int = 0
+    strategy_version: str = "V3.3"
+    cycle_strategy_version: str = ""
+    cycle_scenario_sizes: list[str] = field(default_factory=list)
+    cycle_stop_distances: list[str] = field(default_factory=list)
     recovery: Decimal = D("0")
     # Recovery model v3: one monetary balance for the complete logical cycle. ``recovery`` and
     # the per-leg recovery fields are retained only as serialized legacy input/display mirrors.
     recovery_model_version: int = 3
     general_recovery: Decimal = D("0")
+    # V3.3 keeps confirmed losses and not-yet-replaced projections separate.  The old
+    # ``general_recovery`` field remains a readable mirror of confirmed loss for legacy reports.
+    actual_cycle_loss: Decimal = D("0")
+    actual_cycle_pnl: Decimal = D("0")
+    projected_losses: list[dict] = field(default_factory=list)
     target_value: Decimal = D("0")
     initial_position_size: Decimal = D("0")
     recovery_events: list[dict] = field(default_factory=list)
@@ -123,6 +132,8 @@ class CycleState:
     pending_close_reason: str = ""
     pending_close_deal_id: str = ""
     pending_close_unknown_delete: bool = False
+    transition_retry: dict = field(default_factory=dict)
+    completion_intent: dict = field(default_factory=dict)
     long: Leg | None = None
     short: Leg | None = None
     phase: str = "IDLE"
@@ -134,14 +145,8 @@ class CycleState:
     active_attempt_id: int = 0
     cycle_id: int = 0
     cycle_attempt: int = 0
-    continuation_pause_until: float = 0.0
-    continuation_stopped_by_user: bool = False
     cycle_attempt_start_losses: Decimal = D("0")
     cycle_attempt_start_loss_money: Decimal = D("0")
-    continuation_managed: bool = False
-    continuation_stage: str = ""
-    continuation_flat_checks: int = 0
-    continuation_filter_reason: str = ""
     attempt_result_total: Decimal = D("0")
     attempt_history: list[dict] = field(default_factory=list)
     initial_submitted_directions: list[str] = field(default_factory=list)
@@ -304,6 +309,8 @@ class CycleState:
         payload = asdict(self)
         payload["recovery"] = str(self.recovery)
         payload["general_recovery"] = str(self.general_recovery)
+        payload["actual_cycle_loss"] = str(self.actual_cycle_loss)
+        payload["actual_cycle_pnl"] = str(self.actual_cycle_pnl)
         payload["target_value"] = str(self.target_value)
         payload["initial_position_size"] = str(self.initial_position_size)
         payload["entry_spread"] = str(self.entry_spread)
@@ -361,6 +368,21 @@ class CycleState:
             return cls()
         if "recovery_model_version" not in raw:
             raw["recovery_model_version"] = 1
+        # Continuation attempts were removed in V3.3.  Consume their serialized controller
+        # fields so historical databases remain readable without reviving that state machine.
+        for obsolete in ("continuation_pause_until", "continuation_stopped_by_user",
+                         "continuation_managed", "continuation_stage",
+                         "continuation_flat_checks", "continuation_filter_reason"):
+            raw.pop(obsolete, None)
+        raw.setdefault("strategy_version", "V3.3")
+        raw.setdefault("cycle_strategy_version", "")
+        raw.setdefault("cycle_scenario_sizes", [])
+        raw.setdefault("cycle_stop_distances", [])
+        raw.setdefault("actual_cycle_loss", "0")
+        raw.setdefault("actual_cycle_pnl", "0")
+        raw.setdefault("projected_losses", [])
+        raw.setdefault("transition_retry", {})
+        raw.setdefault("completion_intent", {})
         # A permanent transport classification applies only to that process/request.  On a later
         # launch every non-delivered report part is eligible for recovery; acknowledged parts stay
         # delivered and are never repeated.
@@ -422,7 +444,8 @@ class CycleState:
                 leg.setdefault("protection_unknown", False)
                 raw[name] = Leg(**leg)
         raw["recovery"] = D(str(raw.get("recovery", "0")))
-        for name in ("general_recovery", "target_value", "initial_position_size"):
+        for name in ("general_recovery", "actual_cycle_loss", "actual_cycle_pnl",
+                     "target_value", "initial_position_size"):
             raw[name] = D(str(raw.get(name, "0")))
         for name in (
             "entry_spread", "realized_losses", "realized_loss_money", "gross_take_profit", "net_cycle_result",
@@ -450,7 +473,14 @@ class CycleState:
         self.paused = self.manual = False
         self.scenario = 0
         self.recovery = self.entry_spread = D("0")
-        self.general_recovery = self.target_value = self.initial_position_size = D("0")
+        self.general_recovery = self.actual_cycle_loss = self.actual_cycle_pnl = D("0")
+        self.target_value = self.initial_position_size = D("0")
+        self.projected_losses.clear()
+        self.cycle_strategy_version = ""
+        self.cycle_scenario_sizes.clear()
+        self.cycle_stop_distances.clear()
+        self.transition_retry.clear()
+        self.completion_intent.clear()
         self.recovery_model_version = 3
         self.recovery_events.clear()
         self.pending_recovery.clear()
@@ -489,14 +519,8 @@ class CycleState:
         self.attempt_deal_ids.clear()
         self.active_attempt_id = 0
         self.cycle_id = self.cycle_attempt = 0
-        self.continuation_pause_until = 0.0
-        self.continuation_stopped_by_user = False
         self.cycle_attempt_start_losses = D("0")
         self.cycle_attempt_start_loss_money = D("0")
-        self.continuation_managed = False
-        self.continuation_stage = ""
-        self.continuation_flat_checks = 0
-        self.continuation_filter_reason = ""
 
 
 def stop_for(direction: str, entry: Decimal, distance: Decimal) -> Decimal:
@@ -529,14 +553,10 @@ def remaining_recovery_distance(
 def protection_levels(direction: str, entry: Decimal, stop_distance: Decimal,
                       general_recovery: Decimal, size: Decimal, *,
                       scenario: int = 1) -> tuple[Decimal, Decimal]:
-    """Central monetary-Recovery SL/TP formula used by every execution path."""
+    """V3.3 protection: SL uses D_s; TP uses monetary recovery/actual size only."""
     stop = stop_for(direction, entry, stop_distance)
-    recovery = (
-        recovery_distance(general_recovery, size)
-        if scenario == 1
-        else remaining_recovery_distance(general_recovery, size, stop_distance)
-    )
-    target = target_for(direction, entry, stop_distance, recovery)
+    del scenario
+    target = target_for(direction, entry, D("0"), recovery_distance(general_recovery, size))
     return stop, target
 
 

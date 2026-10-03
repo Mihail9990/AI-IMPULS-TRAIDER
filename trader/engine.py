@@ -3,514 +3,282 @@ from __future__ import annotations
 from decimal import Decimal
 
 from .config import Settings
-from .model import (
-    CycleState, Leg, protection_levels, recovery_distance, stop_for, stop_slippage,
-    remaining_recovery_distance, trigger_slippage,
-)
+from .model import CycleState, Leg, recovery_distance, stop_for, target_for
+
+D = Decimal
 
 
 class Strategy:
-    """Deterministic bookkeeping for the monetary GENERAL_RECOVERY model."""
+    """V3.3 monetary strategy.
 
-    MODEL_VERSION = 3
+    Broker mutations live in :mod:`trader.app`; this class is the deterministic, replay-safe
+    owner of scenario and money calculations.  Confirmed loss, expected loss and target money are
+    deliberately distinct persisted components.
+    """
+
+    MODEL_VERSION = 4
+    STRATEGY_VERSION = "V3.3"
 
     def __init__(self, settings: Settings, state: CycleState):
         self.cfg, self.state = settings, state
 
-    def _record_recovery(self, key: str, kind: str, amount: Decimal, **details) -> bool:
-        """Atomically account a named component once; callers persist the enclosing transition."""
-        if any(item.get("key") == key for item in self.state.recovery_events):
-            return False
-        before = self.state.general_recovery
-        self.state.general_recovery += amount
-        self.state.recovery_events.append({
-            "key": key, "kind": kind, "before": str(before), "amount": str(amount),
-            "after": str(self.state.general_recovery),
-            **{name: str(value) if isinstance(value, Decimal) else value
-               for name, value in details.items()},
-        })
-        self.state.events.append(
-            f"GENERAL_RECOVERY {kind}: key={key}; before={before}; amount={amount}; "
-            f"after={self.state.general_recovery}; details={details}"
-        )
-        return True
+    def _size_for(self, scenario: int) -> D:
+        values = self.state.cycle_scenario_sizes
+        return D(values[scenario - 1]) if values else self.cfg.size_for(scenario)
 
-    def _set_pair_component(self, key: str, kind: str, amount: Decimal, **details) -> None:
-        """Set a pair component from confirmed fills; repeated identical confirmation is inert."""
-        existing = next((item for item in self.state.recovery_events if item.get("key") == key), None)
-        if existing is None:
-            self._record_recovery(key, kind, amount, **details)
-            return
-        old = Decimal(str(existing["amount"]))
-        if old != amount:
-            raise RuntimeError(
-                f"Conflicting confirmed pair component {key}: saved={old}, received={amount}"
-            )
+    def _stop_for(self, scenario: int) -> D:
+        values = self.state.cycle_stop_distances
+        return D(values[scenario - 1]) if values else self.cfg.stop_for(scenario)
 
-    def _clear_legacy_leg_components(self) -> None:
-        for leg in (self.state.long, self.state.short):
-            if leg is None:
-                continue
-            # Legacy fields remain readable for migration only; v2 never stores a derived
-            # recovery_distance as a second source of truth.
-            leg.recovery = Decimal("0")
-            leg.temporary_stop_compensation = Decimal("0")
-            leg.temporary_spread_compensation = Decimal("0")
-            leg.temporary_slippage_compensation = Decimal("0")
-
-    def begin(self, ask: Decimal, bid: Decimal) -> None:
+    def begin(self, ask: D, bid: D) -> None:
         if self.state.active:
             raise RuntimeError("A cycle is already active")
-        self.state.active = True
-        self.state.armed = self.state.waiting_current_candle = False
-        self.state.manual = self.state.paused = False
-        self.state.scenario = 1
-        self.state.realized_losses = self.state.realized_loss_money = Decimal("0")
-        self.state.gross_take_profit = self.state.net_cycle_result = Decimal("0")
-        self.state.net_cycle_money = Decimal("0")
-        self.state.scenario_nine_prior_losses = Decimal("0")
-        self.state.scenario_nine_close_gap = Decimal("0")
-        self.state.scenario_nine_total_loss = Decimal("0")
-        self.state.scenario_nine_extra_loss = Decimal("0")
-        self.state.scenario_nine_triggers_verified = False
-        self.state.cycle_trigger_ids.clear()
-        self.state.scenario_nine_long_fill = self.state.scenario_nine_short_fill = None
-        self.state.scenario_nine_close_operations.clear()
-        self.state.cycle_target_profit = (
-            self.state.profit_override
-            if self.state.profit_override is not None and self.state.profit_override_remaining > 0
-            else self.cfg.target_profit
-        )
-        self.state.recovery_model_version = self.MODEL_VERSION
-        self.state.general_recovery = Decimal("0")
-        self.state.recovery = Decimal("0")
-        self.state.recovery_events.clear()
-        self.state.pending_recovery.clear()
-        self.state.scenario_transitions.clear()
-        self.state.trigger_race_results.clear()
-        # A fresh logical cycle never inherits the detailed ledger of a completed/aborted one.
-        self.state.deal_history.clear()
-        self.state.attempt_history.clear()
-        self.state.completed_cycle_report = ""
-        self.state.recovery_migration_error = ""
-        self.state.phase = "BOTH_OPEN"
-        size, distance = self.cfg.size_for(1), self.cfg.stop_for(1)
-        self.state.long = Leg("BUY", ask, ask, size=size, stop_distance=distance)
-        self.state.short = Leg("SELL", bid, bid, size=size, stop_distance=distance)
-        for leg in (self.state.long, self.state.short):
-            leg.stop = stop_for(leg.direction, leg.current_entry, leg.stop_distance)
+        s = self.state
+        s.active, s.armed, s.waiting_current_candle = True, False, False
+        s.manual = s.paused = False
+        s.scenario = 1
+        s.strategy_version = s.cycle_strategy_version = self.STRATEGY_VERSION
+        s.cycle_scenario_sizes = [str(self.cfg.size_for(i)) for i in range(1, 10)]
+        s.cycle_stop_distances = [str(self.cfg.stop_for(i)) for i in range(1, 10)]
+        s.recovery_model_version = self.MODEL_VERSION
+        s.actual_cycle_loss = s.actual_cycle_pnl = D("0")
+        s.general_recovery = s.recovery = D("0")
+        s.realized_losses = s.realized_loss_money = D("0")
+        s.gross_take_profit = s.net_cycle_result = s.net_cycle_money = D("0")
+        s.projected_losses.clear(); s.recovery_events.clear(); s.pending_recovery.clear()
+        s.scenario_transitions.clear(); s.trigger_race_results.clear()
+        s.deal_history.clear(); s.attempt_history.clear()
+        s.completed_cycle_report = s.recovery_migration_error = ""
+        s.transition_retry.clear(); s.completion_intent.clear()
+        s.cycle_target_profit = (s.profit_override if s.profit_override is not None
+                                 and s.profit_override_remaining > 0 else self.cfg.target_profit)
+        s.phase = "BOTH_OPEN"
+        size, distance = self._size_for(1), self._stop_for(1)
+        s.long = Leg("BUY", ask, ask, size=size, stop_distance=distance)
+        s.short = Leg("SELL", bid, bid, size=size, stop_distance=distance)
+        for leg in (s.long, s.short):
+            leg.stop = stop_for(leg.direction, leg.current_entry, distance)
 
-    def confirm_initial_fills(self, long_fill: Decimal, short_fill: Decimal) -> None:
+    def _expected(self, leg: Leg) -> D:
+        stop = leg.confirmation_stop or leg.confirmed_stop or leg.stop
+        if stop is None or leg.size <= 0:
+            raise RuntimeError("Expected loss requires confirmed/calculated SL and actual size")
+        return max(D("0"), (leg.current_entry - stop if leg.direction == "BUY"
+                             else stop - leg.current_entry) * leg.size)
+
+    def _projection(self, deal_id: str) -> dict | None:
+        return next((p for p in self.state.projected_losses
+                     if p.get("deal_id") == deal_id and not p.get("replaced")), None)
+
+    def _remember_projection(self, leg: Leg, scenario: int) -> dict:
+        existing = self._projection(leg.deal_id)
+        amount = self._expected(leg)
+        if existing:
+            if D(str(existing["amount"])) != amount:
+                raise RuntimeError("Confirmed protection conflicts with saved expected loss")
+            return existing
+        item = {"key": f"expected:{self.state.cycle_id}:{leg.deal_id}",
+                "cycle_id": self.state.cycle_id, "attempt_id": self.state.active_attempt_id,
+                "deal_id": leg.deal_id, "direction": leg.direction, "scenario": scenario,
+                "entry": str(leg.current_entry), "size": str(leg.size),
+                "confirmed_stop": str(leg.confirmation_stop or leg.confirmed_stop or leg.stop),
+                "amount": str(amount), "replaced": False, "actual_loss": None,
+                "close_event_id": ""}
+        self.state.projected_losses.append(item)
+        return item
+
+    def _outstanding(self, *, exclude_deal_id: str = "") -> D:
+        return sum((D(str(p["amount"])) for p in self.state.projected_losses
+                    if not p.get("replaced") and p.get("deal_id") != exclude_deal_id), D("0"))
+
+    def _tp_money_for(self, leg: Leg) -> D:
+        # An open position never covers its own future SL; it covers only confirmed losses and
+        # unresolved projections of earlier outgoing positions.
+        return self.state.actual_cycle_loss + self._outstanding(exclude_deal_id=leg.deal_id) + self.state.target_value
+
+    def _set_protection(self, leg: Leg) -> None:
+        if leg.size <= 0:
+            raise RuntimeError("Actual position size is unknown")
+        leg.stop = stop_for(leg.direction, leg.current_entry, leg.stop_distance)
+        tp_distance = self._tp_money_for(leg) / leg.size
+        leg.take_profit = target_for(leg.direction, leg.current_entry, D("0"), tp_distance)
+
+    def confirm_initial_fills(self, long_fill: D, short_fill: D) -> None:
         if not self.state.long or not self.state.short or self.state.scenario != 1:
             raise RuntimeError("Initial legs have not been prepared")
-        long_size, short_size = self.state.long.size, self.state.short.size
-        if long_size <= 0 or short_size <= 0:
-            raise RuntimeError("Initial position size is unknown")
-        if long_size != short_size:
-            raise RuntimeError(
-                f"Initial hedge sizes differ: BUY={long_size}, SELL={short_size}; "
-                "GENERAL_RECOVERY was not changed"
-            )
-        self.state.initial_position_size = long_size
-        self.state.target_value = self.state.cycle_target_profit * long_size
-        spread = abs(long_fill - short_fill)
-        self.state.entry_spread = spread
-        key = f"initial-pair:{self.state.cycle_id}:{self.state.cycle_attempt}"
-        self._set_pair_component(
-            key, "INITIAL_SPREAD_AND_TARGET",
-            spread * self.state.initial_position_size + self.state.target_value,
-            spread_distance=spread, size=self.state.initial_position_size,
-            target_value=self.state.target_value,
-        )
+        if self.state.long.size <= 0 or self.state.long.size != self.state.short.size:
+            raise RuntimeError("Initial hedge requires equal confirmed non-zero sizes")
+        self.state.initial_position_size = self.state.long.size
+        self.state.target_value = self.state.cycle_target_profit * self.state.initial_position_size
+        self.state.entry_spread = abs(long_fill - short_fill)  # diagnostic only
         for leg, fill in ((self.state.long, long_fill), (self.state.short, short_fill)):
             leg.original_trigger_level = leg.current_entry = fill
             leg.entry_confirmation = "broker"
-            if leg.size_confirmation == "requested":
-                leg.size_confirmation = "accepted_request"
+            if leg.size_confirmation == "requested": leg.size_confirmation = "accepted_request"
+            leg.stop_distance = self._stop_for(1)
+            leg.stop = stop_for(leg.direction, fill, leg.stop_distance)
             self.state.remember_deal(leg, 1)
-        self._targets_from_entries()
-        self.state.events.append(
-            f"GENERAL_RECOVERY {self.state.general_recovery}; initial spread={spread}; "
-            f"target_value={self.state.target_value}"
-        )
+            self._remember_projection(leg, 1)
+        # S1 TP covers the opposite side's expected loss plus T.
+        for leg, opposite in ((self.state.long, self.state.short), (self.state.short, self.state.long)):
+            distance = (self._expected(opposite) + self.state.target_value) / leg.size
+            leg.take_profit = target_for(leg.direction, leg.current_entry, D("0"), distance)
+        self.state.events.append(f"V3.3 target money={self.state.target_value}; initial spread diagnostic={self.state.entry_spread}")
 
-    def begin_continuation(self, ask: Decimal, bid: Decimal) -> None:
-        if not self.state.active or self.state.scenario < 1:
-            raise RuntimeError("No recovery cycle is available for continuation")
-        size, distance = self.cfg.size_for(self.state.scenario), self.cfg.stop_for(self.state.scenario)
-        self.state.long = Leg("BUY", ask, ask, size=size, stop_distance=distance)
-        self.state.short = Leg("SELL", bid, bid, size=size, stop_distance=distance)
-        # Quotes are projections only. They must never create a monetary pair component.
-        self._targets_from_entries()
-
-    def confirm_continuation_fills(self, long_fill: Decimal, short_fill: Decimal) -> None:
-        if not self.state.long or not self.state.short:
-            raise RuntimeError("Continuation legs have not been prepared")
-        self.state.long.current_entry = self.state.long.original_trigger_level = long_fill
-        self.state.short.current_entry = self.state.short.original_trigger_level = short_fill
-        self.state.long.entry_confirmation = self.state.short.entry_confirmation = "broker"
-        for leg in (self.state.long, self.state.short):
-            if leg.size_confirmation == "requested":
-                leg.size_confirmation = "accepted_request"
-        spread = abs(long_fill - short_fill)
-        self.state.entry_spread = spread
-        # Both confirmed fills are required. A repeated confirmation has the same stable key.
-        size, short_size = self.state.long.size, self.state.short.size
-        if size <= 0 or short_size <= 0:
-            raise RuntimeError("Continuation pair size is unknown")
-        if size != short_size:
-            raise RuntimeError(
-                f"Continuation hedge sizes differ: BUY={size}, SELL={short_size}; "
-                "GENERAL_RECOVERY was not changed"
-            )
-        key = f"continuation-pair:{self.state.cycle_id}:{self.state.cycle_attempt}"
-        self._set_pair_component(key, "CONTINUATION_SPREAD", spread * size,
-                                 spread_distance=spread, size=size)
-        for leg in (self.state.long, self.state.short):
-            self.state.remember_deal(leg, self.state.scenario)
-        self._targets_from_entries()
-        self.state.phase = "BOTH_OPEN"
-
-    def stopped(self, direction: str, fill: Decimal, event_id: str = "", *,
-                scenario_at_close: int | None = None,
-                broker_execution_time: str = "", actual_closed_size: Decimal | None = None,
-                fully_closed: bool = True) -> Leg:
+    def stopped(self, direction: str, fill: D, event_id: str = "", *,
+                scenario_at_close: int | None = None, broker_execution_time: str = "",
+                actual_closed_size: D | None = None, fully_closed: bool = True) -> Leg:
         leg = self._leg(direction)
         if event_id and event_id in self.state.processed_events:
             return leg
         if not leg.open or leg.stop is None:
             raise RuntimeError(f"{direction} is not an open protected leg")
-        if leg.size <= 0:
-            raise RuntimeError("Closed position size is unknown")
-        if (leg.protection_confirmation == "ACCEPTED"
-                and leg.confirmation_stop is not None):
-            expected_stop = leg.confirmation_stop
-            stop_source = "confirmation"
-        elif leg.confirmed_stop is not None:
-            expected_stop = leg.confirmed_stop
-            stop_source = "positions_readback"
-        else:
-            # The calculated stop is usable only when no conflicting/unconfirmed revision exists.
-            if leg.protection_sent_stop is not None and leg.protection_readback != "ПОДТВЕРЖДЕНО":
-                raise RuntimeError("Cannot calculate SL slippage from an unconfirmed protection")
-            expected_stop = leg.stop
-            stop_source = "initial_calculated_without_new_put"
-        confirmed_distance = abs(leg.current_entry - expected_stop)
-        slip_distance = stop_slippage(direction, expected_stop, fill)
-        closed_size = actual_closed_size if actual_closed_size is not None else leg.size
-        if closed_size <= 0 or closed_size > leg.size:
-            raise RuntimeError("Actual closed size is invalid for the open position")
-        slip_value = slip_distance * closed_size
-        loss = max(Decimal("0"), leg.current_entry - fill) if direction == "BUY" else max(
-            Decimal("0"), fill - leg.current_entry
-        )
-        self.state.realized_losses += loss
-        self.state.realized_loss_money += loss * closed_size
-        leg.open = not fully_closed
+        size = actual_closed_size if actual_closed_size is not None else leg.size
+        if size <= 0 or size > leg.size:
+            raise RuntimeError("Actual closed size is invalid")
+        signed = ((fill - leg.current_entry) if direction == "BUY"
+                  else (leg.current_entry - fill)) * size
+        loss = max(D("0"), -signed)
+        close_key = event_id or f"stop:{leg.deal_id}:{fill}:{size}"
+        if close_key not in self.state.processed_events:
+            self.state.actual_cycle_pnl += signed
+            self.state.actual_cycle_loss += loss
+            self.state.general_recovery = self.state.actual_cycle_loss
+            self.state.realized_loss_money = self.state.actual_cycle_loss
+            self.state.realized_losses += loss / size if size else D("0")
+            projection = self._projection(leg.deal_id)
+            projected = D(str(projection["amount"])) if projection else D("0")
+            if projection:
+                projection.update({"replaced": True, "actual_loss": str(loss),
+                                   "close_event_id": close_key, "actual_fill": str(fill),
+                                   "actual_size": str(size), "broker_execution_time": broker_execution_time,
+                                   "correction_money": str(loss - projected)})
+            self.state.recovery_events.append({"key": close_key, "kind": "ACTUAL_LOSS",
+                "deal_id": leg.deal_id, "scenario_at_close": scenario_at_close or self.state.scenario,
+                "actual_loss": str(loss), "projected_loss": str(projected),
+                "correction_money": str(loss - projected), "size": str(size), "fill": str(fill)})
         self.state.remember_deal(leg)
         if fully_closed:
-            self.state.remember_close(leg.deal_id, "SL", fill)
-        close_key = event_id or f"stop:{leg.deal_id}:{fill}"
-        self._record_recovery(
-            f"slippage:{close_key}", "SL_SLIPPAGE", slip_value, deal_id=leg.deal_id,
-                distance=slip_distance, size=closed_size,
-        )
-        close_scenario = self.state.scenario if scenario_at_close is None else scenario_at_close
-        d_value = confirmed_distance * closed_size
-        d_accounted = close_scenario >= 2
-        if d_accounted:
-            self._record_recovery(
-                f"stop-distance:{close_key}", "STOP_DISTANCE_VALUE", d_value,
-                deal_id=leg.deal_id, scenario_at_close=close_scenario,
-                distance=confirmed_distance, size=closed_size,
-            )
-        existing_partial = next((item for item in self.state.pending_recovery
-                                 if item.get("deal_id") == leg.deal_id
-                                 and item.get("direction") == direction
-                                 and not item.get("reentry_accounted", False)), None)
-        if existing_partial is not None and close_key not in existing_partial.get(
-                "close_keys", [existing_partial.get("close_key")]
-        ):
-            existing_partial.setdefault("close_keys", [existing_partial["close_key"]]).append(
-                close_key
-            )
-            existing_partial["size"] = str(
-                Decimal(str(existing_partial["size"])) + closed_size
-            )
-            existing_partial["pending_d_value"] = str(
-                Decimal(str(existing_partial["pending_d_value"])) + d_value
-            )
-            existing_partial["d_value"] = existing_partial["pending_d_value"]
-            existing_partial["sl_slippage_value"] = str(
-                Decimal(str(existing_partial["sl_slippage_value"])) + slip_value
-            )
-            existing_partial["close_fill"] = str(fill)
-            existing_partial["broker_execution_time"] = broker_execution_time
-            existing_partial["fully_closed"] = fully_closed
-        elif existing_partial is None:
-            self.state.pending_recovery.append({
-                "close_key": close_key, "deal_id": leg.deal_id, "direction": direction,
-                "close_keys": [close_key], "fully_closed": fully_closed,
-                "entry": str(leg.current_entry), "size": str(closed_size),
-                "stop_distance": str(confirmed_distance), "confirmed_stop": str(expected_stop),
-                "desired_stop_distance": str(leg.stop_distance), "desired_stop": str(leg.stop),
-                "stop_source": stop_source,
-                "close_fill": str(fill), "sl_slippage_distance": str(slip_distance),
-                "sl_slippage_value": str(slip_value),
-                "pending_d_value": str(d_value), "d_value": str(d_value),
-                "scenario_at_close": close_scenario,
-                "broker_execution_time": broker_execution_time,
-                "original_trigger_anchor": str(leg.original_trigger_level),
-                "trigger_id": leg.trigger_id, "trigger_reference": leg.trigger_reference,
-                "cycle_id": self.state.cycle_id, "cycle_attempt": self.state.cycle_attempt,
-                "d_accounted": d_accounted, "reentry_accounted": False,
-                "reopen_event_id": "", "trigger_slippage_accounted": False,
-            })
+            self.state.remember_close(leg.deal_id, "SL", fill, close_size=size)
+            leg.open = False
+        else:
+            leg.size -= size
+        if event_id and event_id not in self.state.processed_events:
+            self.state.processed_events.append(event_id)
         if not fully_closed:
-            leg.size -= closed_size
-            leg.size_confirmation = "broker_partial_close"
-            self._targets_from_entries()
-            self.state.phase = "BOTH_OPEN"
-            if event_id:
-                self.state.processed_events.append(event_id)
-            return leg
+            self.refresh_targets(); return leg
         survivor = self._leg("SELL" if direction == "BUY" else "BUY")
         if survivor.open:
-            survivor.stop, survivor.take_profit = protection_levels(
-                survivor.direction, survivor.current_entry, survivor.stop_distance,
-                self.state.general_recovery, survivor.size,
-                scenario=self.state.scenario,
-            )
-        self._clear_legacy_leg_components()
-        self.state.phase = "LONG_ONLY" if survivor.direction == "BUY" else "SHORT_ONLY"
-        if event_id:
-            self.state.processed_events.append(event_id)
+            self._set_protection(survivor)
+            # The closed-side STOP entry is exactly the confirmed SL of the survivor.
+            anchor = survivor.confirmation_stop or survivor.confirmed_stop or survivor.stop
+            if anchor is None: raise RuntimeError("Survivor SL is not confirmed")
+            leg.original_trigger_level = anchor
+            self.state.phase = "LONG_ONLY" if survivor.direction == "BUY" else "SHORT_ONLY"
         return leg
 
-    def _pending_for(self, direction: str, *, working_order_id: str = "",
-                     close_key: str = "") -> dict:
-        def owner(item: dict) -> tuple[int, int]:
-            if "cycle_id" in item and "cycle_attempt" in item:
-                return int(item["cycle_id"] or 0), int(item["cycle_attempt"] or 0)
-            record = next((entry for entry in self.state.deal_history
-                           if entry.get("deal_id") == item.get("deal_id")), None)
-            return (int((record or {}).get("cycle_id", 0) or 0),
-                    int((record or {}).get("cycle_attempt", 0) or 0))
-        candidates = [item for item in self.state.pending_recovery
-                      if item.get("direction") == direction
-                      and not item.get("reentry_accounted", bool(item.get("reopen_event_id")))
-                      and owner(item) == (self.state.cycle_id, self.state.cycle_attempt)]
-        if close_key:
-            candidates = [item for item in candidates if item.get("close_key") == close_key]
+    def _pending_for(self, direction: str, *, working_order_id: str = "", close_key: str = "") -> dict:
+        candidates = [p for p in self.state.pending_recovery if p.get("direction") == direction
+                      and not p.get("reentry_accounted")]
         if working_order_id:
-            linked = [item for item in candidates if item.get("trigger_id") == working_order_id]
-            if not linked and len(candidates) == 1 and not candidates[0].get("trigger_id"):
-                # Compatible persisted state from before trigger ownership was stored.  The sole
-                # same-attempt closure is already an invariant-backed link; make it explicit now.
-                candidates[0]["trigger_id"] = working_order_id
-                linked = candidates
-            if not linked:
-                raise RuntimeError(
-                    f"No broker-linked pending D snapshot for {direction} order {working_order_id}"
-                )
-            candidates = linked
+            linked = [p for p in candidates if p.get("trigger_id") == working_order_id]
+            if linked: candidates = linked
+        if close_key: candidates = [p for p in candidates if p.get("close_key") == close_key]
+        # V3.3 can derive ownership from the immutable projected component when legacy pending D
+        # is absent; no monetary D/slippage is transferred.
         if not candidates:
-            raise RuntimeError(f"No unaccounted pending D snapshot for {direction}")
-        if len(candidates) != 1:
-            raise RuntimeError(
-                f"Ambiguous pending D snapshots for {direction}; broker linkage is required"
-            )
+            projection = next((p for p in self.state.projected_losses
+                               if p.get("direction") == direction), None)
+            if projection: return projection
+            raise RuntimeError(f"No owned outgoing position for {direction}")
+        if len(candidates) != 1: raise RuntimeError("Ambiguous outgoing position ownership")
         return candidates[0]
 
-    def reopened(self, direction: str, fill: Decimal, deal_id: str = "", event_id: str = "",
-                 actual_size: Decimal | None = None, *, working_order_id: str = "",
+    def reopened(self, direction: str, fill: D, deal_id: str = "", event_id: str = "",
+                 actual_size: D | None = None, *, working_order_id: str = "",
                  close_key: str = "", broker_execution_time: str = "") -> None:
-        if self.state.scenario >= self.cfg.max_scenarios:
-            raise RuntimeError("Scenario limit reached")
+        if event_id and event_id in self.state.processed_events: return
+        if self.state.scenario >= 9: raise RuntimeError("Scenario 10 does not exist")
         leg = self._leg(direction)
-        if event_id and event_id in self.state.processed_events:
-            return
-        pending = self._pending_for(
-            direction, working_order_id=working_order_id, close_key=close_key
-        )
         next_scenario = self.state.scenario + 1
-        requested_size = self.cfg.size_for(next_scenario)
-        new_size = actual_size if actual_size is not None else requested_size
-        new_distance = self.cfg.stop_for(next_scenario)
-        if new_size <= 0:
-            raise RuntimeError("Reopened position size is unknown")
-        anchor = Decimal(str(pending.get("original_trigger_anchor", leg.original_trigger_level)))
-        slip_distance = trigger_slippage(direction, anchor, fill)
-        slip_value = slip_distance * new_size
-        reopen_key = event_id or f"reopen:{pending['close_key']}:{deal_id}:{fill}"
-        d_to_add = (Decimal(str(pending.get("d_value", pending["pending_d_value"])))
-                    if not pending.get("d_accounted") else Decimal("0"))
-        if d_to_add and self._record_recovery(
-            f"reopen-d:{reopen_key}", "PENDING_STOP_DISTANCE_VALUE", d_to_add,
-            closed_deal_id=pending["deal_id"], reopened_deal_id=deal_id,
-        ):
-            pending["d_accounted"] = True
-        slippage_added = self._record_recovery(
-            f"reopen-slippage:{reopen_key}", "TRIGGER_SLIPPAGE", slip_value,
-            closed_deal_id=pending["deal_id"], reopened_deal_id=deal_id,
-            d_to_add=d_to_add, trigger_slippage_distance=slip_distance,
-            trigger_slippage_value=slip_value, new_size=new_size,
-        )
-        if slippage_added or any(
-            item.get("key") == f"reopen-slippage:{reopen_key}"
-            for item in self.state.recovery_events
-        ):
-            pending["reopen_event_id"] = reopen_key
-            pending["trigger_slippage_accounted"] = True
-            pending["reentry_accounted"] = True
+        size = actual_size if actual_size is not None else self._size_for(next_scenario)
+        if size <= 0: raise RuntimeError("Actual reopened size is unknown")
         self.state.scenario = next_scenario
-        # New scenario D applies to every position that is actually still open; survivor size and
-        # entry never change merely because the scenario advanced.
-        for candidate in (self.state.long, self.state.short):
-            if candidate and (candidate.open or candidate is leg):
-                candidate.stop_distance = new_distance
-        leg.size = new_size
-        leg.size_confirmation = "broker" if actual_size is not None else "accepted_request"
-        leg.entry_confirmation = "broker"
-        leg.current_entry = fill
-        leg.deal_id = deal_id
-        leg.open = True
+        leg.size, leg.stop_distance = size, self._stop_for(next_scenario)
+        leg.current_entry, leg.deal_id, leg.open = fill, deal_id, True
+        leg.entry_confirmation = "broker"; leg.size_confirmation = "broker"
         leg.trigger_id = leg.trigger_reference = ""
-        leg.pending_trigger_action = ""
-        leg.pending_trigger_cancel_unknown = False
-        leg.trigger_recreation_suppressed = False
         leg.confirmed_stop = leg.confirmed_take_profit = None
-        leg.confirmed_stop_distance = None
-        leg.protection_sent_stop = leg.protection_sent_take_profit = None
         leg.confirmation_stop = leg.confirmation_take_profit = None
+        leg.protection_sent_stop = leg.protection_sent_take_profit = None
         leg.protection_confirmation = leg.protection_readback = ""
-        self.state.remember_deal(leg, self.state.scenario)
-        opened = next((item for item in self.state.deal_history
-                       if item.get("deal_id") == deal_id), None)
-        if opened is not None:
-            opened["trigger_id"] = working_order_id
-            opened["open_working_order_id"] = working_order_id
-            opened["broker_open_execution_time"] = broker_execution_time
-            opened["broker_open_time_source"] = "WORKING_ORDER_EXECUTED"
-            opened["open_evidence"] = "WORKING_ORDER_EXECUTED+POSITION_WORKING_ORDER_ID"
-        transition_key = event_id or f"reopen:{deal_id}:{fill}"
-        if not any(item.get("key") == transition_key for item in self.state.scenario_transitions):
-            self.state.scenario_transitions.append({
-                "key": transition_key, "cycle_id": self.state.cycle_id,
-                "cycle_attempt": self.state.cycle_attempt, "scenario": self.state.scenario,
-                "direction": direction, "deal_id": deal_id,
-                "working_order_id": working_order_id, "fill": str(fill),
-                "size": str(new_size), "broker_execution_time": broker_execution_time,
-                "time_source": "WORKING_ORDER_EXECUTED" if broker_execution_time else "PENDING",
-            })
-        self._targets_from_entries()
-        self.state.phase = "SCENARIO_9_CLOSING" if next_scenario == self.cfg.max_scenarios else "BOTH_OPEN"
-        if event_id:
-            self.state.processed_events.append(event_id)
+        self._set_protection(leg)
+        self.state.remember_deal(leg, next_scenario)
+        record = next((r for r in self.state.deal_history if r.get("deal_id") == deal_id), None)
+        if record is not None:
+            record.update({"trigger_id": working_order_id, "open_working_order_id": working_order_id,
+                           "broker_open_execution_time": broker_execution_time})
+        self._remember_projection(leg, next_scenario)
+        opposite = self._leg("SELL" if direction == "BUY" else "BUY")
+        if not opposite.open:
+            opposite.original_trigger_level = leg.stop
+        key = event_id or f"reopen:{deal_id}:{fill}"
+        self.state.scenario_transitions.append({"key": key, "cycle_id": self.state.cycle_id,
+            "attempt_id": self.state.active_attempt_id, "scenario": next_scenario,
+            "direction": direction, "deal_id": deal_id, "working_order_id": working_order_id,
+            "fill": str(fill), "size": str(size), "broker_execution_time": broker_execution_time})
+        self.state.phase = ("TRANSITION_RECONCILING" if opposite.open else
+                            ("LONG_ONLY" if direction == "BUY" else "SHORT_ONLY"))
+        if event_id: self.state.processed_events.append(event_id)
 
-    def account_double_sl_pending(self) -> Decimal:
-        """Transfer all still-pending D only after the caller has proved broker-flat state."""
-        added = Decimal("0")
-        for pending in self.state.pending_recovery:
-            if pending.get("d_accounted"):
-                continue
-            value = Decimal(str(pending["pending_d_value"]))
-            key = f"double-sl:{pending['close_key']}"
-            if self._record_recovery(key, "DOUBLE_SL_PENDING_D", value,
-                                     closed_deal_id=pending.get("deal_id", "")):
-                pending["d_accounted"] = True
-                pending["reopen_event_id"] = key
-                added += value
-        self._clear_legacy_leg_components()
-        return added
+    def account_double_sl_pending(self) -> D:
+        return D("0")
 
-    def complete(self, direction: str, fill: Decimal | None = None) -> None:
-        leg = self._leg(direction)
-        close = fill if fill is not None else leg.take_profit
+    def complete(self, direction: str, fill: D | None = None) -> None:
+        leg = self._leg(direction); close = fill if fill is not None else leg.take_profit
         if close is not None:
-            self.state.remember_deal(leg)
-            self.state.remember_close(leg.deal_id, "TP", close)
-            gross = close - leg.current_entry if direction == "BUY" else leg.current_entry - close
-            self.state.gross_take_profit = max(Decimal("0"), gross)
-            self.state.net_cycle_result = self.state.gross_take_profit - self.state.realized_losses
-            self.state.net_cycle_money = self.state.gross_take_profit * leg.size - self.state.realized_loss_money
-        self.state.events.append(f"cycle completed by {direction} take profit")
-        self.state.completed_cycles += 1
-        self._consume_profit_override()
-        self.state.active = False
-        self.state.phase = "COMPLETED"
+            signed = ((close - leg.current_entry) if direction == "BUY"
+                      else (leg.current_entry - close)) * leg.size
+            key = f"tp:{leg.deal_id}:{close}:{leg.size}"
+            if key not in self.state.processed_events:
+                self.state.actual_cycle_pnl += signed
+                self.state.processed_events.append(key)
+            self.state.remember_deal(leg); self.state.remember_close(leg.deal_id, "TP", close, close_size=leg.size)
+            self.state.gross_take_profit = max(D("0"), signed / leg.size)
+            self.state.net_cycle_money = self.state.actual_cycle_pnl
+            self.state.net_cycle_result = self.state.actual_cycle_pnl
+        self.state.completed_cycles += 1; self._consume_profit_override()
+        self.state.active = False; self.state.phase = "COMPLETED"
 
-    def complete_scenario_nine(self, long_fill: Decimal, short_fill: Decimal,
-                               extra_loss: Decimal = Decimal("0")) -> None:
-        prior_losses = self.state.realized_losses
-        close_gap = abs(long_fill - short_fill)
-        self.state.scenario_nine_prior_losses = prior_losses
-        self.state.scenario_nine_close_gap = close_gap
-        self.state.scenario_nine_extra_loss = extra_loss
-        self.state.scenario_nine_total_loss = prior_losses + close_gap + extra_loss
-        self.state.scenario_nine_long_fill = long_fill
-        self.state.scenario_nine_short_fill = short_fill
-        self.state.net_cycle_result = -self.state.scenario_nine_total_loss
-        self.state.events.append(f"scenario 9 closed; long={long_fill}; short={short_fill}")
-        self.state.completed_cycles += 1
-        self._consume_profit_override()
-        self.state.active = False
-        self.state.manual = False
-        self.state.phase = "COMPLETED"
+    def complete_scenario_nine(self, long_fill: D, short_fill: D, extra_loss: D = D("0")) -> None:
+        raise RuntimeError("V3.3 S9 is completed only by its own confirmed SL or TP")
 
     def _consume_profit_override(self) -> None:
-        if self.state.profit_override is None or self.state.profit_override_remaining <= 0:
-            return
-        if self.state.cycle_target_profit != self.state.profit_override:
-            return
-        self.state.profit_override_remaining -= 1
-        if self.state.profit_override_remaining == 0:
-            self.state.profit_override = None
-
-    def _targets_from_entries(self) -> None:
-        if not self.state.long or not self.state.short:
-            raise RuntimeError("Both legs are required")
-        for leg in (self.state.long, self.state.short):
-            if leg.size <= 0 or leg.stop_distance <= 0:
-                raise RuntimeError(f"{leg.direction} size/SL distance is unknown")
-            leg.stop, leg.take_profit = protection_levels(
-                leg.direction, leg.current_entry, leg.stop_distance,
-                self.state.general_recovery, leg.size,
-                scenario=self.state.scenario,
-            )
-        self._clear_legacy_leg_components()
+        if self.state.profit_override is not None and self.state.profit_override_remaining > 0 \
+                and self.state.cycle_target_profit == self.state.profit_override:
+            self.state.profit_override_remaining -= 1
+            if not self.state.profit_override_remaining: self.state.profit_override = None
 
     def refresh_targets(self) -> None:
-        self._targets_from_entries()
+        for leg in (self.state.long, self.state.short):
+            if leg and leg.open: self._set_protection(leg)
 
-    def recovery_distance_for(self, leg: Leg) -> Decimal | None:
-        """Return the displayed/current TP recovery component for this scenario."""
-        if self.state.scenario >= self.cfg.max_scenarios:
-            return None
-        if self.state.scenario == 1:
-            return recovery_distance(self.state.general_recovery, leg.size)
-        return remaining_recovery_distance(
-            self.state.general_recovery, leg.size, leg.stop_distance
-        )
+    def recovery_distance_for(self, leg: Leg) -> D | None:
+        return self._tp_money_for(leg) / leg.size if leg.size > 0 else None
 
-    def projected_reopen(self, direction: str) -> tuple[Decimal, Decimal, Decimal]:
-        pending = self._pending_for(direction)
+    def projected_reopen(self, direction: str) -> tuple[D, D, D]:
         scenario = self.state.scenario + 1
-        size, distance = self.cfg.size_for(scenario), self.cfg.stop_for(scenario)
-        d_to_add = (Decimal(str(pending.get("d_value", pending["pending_d_value"])))
-                    if not pending.get("d_accounted") else Decimal("0"))
-        projected_general = self.state.general_recovery + d_to_add
-        projected_distance = (
-            recovery_distance(projected_general, size)
-            if scenario == 1
-            else remaining_recovery_distance(projected_general, size, distance)
-        )
-        return size, distance, projected_distance
+        if scenario > 9: raise RuntimeError("Scenario 10 does not exist")
+        size, distance = self._size_for(scenario), self._stop_for(scenario)
+        current = self._leg("SELL" if direction == "BUY" else "BUY")
+        projected = self.state.actual_cycle_loss + self._outstanding(exclude_deal_id="")
+        # Ensure the current position's own expected loss is represented for the next position.
+        if current.open and self._projection(current.deal_id) is None:
+            projected += self._expected(current)
+        tp_distance = (projected + self.state.target_value) / size
+        return size, distance, tp_distance - distance
 
     def _leg(self, direction: str) -> Leg:
         leg = self.state.long if direction == "BUY" else self.state.short
-        if leg is None:
-            raise RuntimeError("Cycle has no such leg")
-        if leg.size <= 0 or leg.stop_distance <= 0:
-            raise RuntimeError(f"{direction} position parameters are unknown")
+        if leg is None: raise RuntimeError("Cycle has no such leg")
         return leg
