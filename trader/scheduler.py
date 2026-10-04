@@ -84,4 +84,6 @@ _SCHEDULERS_LOCK = threading.Lock()
 
 def scheduler_for(host: str) -> ApiRequestScheduler:
     with _SCHEDULERS_LOCK:
-        return _SCHEDULERS.setdefault(host, ApiRequestScheduler())
+        if host not in _SCHEDULERS:
+            _SCHEDULERS[host] = ApiRequestScheduler()
+        return _SCHEDULERS[host]
