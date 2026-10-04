@@ -7,12 +7,6 @@ import json
 from pathlib import Path
 
 
-V33_SCENARIO_SIZES = tuple(Decimal(value) for value in
-                           ("10", "10", "10", "20", "20", "20", "20", "20", "20"))
-V33_STOP_DISTANCES = tuple(Decimal(value) for value in
-                           ("1", "1", "3", "4", "4", "4", "4", "4", "4"))
-
-
 def _load_file() -> dict:
     path = Path(os.getenv("BOT_CONFIG_FILE", "bot_config.json"))
     if not path.exists():
@@ -71,8 +65,8 @@ class Settings:
     dry_run: bool = True
     state_file: str = "bot_state.json"
     diagnostic_log_file: str = "bot_diagnostics.log"
-    scenario_sizes: tuple[Decimal, ...] = V33_SCENARIO_SIZES
-    scenario_stop_distances: tuple[Decimal, ...] = V33_STOP_DISTANCES
+    scenario_sizes: tuple[Decimal, ...] = ()
+    scenario_stop_distances: tuple[Decimal, ...] = ()
 
     def size_for(self, scenario: int) -> Decimal:
         return self.scenario_sizes[scenario - 1] if self.scenario_sizes else self.size
@@ -113,12 +107,8 @@ class Settings:
             diagnostic_log_file=str(
                 _value(values, "DIAGNOSTIC_LOG_FILE", "bot_diagnostics.log")
             ),
-            scenario_sizes=(_decimal_list(raw_sizes) if raw_sizes not in (None, "", [])
-                            else V33_SCENARIO_SIZES),
-            scenario_stop_distances=(
-                _decimal_list(raw_stops) if raw_stops not in (None, "", [])
-                else V33_STOP_DISTANCES
-            ),
+            scenario_sizes=_decimal_list(raw_sizes),
+            scenario_stop_distances=_decimal_list(raw_stops),
         )
         value.validate()
         return value
