@@ -7,6 +7,7 @@
   "TELEGRAM_BOT_TOKEN": "replace_with_telegram_token",
   "TELEGRAM_CHAT_ID": "replace_with_chat_id",
   "BOT_DRY_RUN": true,
+  "MANUAL_INITIAL_ENTRY_ENABLED": false,
   "INITIAL_TRIGGER_ENTRY_ENABLED": false,
   "INITIAL_ENTRY_DIRECTION_DISTANCE": "1.0",
   "INITIAL_ENTRY_ORDER_OFFSET": "2.0",

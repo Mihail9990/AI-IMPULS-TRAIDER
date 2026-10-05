@@ -146,6 +146,8 @@ class CycleState:
     attempt_history: list[dict] = field(default_factory=list)
     # Exclusive durable owner of the optional first-pair working-order entry.
     initial_entry: dict = field(default_factory=dict)
+    # Persists through cycle reset: a manually requested cycle never auto-starts its successor.
+    manual_initial_mode: bool = False
     initial_submitted_directions: list[str] = field(default_factory=list)
     attempt_deal_ids: list[str] = field(default_factory=list)
     pending_actual_attempt_id: int = 0

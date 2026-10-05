@@ -21,6 +21,7 @@ from .diagnostics import (
 )
 from .engine import Strategy
 from .initial_entry import InitialTriggerEntry
+from .manual_entry import ManualInitialEntry, parse_manual_trigger, is_trigger_command
 from .events import (
     BrokerEvent, find_close_event,
     find_trigger_open_event,
@@ -122,6 +123,8 @@ class Bot:
         )
 
     def _get_initial_entry(self) -> InitialTriggerEntry:
+        if self.state.initial_entry.get("mode") == "MANUAL":
+            return ManualInitialEntry(self)
         return InitialTriggerEntry(self)
 
     def _get_continuation(self) -> CycleContinuation:
@@ -408,7 +411,9 @@ class Bot:
         self.state.paused = bool(operation.get("paused", self.state.paused))
         next_mode = (
             "PAUSED: пользовательский /stop запрещает новый цикл до /start."
-            if self.state.paused else "FILTER: после завершения будет разрешён фильтр нового цикла."
+            if self.state.paused else ("MANUAL_TRIGGER_WAIT: ожидается новая /TRIGGER, прошлый уровень использован."
+                if self.state.manual_initial_mode or self.cfg.manual_initial_entry_enabled
+                else "FILTER: после завершения будет разрешён фильтр нового цикла.")
         )
         text = cycle_result_text(self.state, direction, fill, self.cfg.size) + (
             f"\nДальнейший режим: {next_mode}"
@@ -423,7 +428,9 @@ class Bot:
         self.state.pending_tp_fill = None
         self.state.active_attempt_id = 0
         self.state.armed = not self.state.paused
-        self.state.phase = "FILTER" if self.state.armed else "PAUSED"
+        self.state.phase = ("PAUSED" if self.state.paused else
+                            "MANUAL_TRIGGER_WAIT" if self.state.manual_initial_mode
+                            or self.cfg.manual_initial_entry_enabled else "FILTER")
         self.state.pending_finalization = {}
         self.state.save(self.cfg.state_file)
         end_diagnostic_cycle(
@@ -595,10 +602,18 @@ class Bot:
                 self.telegram.send(f"⚠️ Команда не выполнена: {exc}")
 
     def command(self, text: str) -> None:
+        if is_trigger_command(text):
+            if text.strip().lower() in {"/trigger", "/trigger:"}:
+                self.telegram.send_trigger_form()
+                return
+            level = parse_manual_trigger(text)  # validate the whole message before state changes
+            ManualInitialEntry(self).submit(level)
+            return
         command, *args = text.strip().lower().split()
         if command == "/help":
             self.telegram.send(
                 "/status /start /startcycle /pause /stop /resume /positions /orders /pnl /cycleinfo\n"
+                "/trigger — формат ручного первоначального входа (если режим включён)\n"
                 "/menu — показать клавиатуру /hidemenu — свернуть клавиатуру\n"
                 "/automode — безопасно выйти из ручного режима\n"
                 "/resetcycle — DEMO: сбросить локальный цикл после broker-flat проверки\n"
@@ -674,6 +689,8 @@ class Bot:
                     self.telegram.send(
                         "Пауза принята: текущий цикл продолжится до TP, но следующий цикл не начнётся."
                     )
+            if self.state.manual_initial_mode:
+                self.state.save(self.cfg.state_file)
         elif command == "/resume":
             if self.state.manual:
                 raise RuntimeError("Ручной режим нельзя снять командой /resume")
@@ -880,8 +897,17 @@ class Bot:
                 f"▶️ Продолжение цикла разрешено; этап {self.state.continuation_stage}."
             )
             return
+        if not self.state.active and self.cfg.manual_initial_entry_enabled:
+            ManualInitialEntry(self).arm()
+            return
+        if not self.state.active:
+            self.state.manual_initial_mode = False
         self.state.paused = False
         if self.state.active:
+            if self.state.manual_initial_mode:
+                self.state.save(self.cfg.state_file)
+                self.telegram.send("Текущий цикл продолжается; новый ручной уровень допустим только после его завершения.")
+                return
             self.telegram.send("Текущий цикл активен; автоматический запуск следующего цикла включён.")
             return
         self.state.armed = True
@@ -926,6 +952,12 @@ class Bot:
         return False
 
     def _tick_filter(self, starter=None) -> None:
+        if (starter is None and not self.state.continuation_managed
+                and (self.cfg.manual_initial_entry_enabled or self.state.manual_initial_mode)):
+            if self.state.phase != "MANUAL_TRIGGER_WAIT":
+                self.state.phase = "MANUAL_TRIGGER_WAIT"
+                self.state.save(self.cfg.state_file)
+            return
         if (starter is None and self.cfg.initial_trigger_entry_enabled
                 and not self.state.continuation_managed):
             self._get_initial_entry().filter_tick()
@@ -4395,10 +4427,14 @@ class Bot:
         self._refresh_actual_attempt_result()
         self.state.paused = bool(operation.get("paused", self.state.paused))
         self.state.armed = not self.state.paused
-        self.state.phase = "FILTER" if self.state.armed else "PAUSED"
+        self.state.phase = ("PAUSED" if self.state.paused else
+                            "MANUAL_TRIGGER_WAIT" if self.state.manual_initial_mode
+                            or self.cfg.manual_initial_entry_enabled else "FILTER")
         scenario_report = scenario_nine_result_text(self.state, long_fill, short_fill) + (
             "\nДальнейший режим: PAUSED до /start из-за /stop."
-            if self.state.paused else "\nДальнейший режим: FILTER нового цикла."
+            if self.state.paused else ("\nДальнейший режим: MANUAL_TRIGGER_WAIT, нужна новая /TRIGGER."
+                  if self.state.manual_initial_mode or self.cfg.manual_initial_entry_enabled
+                  else "\nДальнейший режим: FILTER нового цикла.")
         )
         self._store_report(scenario_report, f"scenario-9-complete:{attempt_id}")
         if self.state.deal_history or self.state.attempt_history:

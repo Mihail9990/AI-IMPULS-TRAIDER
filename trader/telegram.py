@@ -30,6 +30,7 @@ class _Delivery:
     part: int = 0
     total_parts: int = 0
     report_id: str = ""
+    reply_markup: dict | None = None
 
 
 class Telegram:
@@ -40,7 +41,8 @@ class Telegram:
     """
 
     COMMANDS = [
-        ("status", "Состояние цикла"), ("start", "Запустить свечной фильтр"),
+        ("status", "Состояние цикла"), ("start", "Разрешить первоначальный вход"),
+        ("trigger", "Формат ручной цены входа"),
         ("stop", "Пауза после текущего цикла"), ("positions", "Открытые позиции"),
         ("orders", "Trigger-ордера"), ("pnl", "Прибыль и убыток"),
         ("dealhistory", "История сделок по dealId"),
@@ -124,6 +126,16 @@ class Telegram:
             return False
         action = "show" if show_menu else "hide" if hide_menu else "none"
         self._enqueue(_Delivery("message", text, action))
+        return True
+
+    def send_trigger_form(self) -> bool:
+        from .manual_entry import TRIGGER_HELP, TRIGGER_TEMPLATE
+        if not self.enabled:
+            return False
+        self._enqueue(_Delivery("message", TRIGGER_HELP, reply_markup={
+            "inline_keyboard": [[{"text": "Скопировать шаблон",
+                                  "copy_text": {"text": TRIGGER_TEMPLATE}}]]
+        }))
         return True
 
     def send_report(self, text: str, *, limit: int = 3500) -> bool:
@@ -262,7 +274,10 @@ class Telegram:
                 received: list[str] = []
                 with self._lock:
                     for update in updates:
-                        self.offset = max(self.offset, int(update["update_id"]) + 1)
+                        update_id = int(update["update_id"])
+                        if not discard and update_id < self.offset:
+                            continue  # repeated delivery must not replay a manual entry/replacement
+                        self.offset = max(self.offset, update_id + 1)
                         # offset=0 means startup discard: never replay a command predating process.
                         if discard:
                             continue
@@ -500,7 +515,9 @@ class Telegram:
     def _deliver_message(self, item: _Delivery) -> None:
         if item.kind == "message":
             payload = {"chat_id": self.chat_id, "text": item.value}
-            if item.menu_action == "show":
+            if item.reply_markup is not None:
+                payload["reply_markup"] = item.reply_markup
+            elif item.menu_action == "show":
                 payload["reply_markup"] = self.KEYBOARD
             elif item.menu_action == "hide":
                 payload["reply_markup"] = {"remove_keyboard": True}

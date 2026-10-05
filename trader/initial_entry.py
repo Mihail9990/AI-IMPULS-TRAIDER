@@ -36,17 +36,26 @@ def entry_plan(open_bid: D, market: dict, threshold: D, offset: D, size: D):
     move = bid - open_bid
     if -threshold < move < threshold:
         return None
+    level = bid + offset if move >= threshold else bid - offset
+    return exact_entry_plan(level, market, size)
+
+
+def exact_entry_plan(level: D, market: dict, size: D):
+    """Shared broker rules for an exact user or automatically calculated level."""
+    snapshot = market["snapshot"]
+    bid, ask = D(str(snapshot["bid"])), D(str(snapshot["offer"]))
+    if not all(x.is_finite() and x > 0 for x in (level, bid, ask, size)) or ask < bid:
+        raise ValueError("Initial entry: invalid quote/level/size")
     if snapshot.get("marketStatus") != "TRADEABLE" or snapshot.get("delayTime", 0) != 0:
         raise ValueError("Initial entry: market is closed or quotes are delayed")
     if D(str(snapshot.get("scalingFactor", 1))) != 1:
         raise ValueError("Initial entry: non-unit scalingFactor needs an explicit price convention")
-    level = bid + offset if move >= threshold else bid - offset
     if level > ask:
         types = {"BUY": "STOP", "SELL": "LIMIT"}
     elif 0 < level < bid:
         types = {"BUY": "LIMIT", "SELL": "STOP"}
     else:
-        raise ValueError("Initial entry: BID offset places level inside/on BID-ASK spread; level unchanged")
+        raise ValueError("Initial entry: level inside/on BID-ASK spread; level unchanged")
     rules = market.get("dealingRules", {})
     def points(name):
         rule = rules.get(name, {})

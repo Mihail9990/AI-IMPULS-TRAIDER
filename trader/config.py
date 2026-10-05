@@ -65,6 +65,7 @@ class Settings:
     dry_run: bool = True
     state_file: str = "bot_state.json"
     diagnostic_log_file: str = "bot_diagnostics.log"
+    manual_initial_entry_enabled: bool = False
     initial_trigger_entry_enabled: bool = False
     initial_entry_direction_distance: Decimal = Decimal("1.0")
     initial_entry_order_offset: Decimal = Decimal("2.0")
@@ -110,6 +111,7 @@ class Settings:
             diagnostic_log_file=str(
                 _value(values, "DIAGNOSTIC_LOG_FILE", "bot_diagnostics.log")
             ),
+            manual_initial_entry_enabled=_bool(_value(values, "MANUAL_INITIAL_ENTRY_ENABLED", False)),
             initial_trigger_entry_enabled=_bool(_value(values, "INITIAL_TRIGGER_ENTRY_ENABLED", False)),
             initial_entry_direction_distance=Decimal(str(_value(values, "INITIAL_ENTRY_DIRECTION_DISTANCE", "1.0"))),
             initial_entry_order_offset=Decimal(str(_value(values, "INITIAL_ENTRY_ORDER_OFFSET", "2.0"))),
