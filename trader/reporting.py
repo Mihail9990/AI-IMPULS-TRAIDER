@@ -182,6 +182,8 @@ def status_text(state: CycleState) -> str:
         for leg in (state.long, state.short) if leg
     ) or "-"
     return (
+        f"initial_entry={state.initial_entry.get('stage', '-')}, "
+        f"initial_entry_note={state.initial_entry.get('notice', '-')}, "
         f"active={state.active}, armed={state.armed}, phase={state.phase}, "
         f"scenario={state.scenario}, GENERAL_RECOVERY={state.general_recovery}, "
         f"paused={state.paused}, manual={state.manual}, "

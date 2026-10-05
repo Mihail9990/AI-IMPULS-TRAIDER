@@ -65,6 +65,9 @@ class Settings:
     dry_run: bool = True
     state_file: str = "bot_state.json"
     diagnostic_log_file: str = "bot_diagnostics.log"
+    initial_trigger_entry_enabled: bool = False
+    initial_entry_direction_distance: Decimal = Decimal("1.0")
+    initial_entry_order_offset: Decimal = Decimal("2.0")
     scenario_sizes: tuple[Decimal, ...] = ()
     scenario_stop_distances: tuple[Decimal, ...] = ()
 
@@ -107,6 +110,9 @@ class Settings:
             diagnostic_log_file=str(
                 _value(values, "DIAGNOSTIC_LOG_FILE", "bot_diagnostics.log")
             ),
+            initial_trigger_entry_enabled=_bool(_value(values, "INITIAL_TRIGGER_ENTRY_ENABLED", False)),
+            initial_entry_direction_distance=Decimal(str(_value(values, "INITIAL_ENTRY_DIRECTION_DISTANCE", "1.0"))),
+            initial_entry_order_offset=Decimal(str(_value(values, "INITIAL_ENTRY_ORDER_OFFSET", "2.0"))),
             scenario_sizes=_decimal_list(raw_sizes),
             scenario_stop_distances=_decimal_list(raw_stops),
         )
@@ -114,6 +120,10 @@ class Settings:
         return value
 
     def validate(self) -> None:
+        for name, value in (("INITIAL_ENTRY_DIRECTION_DISTANCE", self.initial_entry_direction_distance),
+                            ("INITIAL_ENTRY_ORDER_OFFSET", self.initial_entry_order_offset)):
+            if not value.is_finite() or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
         if (self.stop_distance <= 0 or self.target_profit < 0 or self.size <= 0
                 or self.entry_range <= 0):
             raise ValueError(

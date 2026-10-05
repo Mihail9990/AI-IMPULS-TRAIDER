@@ -20,6 +20,7 @@ from .diagnostics import (
     snapshot_diagnostics,
 )
 from .engine import Strategy
+from .initial_entry import InitialTriggerEntry
 from .events import (
     BrokerEvent, find_close_event,
     find_trigger_open_event,
@@ -119,6 +120,9 @@ class Bot:
             leg, general_recovery=self.state.general_recovery,
             scenario=self.state.scenario, **kwargs
         )
+
+    def _get_initial_entry(self) -> InitialTriggerEntry:
+        return InitialTriggerEntry(self)
 
     def _get_continuation(self) -> CycleContinuation:
         controller = getattr(self, "continuation", None)
@@ -647,6 +651,9 @@ class Bot:
                 "Текущий уже открытый цикл не пересчитывается."
             )
         elif command in {"/pause", "/stop"}:
+            if self.state.initial_entry:
+                self._get_initial_entry().stop()
+                return
             self.state.paused = True
             if (self.state.continuation_managed
                     or self.state.phase in {"DOUBLE_SL_PAUSE", "CONTINUATION_FILTER"}):
@@ -682,6 +689,8 @@ class Bot:
 
     def _unknown_cycle_mutations(self) -> list[str]:
         unknown = []
+        if self.state.initial_entry:
+            unknown.append("initial entry still owns broker operations; use /stop and reconciliation")
         for leg in (self.state.long, self.state.short):
             if not leg:
                 continue
@@ -831,6 +840,9 @@ class Bot:
             raise RuntimeError("Автоматика в ручном режиме; проверьте /status и /cycleinfo")
         if self.cfg.dry_run:
             raise RuntimeError("BOT_DRY_RUN=true: торговые заявки заблокированы")
+        if self.state.initial_entry:
+            self._get_initial_entry().resume()
+            return
         if self.state.phase == "DOUBLE_SL_RECONCILING":
             raise RuntimeError("Сначала должна завершиться сверка двух SL и связанных trigger")
         if self.state.phase == "DOUBLE_SL_PAUSE":
@@ -881,6 +893,9 @@ class Bot:
         )
 
     def tick(self) -> None:
+        if self.state.initial_entry:
+            self._get_initial_entry().tick()
+            return
         if self.state.pending_actual_attempt_id:
             self._refresh_actual_attempt_result()
         if self.state.continuation_managed:
@@ -911,6 +926,10 @@ class Bot:
         return False
 
     def _tick_filter(self, starter=None) -> None:
+        if (starter is None and self.cfg.initial_trigger_entry_enabled
+                and not self.state.continuation_managed):
+            self._get_initial_entry().filter_tick()
+            return
         starter = starter or self._start_cycle
         closed, current = self.capital.candle_ranges(self.cfg.epic, self.cfg.candle_minutes)
         if not self.state.waiting_current_candle and closed >= self.cfg.entry_range:
@@ -3861,6 +3880,11 @@ class Bot:
             ) from position_error
 
     def reconcile_startup(self) -> None:
+        if self.state.initial_entry:
+            # The persisted owner wins even if the feature flag changed on restart.
+            self._get_initial_entry().tick()
+            self.reconciled = True
+            return
         if self.state.pending_finalization:
             if self.state.pending_finalization.get("kind") == "SCENARIO_9":
                 self._resume_scenario_nine_finalization()
@@ -4765,6 +4789,8 @@ class Bot:
         self.telegram.send("Команда выполнена и подтверждена Capital.com")
 
     def _exit_manual_mode(self) -> None:
+        if self.state.initial_entry:
+            raise RuntimeError("Первоначальный вход ещё сверяется; используйте /stop")
         if not self.state.manual:
             self.telegram.send("ℹ️ Автоматика уже не находится в ручном режиме.")
             return

@@ -144,6 +144,8 @@ class CycleState:
     continuation_filter_reason: str = ""
     attempt_result_total: Decimal = D("0")
     attempt_history: list[dict] = field(default_factory=list)
+    # Exclusive durable owner of the optional first-pair working-order entry.
+    initial_entry: dict = field(default_factory=dict)
     initial_submitted_directions: list[str] = field(default_factory=list)
     attempt_deal_ids: list[str] = field(default_factory=list)
     pending_actual_attempt_id: int = 0
@@ -485,6 +487,7 @@ class CycleState:
         self.phase = "IDLE"
         self.processed_events.clear()
         self.cycle_trigger_ids.clear()
+        self.initial_entry.clear()
         self.initial_submitted_directions.clear()
         self.attempt_deal_ids.clear()
         self.active_attempt_id = 0

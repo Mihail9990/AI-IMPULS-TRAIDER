@@ -213,6 +213,13 @@ class StateStore:
                      json.dumps(execution, ensure_ascii=False, sort_keys=True)),
                 )
         db.execute("DELETE FROM durable_commands")
+        entry = payload.get("initial_entry")
+        if entry:
+            db.execute(
+                "INSERT INTO durable_commands(identity,cycle_id,attempt_id,kind,payload) VALUES(?,?,?,?,?)",
+                (f"initial-entry:{entry['cycle_id']}", entry["cycle_id"], entry["attempt_id"],
+                 "INITIAL_TRIGGER_ENTRY", json.dumps(entry, ensure_ascii=False, sort_keys=True)),
+            )
         for direction in ("long", "short"):
             leg = payload.get(direction) or {}
             for kind, active in (

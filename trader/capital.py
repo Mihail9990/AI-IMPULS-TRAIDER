@@ -359,6 +359,55 @@ class CapitalClient:
             body["profitLevel"] = float(target)
         return self.request("POST", "/workingorders", json=body)["dealReference"]
 
+    def initial_working_order(self, epic: str, direction: str, size: Decimal,
+                              level: Decimal, order_type: str) -> str:
+        """First pair only: never attach SL/TP or an arbitrary expiry."""
+        if order_type not in {"STOP", "LIMIT"}:
+            raise ValueError("Unsupported initial order type")
+        return self.request("POST", "/workingorders", json={
+            "epic": epic, "direction": direction, "size": float(size),
+            "level": float(level), "type": order_type, "guaranteedStop": False,
+        })["dealReference"]
+
+    def initial_cancel_order(self, order_id: str) -> str:
+        """Return DELETE reference so the owner can persist it before confirmation."""
+        return self.request("DELETE", f"/workingorders/{order_id}")["dealReference"]
+
+    def initial_entry_market(self, epic: str) -> dict:
+        # Read only: never change the user's account preferences to enable this mode.
+        if self.request("GET", "/accounts/preferences").get("hedgingMode") is not True:
+            raise CapitalError("Initial entry requires confirmed hedgingMode=true; preferences unchanged")
+        return self.request("GET", f"/markets/{epic}")
+
+    def entry_candles(self, epic: str, minutes: int) -> tuple[dict, dict]:
+        """Same range filter, with its reference open from the very same candle snapshot."""
+        prices = self.request("GET", f"/prices/{epic}", params={
+            "resolution": "MINUTE", "max": minutes * 3 + 2,
+        })["prices"]
+        groups = {}
+        for candle in prices:
+            moment = datetime.fromisoformat(str(candle["snapshotTimeUTC"]).replace("Z", "+00:00"))
+            bucket = moment.replace(minute=moment.minute - moment.minute % minutes,
+                                    second=0, microsecond=0)
+            groups.setdefault(bucket, []).append((moment, candle))
+        ordered = sorted(groups.items())
+        if len(ordered) < 2:
+            raise CapitalError("Not enough aggregated candles for initial entry")
+        result = []
+        for bucket, records in ordered[-2:]:
+            records.sort(key=lambda item: item[0])
+            # A truncated oldest bar must not masquerade as the aggregate's opening price.
+            if records[0][0] != bucket:
+                raise CapitalError("Reference candle BID-open is unavailable")
+            candles = [candle for _, candle in records]
+            result.append({
+                "id": bucket.isoformat(),
+                "open": str(candles[0]["openPrice"]["bid"]),
+                "range": str(max(Decimal(str(c["highPrice"]["bid"])) for c in candles)
+                             - min(Decimal(str(c["lowPrice"]["bid"])) for c in candles)),
+            })
+        return result[0], result[1]
+
     def delete_working_order(self, deal_id: str) -> bool:
         """Cancel a working order, treating an already absent order as an idempotent result.
 
