@@ -1,5 +1,5 @@
 #property strict
-#property version "1.01"
+#property version "1.02"
 #property description "Local TradFi command executor; strategy stays in Python. Trading disabled by default."
 input string GatewayFolder = "AI_IMPULS_TRADFI";
 input string TradeSymbol = "XAUUSD.s";
@@ -174,7 +174,7 @@ void Execute(string file) {
    }
    if(!AllowTrading || !MQLInfoInteger(MQL_TRADE_ALLOWED) || !TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) ||
       !TerminalInfoInteger(TERMINAL_CONNECTED) || AccountInfoInteger(ACCOUNT_MARGIN_MODE)!=ACCOUNT_MARGIN_MODE_RETAIL_HEDGING ||
-      AccountInfoString(ACCOUNT_CURRENCY)!="USD") { Ack(id,"REJECTED","Trading disabled / disconnected / wrong account mode"); return; }
+      AccountInfoString(ACCOUNT_CURRENCY)!="UST") { Ack(id,"REJECTED","Trading disabled / disconnected / wrong account mode or currency (UST required)"); return; }
    MqlTradeRequest req={}; MqlTradeResult result={}; MqlTradeCheckResult check={}; MqlTick tick;
    if(!SymbolInfoTick(TradeSymbol,tick) || TimeTradeServer()-tick.time>5) { Ack(id,"REJECTED","Stale quote"); return; }
    req.symbol=TradeSymbol; req.magic=Magic; req.comment=id; req.deviation=MaxDeviationPoints;

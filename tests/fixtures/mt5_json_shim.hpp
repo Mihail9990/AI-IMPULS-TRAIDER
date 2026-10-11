@@ -55,7 +55,7 @@ long AccountInfoInteger(int key) {
     if(key==ACCOUNT_LOGIN) return 111111111; // nine synthetic digits: never a real account
     return ACCOUNT_MARGIN_MODE_RETAIL_HEDGING;
 }
-string AccountInfoString(int key) {return key==ACCOUNT_SERVER?server:"USD";}
+string AccountInfoString(int key) {return key==ACCOUNT_SERVER?server:"UST";}
 long TerminalInfoInteger(int) {return connected;}
 string SymbolInfoString(string,int) {return "USD";}
 long SymbolInfoInteger(string,int) {return 1;}

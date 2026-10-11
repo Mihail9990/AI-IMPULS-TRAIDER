@@ -5,6 +5,10 @@ from typing import Protocol
 from .settings import number
 
 
+ACCOUNT_CURRENCY = "UST"
+COMPLETION_TOLERANCE = D("1")  # account currency, only eligible broker TP/stepped SL
+
+
 @dataclass(frozen=True)
 class Spec:
     symbol: str
@@ -27,8 +31,8 @@ class Spec:
         strings = {'symbol', 'currency', 'profit_currency', 'calc_mode'}
         obj = cls(**{k: str(data[k]) if k in strings else number(data[k])
                      for k in cls.__dataclass_fields__})
-        if obj.symbol != 'XAUUSD.s' or obj.currency != 'USD':
-            raise ValueError('Requires XAUUSD.s and USD account for the $1 tolerance')
+        if obj.symbol != 'XAUUSD.s' or obj.currency != ACCOUNT_CURRENCY:
+            raise ValueError('Requires XAUUSD.s and UST account for the 1 UST tolerance')
         positive = ('contract_size', 'tick_size', 'tick_value_profit', 'tick_value_loss',
                     'volume_min', 'volume_step', 'volume_max', 'point')
         if any(getattr(obj, k) <= 0 for k in positive):

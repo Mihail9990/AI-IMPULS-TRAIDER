@@ -38,7 +38,7 @@ class Store:
             self.db.execute('INSERT OR REPLACE INTO snapshot VALUES (1, ?)', (payload,))
             cycle = data.get('cycle') or {}
             summary = json.dumps({'phase': data['phase'], 'cycle_id': cycle.get('id'),
-                                  'recovery': cycle.get('recovery'),
+                                  'recovery': cycle.get('recovery'), 'currency': data.get('currency'),
                                   'commands': len(data['commands'])})
             self.db.execute('INSERT INTO audit(event,payload) VALUES (?,?)', (event, summary))
             if self.fault:

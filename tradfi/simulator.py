@@ -3,7 +3,7 @@ from copy import deepcopy
 from decimal import Decimal as D
 
 
-ARTIFICIAL_SPEC = dict(symbol='XAUUSD.s', currency='USD', contract_size='200', tick_size='0.01',
+ARTIFICIAL_SPEC = dict(symbol='XAUUSD.s', currency='UST', contract_size='200', tick_size='0.01',
     tick_value_profit='2', tick_value_loss='2', volume_min='0.03', volume_step='0.03',
     volume_max='12', point='0.01', stops_level='1', freeze_level='1',
     profit_currency='USD', calc_mode='SIMULATED_LINEAR')

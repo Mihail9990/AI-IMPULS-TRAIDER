@@ -53,7 +53,7 @@ class FaultTest(unittest.TestCase):
     def test_unknown_anchor_retired_by_full_close_under_original_protection(self):
         f = self.f; f.broker.fail_before.add('MODIFY'); f.start(); f.fill(price='4003.10')
         f.broker.close('TP'); f.bot = Controller(f.store, f.broker); f.tick()
-        self.assertEqual(f.bot.state['phase'], 'NEXT_PAIR')  # original TP leaves >$1 Recovery
+        self.assertEqual(f.bot.state['phase'], 'NEXT_PAIR')  # original TP leaves >1 UST Recovery
         self.assertEqual(D(f.bot.state['cycle']['recovery']), D('1.8'))
         self.assertEqual(len(f.mutations('MODIFY')), 1)
         self.assertEqual(f.bot.state['commands'][f.mutations('MODIFY')[0]['id']]['status'], 'OBSOLETE')

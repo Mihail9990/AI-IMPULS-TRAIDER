@@ -103,6 +103,8 @@ int main(int argc,char **argv) {
         self.assertEqual(data['candle']['id'], 1791719940)
         self.assertEqual(data['quote']['utc_time'], 1791720000)
         self.assertTrue(data['hedging'])
+        self.assertEqual(data['spec']['currency'], 'UST')
+        self.assertEqual(data['spec']['profit_currency'], 'USD')
         for key in ('orders', 'positions', 'order_history', 'deals'): self.assertEqual(data[key], [])
 
     def test_populated_snapshot_unicode_comments_and_integer_deal_time(self):

@@ -91,9 +91,9 @@ ack может дать повтор уведомления, но не повт�
 6. Полное закрытие по подтянутому SL → CENTER=actual close, ветка `PARTIAL_TP`; это имя маршрута,
    **не частичное закрытие объёма**. Даже нулевой/отрицательный P&L остаётся на этом маршруте.
    Обычный SL Recovery-позиции → CENTER=actual close, ветка `AFTER_SL`.
-7. После TP или подтянутого SL остаток ≤ $1 завершает цикл. Допуск записывается отдельно как
+7. После TP или подтянутого SL остаток ≤ 1 UST завершает цикл. Допуск записывается отдельно как
    `forgiven_residual`, не прибыль. К обычному SL этот допуск не применяется. TP с недопокрытием
-   больше $1 продолжает Recovery по ветке `PARTIAL_TP` от actual close.
+   больше 1 UST продолжает Recovery по ветке `PARTIAL_TP` от actual close.
 8. Завершение требует разрешённых OCO-команд, отсутствия ордеров и позиций. Затем cooldown из
    snapshot (по умолчанию 60 секунд), затем новое закрытие M1 — новый CENTER и новая цель.
 
@@ -107,7 +107,7 @@ ack может дать повтор уведомления, но не повт�
 EA отдаёт contract size, tick size, tick value profit/loss, volume min/step/max, point,
 stop/freeze levels, валюты, calc mode, quotes, M1 Close, orders, positions, order history и deals.
 Числа сериализуются с 8 десятичными знаками; символы с digits >8 отклоняются. Нет зашитых
-100 единиц контракта или 0.01 лота. USD account обязателен для точного смысла «$1»; hedging mode
+100 единиц контракта или 0.01 лота. UST account обязателен для порога 1 UST; hedging mode
 обязателен для обнаружения двух исполнений OCO. Netting и другие валюты блокируются.
 `OrderCalcProfit` возвращает деньги в валюте счёта; формула по условному contract size не
 подменяет этот вызов. В simulator используются **явные искусственные**, не Bybit значения.
@@ -181,7 +181,7 @@ python -m unittest discover -s tests -v
 ```
 
 Симулятор не вызывает MT5/Telegram и не подключается к брокеру. Тесты проверяют деньги, число
-мутаций, SL/TP, смену веток, зеркальный SELL, settings snapshot, $1 boundary, cooldown/M1,
+мутаций, SL/TP, смену веток, зеркальный SELL, settings snapshot, 1 UST boundary, cooldown/M1,
 duplicate events/updates, UNKNOWN, commit failure и restart, OCO и stop/cancel/fill гонки.
 Проверка Python и local-mailbox тесты не являются доказательством компиляции EA или совместимости
 с реальным Bybit TradFi. До этого остаются отдельные Windows/MetaEditor/MT5 приёмочные проверки.
@@ -209,7 +209,7 @@ REJECTED CANCEL оставлял pending без обработки; ASCII mailbo
 | Денежный target/Recovery, без fees/swap | Явная искусственная спецификация и broker profit; EA вызывает OrderCalcProfit |
 | Первый SL / повтор пары / последующий SL | Исходные уровни один раз; затем actual close и новые дистанции |
 | Ступени BUY/SELL и TP priority | Исполнимая сторона, точные activation/step границы и TP equality |
-| Подтянутый SL с +/0/−; допуск $1 | Native SL подтверждение, правильный маршрут, $1/$1.01, запрет допуска для обычного loss SL |
+| Подтянутый SL с +/0/−; допуск 1 UST | Native SL подтверждение, правильный маршрут, 1 UST/1.01 UST, запрет допуска для обычного loss SL |
 | OCO race, crossed STOP | Два fills → SAFE_PAUSE; MARKET только crossed или explicit pre-send CROSSED reject |
 | UNKNOWN, crash/restart | Intent до I/O, отсутствие повторов, read-back, полное закрытие → OBSOLETE MODIFY |
 | Cancel reject / stop / branches | Только explicit reject retries, предел 3, stop FINISH устойчив к повтору/restart |
@@ -253,6 +253,42 @@ py -m json.tool snapshot.json >NUL && echo JSON_OK
 ```
 
 Реальный snapshot для диагностики не запрашивался, подключения к VPS/счёту из среды разработки не было.
+
+## Денежная модель UST / EA 1.02
+
+Пользователь подтвердил расчёт всех денежных целей, фактического P&L и Recovery в **UST**.
+Порог завершения — **1 UST**, только после broker TP или подтверждённого подтянутого SL;
+обычный SL не получает этот допуск. `forgiven_residual` не прибавляется к фактической прибыли.
+`OrderCalcProfit` возвращает расчёт в валюте счёта, а Recovery уменьшается на фактический
+`DEAL_PROFIT` закрытий. Комиссия и swap исключены. Пересчёта валют нет.
+
+В переданной пользователем спецификации `currency=UST`, `profit_currency=USD`, `calc_mode=2`.
+Это разные поля: Python и EA сохраняют оба фактических значения, не переименовывая валюту
+прибыли инструмента. Размер контракта 100, tick size 0.01, tick values 1, volume min/step 0.01,
+volume max 100, point 0.01, stops level 20, freeze level 0 проверяются отдельной offline-фикстурой;
+в production эти числа по-прежнему поступают из MT5. Python и EA требуют UST account,
+прочие проверки торговли, hedging, identity и freshness не ослаблены.
+
+SQLite сохраняет `currency=UST` в корне состояния, активном цикле, завершённых циклах и новых
+строках audit. При восстановлении проверяется валюта состояния и каждого сохранённого цикла.
+USD, иная валюта или отсутствие маркировки приводят к `DurabilityError` **до обращения к брокеру**.
+Старая база автоматически не пересчитывается, не перемаркируется и не сбрасывается, даже если
+в ней нет активного цикла. Её следует сохранить и отдельно сверить; удалять базу для обхода
+проверки нельзя. Новая установка без ранее сохранённого состояния создаёт маркированное UST-состояние.
+Смена валюты живого snapshot на несовместимую переводит работающий контроллер в SAFE_PAUSE
+до сверки сделок/отправки команд, сохраняя накопленный Recovery.
+
+По сообщению пользователя, **EA 1.01** прошёл native build с 0 errors/0 warnings, JSON_OK,
+connected=true и hedging=true при выключенной торговле. Это не подтверждает native build **1.02**.
+После отдельного разрешения публикации на VPS потребуется обновить Python-пакет `tradfi/`
+(старый ZIP блокирует UST) и исходник EA, снять старый EA, пересобрать/заменить `.ex5` версии 1.02
+и прикрепить заново. `AllowTrading=false`, Algo Trading OFF и `enable_trading=false` сохраняются.
+Проверить JSON и read-only snapshot; при закрытом рынке stale quote закономерно блокирует
+штатный PROFIT roundtrip. Telegram credentials для этих проверок не нужны.
+
+Локальная проверка этой версии: 515 тестов, OK (45.966 s), включая 8 новых UST-регрессий
+и 8 JSON-тестов. Сетевые обращения были заблокированы offline guard. `git diff --check` пройден.
+Native build EA 1.02 и проверка на VPS ещё не выполнялись.
 
 Источники протокола:
 [OrderCalcProfit](https://www.mql5.com/en/docs/trading/ordercalcprofit),

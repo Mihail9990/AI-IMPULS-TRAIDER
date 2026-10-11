@@ -4,7 +4,7 @@ from decimal import Decimal as D
 import logging
 import uuid
 
-from .broker import Spec, target_price, stepped_stop
+from .broker import ACCOUNT_CURRENCY, COMPLETION_TOLERANCE, Spec, target_price, stepped_stop
 from .settings import Settings, parse_settings, number
 from .storage import DurabilityError
 
@@ -19,8 +19,20 @@ class Controller:
             'schema': 1, 'phase': 'IDLE', 'settings': Settings().dump(), 'cycle': None,
             'stop': False, 'stop_mode': '', 'commands': {}, 'seen_deals': [],
             'notifications': [], 'telegram_offset': 0, 'last_candle': 0,
-            'completed': [], 'account': None,
+            'completed': [], 'account': None, 'currency': ACCOUNT_CURRENCY,
         }
+
+        # Legacy monetary state must never be silently relabelled or converted.
+        self._validate_currency()
+
+    def _validate_currency(self):
+        records = [self.state, *self.state['completed']]
+        if self.state['cycle'] is not None:
+            records.append(self.state['cycle'])
+        if any(record.get('currency') != ACCOUNT_CURRENCY for record in records):
+            raise DurabilityError(
+                'Incompatible or missing saved monetary currency; requires UST. '
+                'Preserve the database and reconcile; no automatic conversion/reset.')
 
     def save(self, event):
         try:
@@ -39,6 +51,7 @@ class Controller:
         self.save('safe_pause')
 
     def snapshot(self):
+        self._validate_currency()
         snap = self.broker.snapshot()
         identity = snap['account']
         if self.state['account'] is not None and self.state['account'] != identity:
@@ -115,7 +128,7 @@ class Controller:
         c = self.state['cycle'] or {}
         return (f"TradFi {self.state['phase']} stop={self.state['stop']} "
                 f"cycle={c.get('id', '-')} branch={c.get('branch', '-')} "
-                f"target={c.get('target', '-')} recovery={c.get('recovery', '-')} USD "
+                f"target={c.get('target', '-')} recovery={c.get('recovery', '-')} {self.state['currency']} "
                 f"position={c.get('position', {})}")
 
     def _unresolved(self):
@@ -209,7 +222,8 @@ class Controller:
                 self.pause(str(exc))
                 return
             self.state['cycle'] = {
-                'id': uuid.uuid4().hex, 'settings': cfg.dump(), 'original_center': str(center),
+                'id': uuid.uuid4().hex, 'currency': spec.currency,
+                'settings': cfg.dump(), 'original_center': str(center),
                 'center': str(center), 'branch': 'FIRST', 'first': True,
                 'target': None, 'recovery': None, 'realized': '0', 'round': 0,
                 'entries': [], 'position': None, 'opened_ids': [],
@@ -468,15 +482,15 @@ class Controller:
         c['realized'] = str(D(c['realized']) + profit)
         c['recovery'] = str(remaining)
         eligible = reason == 'TP' or p['stepped']
-        if eligible and remaining <= D('1'):
+        if eligible and remaining <= COMPLETION_TOLERANCE:
             if snap['positions'] or snap['orders']:
                 return
-            self.state['completed'].append(dict(id=c['id'], target=c['target'], realized=c['realized'],
+            self.state['completed'].append(dict(id=c['id'], currency=c['currency'], target=c['target'], realized=c['realized'],
                                                 forgiven_residual=str(max(D(0), remaining))))
             self.state['cooldown_until'] = snap['now'] + int(D(c['settings']['CYCLE_COOLDOWN_SECONDS']))
             self.state['cycle'] = None
             self.state['phase'] = 'PAUSED' if self.state['stop'] else 'COOLDOWN'
-            self.notify(f'Cycle complete: realized={c["realized"]} USD, tolerance remainder={max(D(0), remaining)} USD (not profit).')
+            self.notify(f'Cycle complete: realized={c["realized"]} {c["currency"]}, tolerance remainder={max(D(0), remaining)} {c["currency"]} (not profit).')
             self.save('cycle_complete')
             return
         if c['first'] and reason == 'SL':
