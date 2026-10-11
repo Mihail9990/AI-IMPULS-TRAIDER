@@ -8,3 +8,6 @@ __pycache__/
 *.pyc
 bot_diagnostics.log*
 bot_diagnostics*.log*
+tradfi_config.json
+tradfi_state.sqlite3*
+tradfi.log*

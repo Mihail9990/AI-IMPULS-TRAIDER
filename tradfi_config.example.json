@@ -1,0 +1,6 @@
+{
+  "gateway_directory": "C:/Users/USER/AppData/Roaming/MetaQuotes/Terminal/Common/Files/AI_IMPULS_TRADFI",
+  "state_file": "tradfi_state.sqlite3",
+  "log_file": "tradfi.log",
+  "enable_trading": false
+}

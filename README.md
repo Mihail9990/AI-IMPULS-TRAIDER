@@ -1,5 +1,9 @@
 # Capital.com Gold hedge-cycle bot
 
+Новая независимая стратегия Bybit TradFi / MT5: [инструкция и границы проверки](docs/TRADFI_MT5_RU.md).
+Её отдельный запуск — `tradfi_main.py`; по умолчанию выполняется только offline-симулятор.
+Существующий `main.py` и стратегия Capital.com ниже сохранены.
+
 Полное описание фактической логики сценариев 1–9, формул, порядка **SL → trigger** и
 мест перехода на следующий сценарий: [`docs/SCENARIO_LOGIC_RU.md`](docs/SCENARIO_LOGIC_RU.md).
 
