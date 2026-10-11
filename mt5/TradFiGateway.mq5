@@ -1,5 +1,5 @@
 #property strict
-#property version "1.00"
+#property version "1.01"
 #property description "Local TradFi command executor; strategy stays in Python. Trading disabled by default."
 input string GatewayFolder = "AI_IMPULS_TRADFI";
 input string TradeSymbol = "XAUUSD.s";
@@ -10,9 +10,15 @@ int lock_handle = INVALID_HANDLE;
 string keys[], vals[];
 
 string Q(string s) {
-   StringReplace(s,"\\","\\\\"); StringReplace(s,"\"","\\\"");
-   StringReplace(s,"\r","\\r"); StringReplace(s,"\n","\\n");
-   return "\""+s+"\"";
+   string out="\"",hex="0123456789abcdef";
+   for(int i=0;i<StringLen(s);i++) {
+      ushort c=StringGetCharacter(s,i);
+      if(c==34) out+="\\\"";
+      else if(c==92) out+="\\\\";
+      else if(c<32) out+="\\u00"+StringSubstr(hex,c/16,1)+StringSubstr(hex,c%16,1);
+      else out+=StringSubstr(s,i,1);
+   }
+   return out+"\"";
 }
 string N(double n) { return Q(DoubleToString(n,8)); }
 string U(ulong n) { return Q((string)n); }
@@ -133,9 +139,10 @@ void Snapshot() {
    string body="{\"protocol\":1,\"connected\":"+Bool((bool)TerminalInfoInteger(TERMINAL_CONNECTED))+
       ",\"account\":"+Q((string)AccountInfoInteger(ACCOUNT_LOGIN)+"@"+AccountInfoString(ACCOUNT_SERVER))+
       ",\"hedging\":"+Bool(AccountInfoInteger(ACCOUNT_MARGIN_MODE)==ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)+
-      ",\"history_complete\":"+Bool(history_ok)+",\"now\":"+(string)TimeGMT()+",\"spec\":"+spec+
-      ",\"quote\":{\"bid\":"+N(tick.bid)+",\"ask\":"+N(tick.ask)+",\"utc_time\":"+(string)((long)TimeGMT()-age)+"}"+
-      ",\"candle\":{\"id\":"+(string)bar[0].time+",\"close\":"+N(bar[0].close)+"}"+
+      // datetime-to-string formats a calendar date. JSON timestamps must be integer seconds.
+      ",\"history_complete\":"+Bool(history_ok)+",\"now\":"+IntegerToString((long)TimeGMT())+",\"spec\":"+spec+
+      ",\"quote\":{\"bid\":"+N(tick.bid)+",\"ask\":"+N(tick.ask)+",\"utc_time\":"+IntegerToString((long)TimeGMT()-age)+"}"+
+      ",\"candle\":{\"id\":"+IntegerToString((long)bar[0].time)+",\"close\":"+N(bar[0].close)+"}"+
       ",\"orders\":"+orders+"],\"positions\":"+positions+"],\"order_history\":"+history+"],\"deals\":"+deals+"]}";
    WriteAtomic("snapshot.json",body);
 }

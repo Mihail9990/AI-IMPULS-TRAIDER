@@ -221,6 +221,39 @@ EA — реальный исходник исполнителя, не stub; эт
 а не гарантия exactly-once исполнения у брокера. Потеря файла после SQLite may-send или потеря
 достаточной broker identity может требовать ручной сверки. Эти ограничения сохраняются.
 
+## Исправление JSON EA 1.01
+
+По сообщению пользователя, исходная версия собралась в MetaEditor x64 build 6254 на Windows
+Server 2022 без ошибок и предупреждений, однако `json.tool` отклонил snapshot на char 118.
+Причина: `(string)datetime` выводит календарную дату, а исходные `now` и `candle.id` вставляли
+её без JSON-кавычек. Теперь все три поля времени snapshot используют `IntegerToString((long)...)`.
+`deals[].time` уже является целым DEAL_TIME_MSC и сохраняет миллисекунды.
+Общий Q-helper также экранирует весь диапазон U+0000–U+001F, включая TAB/BS/FF в broker comments
+и ack reason; кавычки, обратная косая черта и Unicode сохраняются.
+
+Документированная семантика:
+[MQL5 Date and Time: приведение datetime к string и long](https://www.mql5.com/en/book/common/conversions/conversions_datetime),
+[IntegerToString](https://www.mql5.com/en/docs/convert/integertostring).
+
+`tests/test_tradfi_ea_json.py` извлекает реальные функции сериализации из `.mq5` и исполняет их
+через C++ adapter `tests/fixtures/mt5_json_shim.hpp` с искусственными MT5 данными. Восстановление
+старого datetime cast воспроизводит char 118 / column 119 на вымышленном девятизначном account;
+отдельно проверяется дефект candle.id после исправления только now. Покрыты пустой/заполненный
+snapshot, оба boolean, 64-bit timestamps и tickets, Unicode/control characters, trade/profit/error
+и UNKNOWN ack. Это **не** запуск EA в MT5 и **не** проверка его MQL5-компиляции. Если g++ отсутствует,
+семь исполняемых adapter-тестов пропускаются, source guard остаётся; здесь g++ был доступен.
+Локальная проверка: 8 новых JSON-тестов прошли; полный offline-набор — 507 тестов, OK.
+
+Для исправленной версии 1.01 нужен новый build в MetaEditor. Стратегия и торговые команды этим
+исправлением не меняются. Пока остаются `AllowTrading=false` и Algo Trading OFF. После обновления
+и пересборки в папке mailbox можно повторить безопасную проверку, не выводящую account/deals:
+
+```bat
+py -m json.tool snapshot.json >NUL && echo JSON_OK
+```
+
+Реальный snapshot для диагностики не запрашивался, подключения к VPS/счёту из среды разработки не было.
+
 Источники протокола:
 [OrderCalcProfit](https://www.mql5.com/en/docs/trading/ordercalcprofit),
 [OrderSend и подтверждения](https://www.mql5.com/en/docs/trading/ordersend),
