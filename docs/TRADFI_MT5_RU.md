@@ -112,7 +112,7 @@ stop/freeze levels, валюты, calc mode, quotes, M1 Close, orders, positions
 `OrderCalcProfit` возвращает деньги в валюте счёта; формула по условному contract size не
 подменяет этот вызов. В simulator используются **явные искусственные**, не Bybit значения.
 
-Протокол v1: `snapshot.json`; `commands/<24hex>.cmd` (ASCII `key=value`); `acks/<id>.json`;
+Протокол v1: `snapshot.json`; `commands/<24hex>.cmd` (UTF-8 `key=value`); `acks/<id>.json`;
 `ledger/<id>.intent`. Команда содержит account identity и срок годности. Запись — temp/fsync/rename
 в Python, FileFlush/FileMove в EA. Перед каждой мутацией Python фиксирует may-send в SQLite,
 EA фиксирует marker перед OrderSend. Один и тот же id EA не отправляет повторно. Ответ
@@ -129,6 +129,16 @@ MARKET разрешён, когда STOP уже пройден по свежей
 команды до публикации, но после may-send, операция может навсегда остаться UNKNOWN: это сознательный
 запрет слепого повторения. Для снятия SAFE_PAUSE/неидентифицируемого UNKNOWN нужен отдельный
 проверяемый процесс брокерской сверки; команды, стирающей состояние вслепую, нет.
+
+Полное подтверждённое закрытие позиции делает оставшийся UNKNOWN MODIFY недействующим:
+он становится `OBSOLETE`, **не DONE**. Это позволяет учесть фактический P&L, не утверждая, что
+новый SL установился. Нативный DEAL_SL закрытия отличает обычный SL от подтянутого. READY MODIFY,
+не пересёкший may-send, при закрытии не отправляется. Отмена OCO отправляется до запроса
+калькулятора прибыли: timeout OrderCalcProfit её не задерживает.
+
+Явный REJECTED отмены допускает новый durable intent только при повторном подтверждении живого
+ордера. Максимум три попытки, затем SAFE_PAUSE с уведомлением; UNKNOWN не повторяется.
+Повтор `/stop` между ветками сохраняет уже принятое намерение FINISH логического цикла.
 
 EA запрашивает всю доступную history, а не скользящее короткое окно. Broker-side усечение истории
 невозможно доказательно исключить одним HistorySelect: при недостатке identity обработка ждёт,
@@ -181,6 +191,35 @@ duplicate events/updates, UNKNOWN, commit failure и restart, OCO и stop/cancel
 через тестовый `sitecustomize.py`. Offline-пример завершил цикл с искусственной целью/P&L $3.60
 и тремя командами (два защищённых STOP и отмена противоположного). Реальные спецификация,
 Telegram, MT5, Bybit и MQL5 compiler этим прогоном не проверялись.
+
+## Независимый обзор после 99c52a4
+
+Повторная проверка 2026-10-11: 61 TradFi-тест (независимый ревьюер повторил весь набор) и
+499 тестов проекта — OK, 44.278 секунды, сеть заблокирована. База origin/work после fetch:
+`459c1661cec2060193027d0039e830cf83a94e16`. Публикации не было.
+
+Исправлены: повторный stop терял FINISH между ветками; OCO-отмена ждала калькулятор;
+READY MODIFY мог отправляться уже закрытой позиции; UNKNOWN MODIFY блокировал учёт закрытия;
+REJECTED CANCEL оставлял pending без обработки; ASCII mailbox не принимал Unicode server name;
+одновременные deal tickets сортировались как строки вместо чисел.
+
+| Требование | Проверка |
+| --- | --- |
+| Native SL/TP у pending/MARKET, actual-fill reanchor | Симулятор + статический путь MqlTradeRequest/OrderCheck/OrderSend |
+| Денежный target/Recovery, без fees/swap | Явная искусственная спецификация и broker profit; EA вызывает OrderCalcProfit |
+| Первый SL / повтор пары / последующий SL | Исходные уровни один раз; затем actual close и новые дистанции |
+| Ступени BUY/SELL и TP priority | Исполнимая сторона, точные activation/step границы и TP equality |
+| Подтянутый SL с +/0/−; допуск $1 | Native SL подтверждение, правильный маршрут, $1/$1.01, запрет допуска для обычного loss SL |
+| OCO race, crossed STOP | Два fills → SAFE_PAUSE; MARKET только crossed или explicit pre-send CROSSED reject |
+| UNKNOWN, crash/restart | Intent до I/O, отсутствие повторов, read-back, полное закрытие → OBSOLETE MODIFY |
+| Cancel reject / stop / branches | Только explicit reject retries, предел 3, stop FINISH устойчив к повтору/restart |
+| Settings и следующий цикл | Атомарность, immutable snapshot, cooldown и строго новое M1 close |
+| Transport / Telegram | Local mailbox UTF-8, identity/expiry/locks, allowed chat и durable update offset |
+
+EA — реальный исходник исполнителя, не stub; это результат чтения кода, **не MQL5 build/MT5 test**.
+Идемпотентность — предотвращение повторной отправки одного command ID с консервативным UNKNOWN,
+а не гарантия exactly-once исполнения у брокера. Потеря файла после SQLite may-send или потеря
+достаточной broker identity может требовать ручной сверки. Эти ограничения сохраняются.
 
 Источники протокола:
 [OrderCalcProfit](https://www.mql5.com/en/docs/trading/ordercalcprofit),

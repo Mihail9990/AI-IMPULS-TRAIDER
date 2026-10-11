@@ -51,7 +51,7 @@ class FileGateway:
                 or (self.root / 'acks' / (cid + '.json')).exists()):
             return
         temporary = destination.with_suffix('.tmp')
-        with temporary.open('x', encoding='ascii', newline='\n') as handle:
+        with temporary.open('x', encoding='utf-8', newline='\n') as handle:
             handle.write('\n'.join(k + '=' + v for k, v in fields.items()) + '\n')
             handle.flush(); os.fsync(handle.fileno())
         os.replace(temporary, destination)

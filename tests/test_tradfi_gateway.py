@@ -34,6 +34,88 @@ class FaultTest(unittest.TestCase):
         self.assertEqual(len(f.broker.commands), 1)  # second READY intent sent once, first UNKNOWN never resent
         self.assertEqual(sum(c['status'] == 'UNKNOWN' for c in f.bot.state['commands'].values()), 1)
 
+    def test_repeated_stop_between_branches_keeps_finish_cycle_intent(self):
+        f = self.f; f.start(); f.fill(); f.bot.command('/stop'); f.broker.close('SL'); f.tick()
+        f.bot.command('/stop'); f.bot = Controller(f.store, f.broker); f.tick()
+        self.assertEqual(f.bot.state['stop_mode'], 'FINISH')
+        self.assertEqual(f.bot.state['phase'], 'PAIR')
+        self.assertEqual(len(f.mutations('STOP')), 4)
+        f.fill(); f.broker.close('TP'); f.tick()
+        self.assertEqual(f.bot.state['phase'], 'PAUSED')
+
+    def test_oco_cancel_does_not_wait_for_profit_calculator(self):
+        f = self.f; f.start(); f.broker.fill('BUY')
+        f.broker.profit = Mock(side_effect=TimeoutError('calculator unavailable'))
+        with self.assertRaises(TimeoutError): f.tick()
+        self.assertEqual(len(f.mutations('CANCEL')), 1)
+        self.assertFalse(f.broker.data['orders'])
+
+    def test_unknown_anchor_retired_by_full_close_under_original_protection(self):
+        f = self.f; f.broker.fail_before.add('MODIFY'); f.start(); f.fill(price='4003.10')
+        f.broker.close('TP'); f.bot = Controller(f.store, f.broker); f.tick()
+        self.assertEqual(f.bot.state['phase'], 'NEXT_PAIR')  # original TP leaves >$1 Recovery
+        self.assertEqual(D(f.bot.state['cycle']['recovery']), D('1.8'))
+        self.assertEqual(len(f.mutations('MODIFY')), 1)
+        self.assertEqual(f.bot.state['commands'][f.mutations('MODIFY')[0]['id']]['status'], 'OBSOLETE')
+
+    def test_same_millisecond_close_deals_use_numeric_mt5_ticket_order(self):
+        f = self.f; f.recovery(); f.broker.close('SL')
+        last = f.broker.data['deals'].pop()
+        f.broker.data['deals'].extend([
+            dict(last, id='9', volume='.03', price='4001.00', profit='-12'),
+            dict(last, id='10', volume='.06', price='4000.90', profit='-25.2')])
+        f.tick()
+        self.assertEqual(f.bot.state['cycle']['center'], '4000.90')
+        self.assertEqual(D(f.bot.state['cycle']['recovery']), D('76.8'))
+
+    def test_unknown_step_closed_on_original_sl_is_not_claimed_as_stepped(self):
+        f = self.f; f.recovery(); f.broker.fail_before.add('MODIFY')
+        entry = D(f.bot.state['cycle']['position']['entry'])
+        f.broker.quote(entry+D('.8'), entry+D('.9')); f.tick()
+        f.broker.close('SL'); f.bot = Controller(f.store, f.broker); f.tick()
+        self.assertEqual(f.bot.state['cycle']['branch'], 'AFTER_SL')
+        self.assertEqual(len([x for x in f.mutations('MODIFY') if x['purpose']=='STEP']), 1)
+
+    def test_explicit_cancel_rejection_retries_with_new_intent_and_live_order(self):
+        f = self.f; f.start(); original = f.broker.submit; rejected = []
+        def submit(cmd):
+            if cmd['kind']=='CANCEL' and not rejected:
+                rejected.append(cmd['id']); f.broker.commands.append(deepcopy(cmd))
+                f.broker.results[cmd['id']] = {'status': 'REJECTED', 'reason': 'OrderCheck: frozen'}
+            else: original(cmd)
+        f.broker.submit = submit; f.fill()
+        self.assertEqual(len(f.mutations('CANCEL')), 2)
+        self.assertNotEqual(f.mutations('CANCEL')[0]['id'], f.mutations('CANCEL')[1]['id'])
+        self.assertFalse(f.broker.data['orders'])
+
+    def test_repeated_cancel_rejection_is_bounded_and_notifies_safe_pause(self):
+        f = self.f; f.start(); original = f.broker.submit
+        def reject(cmd):
+            if cmd['kind']=='CANCEL':
+                f.broker.commands.append(deepcopy(cmd))
+                f.broker.results[cmd['id']] = {'status': 'REJECTED', 'reason': 'OrderCheck: frozen'}
+            else: original(cmd)
+        f.broker.submit = reject; f.fill(); f.tick(4)
+        self.assertEqual(len(f.mutations('CANCEL')), 3)
+        self.assertEqual(f.bot.state['phase'], 'SAFE_PAUSE')
+        self.assertTrue(f.bot.state['notifications'])
+        self.assertEqual(len(f.broker.data['orders']), 1)
+
+    def test_unsent_step_retired_when_position_closes_before_restart(self):
+        f = self.f; f.recovery(); entry = D(f.bot.state['cycle']['position']['entry'])
+        f.broker.quote(entry+D('.8'), entry+D('.9'))
+        real = f.bot.dispatch
+        def crash(kinds=None):
+            if kinds is None: raise KeyboardInterrupt('after step intent commit')
+            return real(kinds)
+        with patch.object(f.bot, 'dispatch', side_effect=crash):
+            with self.assertRaises(KeyboardInterrupt): f.tick()
+        self.assertTrue(any(c['kind']=='MODIFY' and c['status']=='READY' for c in f.bot.state['commands'].values()))
+        before = len(f.mutations('MODIFY')); f.broker.close('SL')
+        f.bot = Controller(f.store, f.broker); f.tick()
+        self.assertEqual(f.bot.state['cycle']['branch'], 'AFTER_SL')
+        self.assertEqual(len(f.mutations('MODIFY')), before)
+
     def test_stop_cancels_saved_but_never_sent_intents_without_broker_io(self):
         f = self.f
         with patch.object(f.bot, 'dispatch', side_effect=KeyboardInterrupt('before dispatch')):
@@ -215,6 +297,12 @@ class MailboxTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.gateway.submit(dict(id='a'*24, kind='CANCEL', order_id='123'))
         self.assertFalse(list((self.root/'commands').glob('*.cmd')))
+
+    def test_non_ascii_account_server_uses_ea_utf8_protocol(self):
+        self.snap['account'] = '123@Брокер'
+        (self.root/'snapshot.json').write_text(json.dumps(self.snap))
+        self.gateway.submit(dict(id='a'*24, kind='CANCEL', order_id='123'))
+        self.assertIn('account=123@Брокер', (self.root/'commands'/('a'*24+'.cmd')).read_text(encoding='utf-8'))
 
     def test_offline_diagnostic_export_redacts_account(self):
         from tradfi.diagnostics import export

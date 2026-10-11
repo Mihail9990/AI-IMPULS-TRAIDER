@@ -9,7 +9,7 @@ from .settings import Settings, parse_settings, number
 from .storage import DurabilityError
 
 LOG = logging.getLogger(__name__)
-TERMINAL = {'DONE', 'REJECTED', 'CANCELLED', 'FILLED'}
+TERMINAL = {'DONE', 'REJECTED', 'CANCELLED', 'FILLED', 'OBSOLETE'}
 
 
 class Controller:
@@ -95,7 +95,8 @@ class Controller:
         elif raw.lower() == '/stop':
             self.state['stop'] = True
             # A not-yet-observed fill racing with this command upgrades CANCEL to FINISH on tick.
-            self.state['stop_mode'] = 'FINISH' if self.state['phase'] == 'POSITION' else 'CANCEL'
+            self.state['stop_mode'] = ('FINISH' if self.state['phase'] == 'POSITION'
+                                       or self.state['stop_mode'] == 'FINISH' else 'CANCEL')
             if self.state['stop_mode'] == 'CANCEL':
                 for cmd in self.state['commands'].values():
                     if cmd['status'] == 'READY' and cmd['kind'] in {'STOP', 'MARKET'}:
@@ -125,9 +126,9 @@ class Controller:
         self.state['commands'][cid] = dict(id=cid, kind=kind, status='READY', **params)
         return cid
 
-    def dispatch(self):
+    def dispatch(self, kinds=None):
         for cmd in list(self.state['commands'].values()):
-            if cmd['status'] != 'READY':
+            if cmd['status'] != 'READY' or (kinds is not None and cmd['kind'] not in kinds):
                 continue
             cmd['status'] = 'UNKNOWN'
             self.save('may_send:' + cmd['id'])
@@ -139,6 +140,8 @@ class Controller:
 
     def _reconcile_commands(self, snap):
         for cid, cmd in self.state['commands'].items():
+            if cmd['status'] == 'OBSOLETE':
+                continue  # terminal position closure superseded this operation, not a success ack
             if cmd['status'] == 'READY':
                 continue
             result = self.broker.result(cid)
@@ -255,8 +258,14 @@ class Controller:
             if order.get('command_id') not in entries and not any(
                     self.state['commands'][cid].get('order_id') == order['id'] for cid in entries):
                 continue
-            if not any(cmd['kind'] == 'CANCEL' and cmd['order_id'] == order['id']
-                       for cmd in self.state['commands'].values()):
+            attempts = [cmd for cmd in self.state['commands'].values()
+                        if cmd['kind'] == 'CANCEL' and cmd['order_id'] == order['id']]
+            if any(cmd['status'] != 'REJECTED' for cmd in attempts):
+                continue  # especially UNKNOWN: never resubmit without a terminal rejection
+            if len(attempts) >= 3:
+                self.pause('Opposite cancellation rejected three times; pending remains broker-protected')
+                return
+            if not attempts or all(cmd.get('result', {}).get('status') == 'REJECTED' for cmd in attempts):
                 self._intent('CANCEL', order_id=order['id'])
                 self.save('cancel_intent')
 
@@ -295,6 +304,14 @@ class Controller:
             if self.state['stop_mode'] == 'CANCEL':
                 self.state['stop_mode'] = 'FINISH'
             self._cancel_pending(snap, entries)
+            if self.state['phase'] == 'SAFE_PAUSE':
+                return
+            for cid in entries:
+                if self.state['commands'][cid]['status'] == 'READY':
+                    self.state['commands'][cid]['status'] = 'CANCELLED'
+            self.save('fill_oco_intents')
+            # Cancellation must not wait for an OrderCalcProfit round trip or its timeout.
+            self.dispatch({'CANCEL'})
             if not c['position']:
                 self._adopt(opening, snap)
                 if self.state['phase'] == 'SAFE_PAUSE':
@@ -327,6 +344,8 @@ class Controller:
         if self.state['stop_mode'] == 'CANCEL' or any(
                 self.state['commands'][cid]['status'] == 'REJECTED' for cid in entries):
             self._cancel_pending(snap, entries)
+            if self.state['phase'] == 'SAFE_PAUSE':
+                return
             if not snap['orders'] and not snap['positions'] and all(
                     self.state['commands'][cid]['status'] in {'CANCELLED', 'REJECTED'} for cid in entries):
                 if self.state['stop_mode'] == 'CANCEL':
@@ -362,17 +381,31 @@ class Controller:
         modifications = [cmd for cmd in self.state['commands'].values()
                          if cmd['kind'] == 'MODIFY' and cmd['position_id'] == p['id']]
         for cmd in modifications:
+            if exits and not live and cmd['status'] == 'READY':
+                cmd['status'] = 'CANCELLED'
             if cmd['status'] == 'DONE':
                 if cmd['purpose'] == 'ANCHOR':
                     p['reanchored'] = True
                 else:
                     p['stepped'] = True
             # A deal's native DEAL_SL can resolve an unknown modification after position closed.
-            if cmd['purpose'] == 'STEP' and any(D(d.get('sl', '0')) == D(cmd['sl']) for d in exits):
+            if cmd['status'] not in {'READY', 'CANCELLED', 'REJECTED'} and cmd['purpose'] == 'STEP' and any(
+                    D(d.get('sl', '0')) == D(cmd['sl']) for d in exits):
                 p['stepped'] = True
         if exits:
             if live or sum((D(d['volume']) for d in exits), D(0)) != D(p['size']):
                 self.pause('Partial/external close: no guessed full-close P&L'); return
+            # Full native close evidence makes an outstanding modification ineffectual.
+            # This is NOT confirmation that the requested protection was ever installed.
+            for cmd in modifications:
+                if cmd['status'] not in TERMINAL:
+                    cmd['status'] = 'OBSOLETE'
+                    cmd['closed_by_deals'] = [d['id'] for d in exits]
+            native_sl = [D(d.get('sl', '0')) for d in exits]
+            if all(sl > 0 for sl in native_sl):
+                p['stepped'] = all(any(cmd['purpose'] == 'STEP'
+                    and cmd['status'] not in {'READY', 'CANCELLED', 'REJECTED'}
+                    and D(cmd['sl']) == sl for cmd in modifications) for sl in native_sl)
             if snap['orders'] or self._unresolved():
                 return  # OCO must be positively resolved before another pair
             self._closed(exits, snap)
@@ -425,7 +458,11 @@ class Controller:
             self.pause('External/ambiguous closing reason'); return
         reason = next(iter(reasons))
         profit = sum((D(d['profit']) for d in deals), D(0))  # excludes commission and swap
-        close = D(max(deals, key=lambda d: (d['time'], d['id']))['price'])
+        def execution_order(deal):
+            ticket = str(deal['id'])
+            # MT5 tickets are numeric strings; lexicographic "9" > "10" is not chronology.
+            return (deal['time'], (0, int(ticket)) if ticket.isdecimal() else (1, ticket))
+        close = D(max(deals, key=execution_order)['price'])
         remaining = D(c['recovery']) - profit
         self.state['seen_deals'].extend(d['id'] for d in deals)
         c['realized'] = str(D(c['realized']) + profit)

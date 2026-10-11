@@ -95,6 +95,9 @@ class RecoveryTest(unittest.TestCase):
             with self.subTest(reason=reason, stepped=stepped, remainder=remainder):
                 self.setUp(); self.recovery()
                 c = self.bot.state['cycle']; c['position']['stepped'] = stepped
+                if stepped:
+                    entry = D(c['position']['entry'])
+                    self.broker.quote(entry+D('.8'), entry+D('.9')); self.tick(2)
                 profit = D(c['recovery']) - D(remainder)
                 self.broker.close(reason, profit=profit); self.tick()
                 self.assertEqual(self.bot.state['cycle'] is None, complete)
