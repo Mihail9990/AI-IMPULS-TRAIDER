@@ -277,6 +277,25 @@ class MT5Broker:
             self._transaction(lambda db: db.executemany('INSERT OR REPLACE INTO mt5_facts VALUES (?,?,?)',
                 [(kind,str(r['ticket']),encoded(r)) for r in records]))
 
+    def reconciliation_evidence(self, journal_path=None):
+        """Internal read-only audit. Contains private facts; never print as CLI output.
+
+        Does not update command status, ledger, cached facts or any execution capability.
+        Production Bybit snapshots and Store construction remain blocked separately.
+        """
+        from .evidence import collect, load_journal
+        self._context(stage='evidence_start')
+        rows, state, facts = self.rows, self.store.load() if self.store is not None else None, self.facts
+        if journal_path is not None:
+            if self.store is not None:
+                raise ValueError('Do not mix a live Store and a read-only audit journal')
+            rows, state, facts = load_journal(journal_path, self._binding())
+        return collect(self.api, rows=rows,
+                       state=state,
+                       account=self.account, symbol=self.symbol, magic=self.magic,
+                       now=self.clock(), cached=facts,
+                       check_context=lambda: self._context(stage='evidence_read'))
+
     def snapshot(self):
         if self.time_profile == BYBIT_PROFILE:
             raise HistoryTimeUnverified()  # inspect must not impersonate a reconciled strategy snapshot

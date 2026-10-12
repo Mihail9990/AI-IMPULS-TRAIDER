@@ -2,6 +2,7 @@
 from copy import deepcopy
 from decimal import Decimal as D
 import logging
+import time
 import uuid
 
 from .broker import ACCOUNT_CURRENCY, COMPLETION_TOLERANCE, Spec, target_price, stepped_stop
@@ -13,8 +14,12 @@ TERMINAL = {'DONE', 'REJECTED', 'CANCELLED', 'FILLED', 'OBSOLETE'}
 
 
 class Controller:
-    def __init__(self, store, broker):
+    def __init__(self, store, broker, *, clock=time.time, monotonic=time.monotonic):
+        self.clock, self.monotonic = clock, monotonic
+        self._cycle_clock = None
         self.store, self.broker = store, broker
+        self.evidence_contract = getattr(broker, 'evidence_contract', None)
+        self._durable_state=store.load()
         self.state = store.load() or {
             'schema': 1, 'phase': 'IDLE', 'settings': Settings().dump(), 'cycle': None,
             'stop': False, 'stop_mode': '', 'commands': {}, 'seen_deals': [],
@@ -27,8 +32,21 @@ class Controller:
         if self.state.get('backend', 'file_gateway_v1') != backend:
             raise DurabilityError('Incompatible backend state; preserve and reconcile, never replay')
 
+        if self.evidence_contract == 'per_obligation_v1':
+            saved=store.load()
+            if saved is not None and saved.get('ledger_contract')!='deal_ledger_v1':
+                raise DurabilityError('Evidence controller requires its own ledger state; no automatic migration')
+            if saved and saved.get('commands') and saved.get('scope_contract')!='cycle_scope_v1':
+                raise DurabilityError('Cycle binding missing; preserve old state for explicit reconciliation')
+            self.state['scope_contract']='cycle_scope_v1'
+            self.state['ledger_contract']='deal_ledger_v1'
+            broker.before_mutation=self._mutation_allowed
+            store.enable_deal_ledger()
+            store.verify_deal_ledger(self.state)
+
         # Legacy monetary state must never be silently relabelled or converted.
         self._validate_currency()
+        self._deadline_guard()
 
     def _validate_currency(self):
         records = [self.state, *self.state['completed']]
@@ -41,9 +59,14 @@ class Controller:
 
     def save(self, event):
         try:
-            self.store.save(self.state, event)
+            if self.evidence_contract=='per_obligation_v1':
+                self.store.save(self.state,event,expected=self._durable_state)
+            else:
+                self.store.save(self.state, event)
+            self._durable_state=deepcopy(self.state)
         except DurabilityError:
             self.state = self.store.load() or self.state
+            self._durable_state=deepcopy(self.state)
             raise
         LOG.info('%s phase=%s', event, self.state['phase'])
 
@@ -51,6 +74,9 @@ class Controller:
         self.state['notifications'].append({'id': uuid.uuid4().hex, 'text': message})
 
     def pause(self, reason):
+        if (self.state.get('cycle') or {}).get('manual'):
+            self.state['cycle']['reconciliation_error']=reason
+            self.save('manual_reconciliation_error'); return
         self.state['phase'] = 'SAFE_PAUSE'
         self.notify('SAFE_PAUSE: ' + reason + '. Broker SL/TP remain; no automatic close.')
         self.save('safe_pause')
@@ -64,7 +90,38 @@ class Controller:
         if not snap['hedging']:
             raise ValueError('MT5 hedging account required for explicit OCO race detection')
         Spec.load(snap['spec'])
-        if not snap.get('history_complete'):
+        if self.evidence_contract == 'per_obligation_v1':
+            if snap.get('reconciliation_contract') != self.evidence_contract or snap.get('history_complete') is not False:
+                raise ValueError('Missing per-obligation evidence contract')
+            if not snap.get('observations_usable'):
+                raise OSError('Required evidence API is unavailable')
+            self.store.verify_deal_ledger(self._durable_state or self.state)
+            for cid,cmd in self.state['commands'].items():
+                if self._archived(cmd) or (self.state.get('cycle') or {}).get('manual'):
+                    continue
+                proof=snap['obligations'].get(cid,{}).get('status')
+                if cmd['status']=='OBSOLETE':
+                    continue
+                if proof=='MISSING_DURABLE_JOURNAL':
+                    raise ValueError('Missing durable command journal; no further execution')
+                allowed={'FILLED':{'FILLED_OPEN_EVIDENCE','CLOSED_EVIDENCE'},
+                         'DONE':{'CANCEL_TERMINAL_READBACK','PROTECTION_READBACK'},
+                         'CANCELLED':{'TERMINAL_UNFILLED_EVIDENCE','NO_SEND_EVIDENCE'},
+                         'REJECTED':{'TERMINAL_UNFILLED_EVIDENCE','REJECTED_RESPONSE','NO_SEND_EVIDENCE'}}
+                # An old acknowledgement cannot override missing current evidence.
+                # Protection may disappear after a proven full close; closure supersedes it.
+                closed_modify=(cmd['kind']=='MODIFY' and any(
+                    r.get('position_id')==cmd['position_id'] and r.get('status')=='CLOSED_EVIDENCE'
+                    for r in snap['obligations'].values()))
+                superseded_modify=(cmd['kind']=='MODIFY' and cmd['status']=='DONE' and any(
+                    other['kind']=='MODIFY' and other['position_id']==cmd['position_id']
+                    and snap['obligations'].get(other_id,{}).get('status')=='PROTECTION_READBACK'
+                    for other_id,other in self.state['commands'].items() if other_id!=cid))
+                if cmd['status'] in allowed and proof not in allowed[cmd['status']] and not (closed_modify or superseded_modify):
+                    if proof in {'UNKNOWN','AWAIT_FILL_EVIDENCE','AWAIT_POSITION_EVIDENCE','API_EVIDENCE_UNAVAILABLE','ORDER_NOT_FINAL'}:
+                        raise OSError('Terminal obligation evidence is delayed')
+                    raise ValueError('Terminal obligation evidence changed; reconcile before execution')
+        elif not snap.get('history_complete'):
             raise ValueError('Gateway history is incomplete; no trading reconciliation')
         bid, ask = number(snap['quote']['bid']), number(snap['quote']['ask'])
         if bid <= 0 or ask < bid:
@@ -80,6 +137,7 @@ class Controller:
         return snap
 
     def command(self, text, update_id=None):
+        self._deadline_guard()
         if update_id is not None and update_id < self.state['telegram_offset']:
             return
         raw = text.strip()
@@ -94,6 +152,8 @@ class Controller:
             self.state['settings'] = settings.dump()
             self.notify('Settings saved atomically; active cycle snapshot is unchanged.')
         elif raw.lower() == '/start':
+            if (self.state.get('cycle') or {}).get('manual'):
+                raise ValueError('Manual cycle remains unresolved; /start cannot reset it or Recovery')
             snap = self.snapshot()
             Spec.load(snap['spec']).validate(Settings.load(self.state['settings']))
             if self.state['phase'] == 'SAFE_PAUSE':
@@ -119,6 +179,7 @@ class Controller:
                 for cmd in self.state['commands'].values():
                     if cmd['status'] == 'READY' and cmd['kind'] in {'STOP', 'MARKET'}:
                         cmd['status'] = 'CANCELLED'  # durable proof: never crossed the may-send boundary
+                        cmd['never_sent'] = True
             if not self.state['cycle'] and self.state['phase'] != 'SAFE_PAUSE':
                 self.state['phase'] = 'PAUSED'
         elif raw.lower() == '/settings':
@@ -134,17 +195,102 @@ class Controller:
         return (f"TradFi {self.state['phase']} stop={self.state['stop']} "
                 f"cycle={c.get('id', '-')} branch={c.get('branch', '-')} "
                 f"target={c.get('target', '-')} recovery={c.get('recovery', '-')} {self.state['currency']} "
-                f"position={c.get('position', {})}")
+                f"position={c.get('position', {})} manual={c.get('manual',False)} "
+                f"manual_reason={c.get('manual_reason','-')} deadline_utc={c.get('deadline_utc','-')} "
+                f"observation={c.get('manual_observation',c.get('last_broker_observation',{}))}")
+
+    def _archived(self, command):
+        return (command['status'] in TERMINAL and command.get('cycle_id') in
+                {c['id'] for c in self.state['completed']})
+
+    def _deadline_guard(self):
+        c=self.state.get('cycle')
+        if not c: return False
+        if c.get('manual'):
+            self.state['phase']='MANUAL'
+            return True
+        try:
+            now=float(number(self.clock())); mono=float(number(self.monotonic()))
+            if now<=0 or mono<0: raise ValueError('Invalid clock')
+        except (ValueError,TypeError,OverflowError):
+            return self._enter_manual(c,'INVALID_CYCLE_CLOCK',None)
+        reason=None
+        try:
+            start=float(number(c['started_at_utc'])); deadline=float(number(c['deadline_utc']))
+            if start<=0 or deadline!=start+86400 or c['max_duration_seconds']!=86400:
+                reason='INVALID_CYCLE_DEADLINE'
+            last=float(number(c.get('last_observed_utc',start)))
+            if now<last-1: reason='UTC_CLOCK_MOVED_BACKWARDS'
+            if self._cycle_clock is None or self._cycle_clock[0]!=c['id']:
+                self._cycle_clock=(c['id'],now,mono)
+            _,wall0,mono0=self._cycle_clock
+            if mono<mono0 or now<wall0+(mono-mono0)-1:
+                reason='UTC_CLOCK_MOVED_BACKWARDS'
+            if max(now,wall0+mono-mono0)>=deadline: reason='CYCLE_24H_LIMIT'
+        except (KeyError,ValueError,TypeError,OverflowError):
+            reason='MISSING_OR_INVALID_CYCLE_DEADLINE'
+        if reason:
+            return self._enter_manual(c,reason,now)
+        if now-last>=1: c['last_observed_utc']=max(last,int(now))
+        return False
+
+    def _enter_manual(self, c, reason, now):
+        c.update(manual=True,manual_reason=reason,manual_since_utc=now)
+        self.state['phase']='MANUAL'
+        pending=sum(cmd['kind'] in {'STOP','MARKET'} and cmd['status'] not in TERMINAL
+                    for cmd in self.state['commands'].values() if cmd.get('cycle_id')==c['id'])
+        last=c.get('last_broker_observation',{'status':'UNAVAILABLE'})
+        self.notify(f'MANUAL: {reason}; cycle={c["id"]}; pending/unknown entry intents={pending}; '
+                    f'last broker observation={last}; '
+                    'broker orders and SL/TP retained, no automatic cancel/close/modify/new entry. '
+                    'Recovery preserved; read-only reconciliation continues. /start cannot resume.')
+        self.save('cycle_manual_required')
+        return True
+
+    def _mutation_allowed(self):
+        return not self._deadline_guard() and self.state['phase']!='SAFE_PAUSE'
+
+    def _manual_reconcile(self, snap):
+        c=self.state['cycle']
+        c['manual_observation']=dict(observed_at_utc=snap['now'],
+            orders=[dict(id=o['id'],status=o['status'],owned=o['owned']) for o in snap['orders']],
+            positions=[dict(id=p['id'],size=p['size'],sl=p['sl'],tp=p['tp'],owned=p['owned']) for p in snap['positions']],
+            obligations=deepcopy(snap.get('obligations',{})))
+        self.save('manual_observation')
+        if any(not p.get('owned',True) for p in snap['orders']+snap['positions']): return
+        opening=[d for d in snap['deals'] if d['entry']=='IN' and
+                 d.get('command_id') in c['entries'] and d.get('cycle_id')==c['id']]
+        ids={d['position_id'] for d in opening}
+        if len(ids)!=1: return
+        if c.get('manual_closure'): return  # no new branch/adoption after a manual close
+        if not c['position']:
+            proof=[r for r in snap.get('obligations',{}).values() if r.get('position_id') in ids]
+            if not any(r.get('status') in {'FILLED_OPEN_EVIDENCE','CLOSED_EVIDENCE'} for r in proof): return
+            self._adopt(opening,snap)
+        p=c['position']
+        if not p: return
+        exits=[d for d in snap['deals'] if d['entry']=='OUT' and d['position_id']==p['id'] and d.get('cycle_id')==c['id']]
+        if (exits and not snap['orders'] and not snap['positions']
+                and not any(cmd['status'] not in TERMINAL and cmd['kind'] in {'STOP','MARKET','CANCEL'}
+                            for cmd in self.state['commands'].values())
+                and any(r.get('status')=='CLOSED_EVIDENCE' and r.get('position_id')==p['id']
+                        for r in snap.get('obligations',{}).values())):
+            self._closed(exits,snap)
 
     def _unresolved(self):
         return any(c['status'] not in TERMINAL for c in self.state['commands'].values())
 
     def _intent(self, kind, **params):
+        if self._deadline_guard():
+            raise ValueError('Manual cycle cannot create automatic intents')
+        if self.state.get('cycle'):
+            params['cycle_id']=self.state['cycle']['id']
         cid = uuid.uuid4().hex[:24]
         self.state['commands'][cid] = dict(id=cid, kind=kind, status='READY', **params)
         return cid
 
     def dispatch(self, kinds=None):
+        if not self._mutation_allowed(): return
         for cmd in list(self.state['commands'].values()):
             if cmd['status'] != 'READY' or (kinds is not None and cmd['kind'] not in kinds):
                 continue
@@ -154,6 +300,7 @@ class Controller:
                             and self.broker.result(other['id']).get('status') == 'UNKNOWN'
                             for other in self.state['commands'].values())):
                 continue  # unresolved send cannot justify another entry; cancellation remains allowed
+            if not self._mutation_allowed(): return
             cmd['status'] = 'UNKNOWN'
             self.save('may_send:' + cmd['id'])
             try:
@@ -162,7 +309,32 @@ class Controller:
                 LOG.warning('Unknown gateway outcome %s: %s', cmd['id'], exc)
             # Never call submit again for this intent, even if the file/reply was lost.
 
+    def _reconcile_evidence_commands(self, snap):
+        mapping={'FILLED_OPEN_EVIDENCE':'FILLED','CLOSED_EVIDENCE':'FILLED',
+                 'PENDING_OBSERVED':'PENDING','CANCEL_TERMINAL_READBACK':'DONE',
+                 'PROTECTION_READBACK':'DONE'}
+        for cid,cmd in self.state['commands'].items():
+            if self._archived(cmd): continue
+            if cmd['status'] in {'READY','OBSOLETE'}:
+                continue
+            evidence=snap['obligations'].get(cid,{})
+            status=evidence.get('status')
+            if status in mapping:
+                cmd['status']=mapping[status]
+            elif status=='TERMINAL_UNFILLED_EVIDENCE':
+                order=next(o for o in snap['order_history'] if o['id']==evidence['order_id'])
+                cmd['status']=order['status']
+            elif status in {'NO_SEND_EVIDENCE','REJECTED_RESPONSE'}:
+                result=self.broker.result(cid)
+                if result.get('status')=='REJECTED':
+                    cmd.update(status='REJECTED',result=result)
+            if evidence.get('order_id'):
+                cmd['order_id']=evidence['order_id']
+        self.save('obligations_reconciled')
+
     def _reconcile_commands(self, snap):
+        if self.evidence_contract == 'per_obligation_v1':
+            return self._reconcile_evidence_commands(snap)
         for cid, cmd in self.state['commands'].items():
             if cmd['status'] == 'OBSOLETE':
                 continue  # terminal position closure superseded this operation, not a success ack
@@ -198,6 +370,7 @@ class Controller:
         self.save('broker_reconciled')
 
     def tick(self):
+        self._deadline_guard()
         if self.state['phase'] == 'SAFE_PAUSE':
             return
         try:
@@ -207,7 +380,14 @@ class Controller:
         except ValueError as exc:
             self.pause(str(exc))
             return
+        if self.state.get('cycle'):
+            self.state['cycle']['last_broker_observation']=dict(
+                utc=snap['now'],order_statuses=[o['status'] for o in snap['orders']],
+                positions=len(snap['positions']))
+        self._deadline_guard()
         self._reconcile_commands(snap)
+        if (self.state.get('cycle') or {}).get('manual'):
+            self._manual_reconcile(snap); return
         if any(not x.get('owned', True) for x in snap['orders'] + snap['positions']):
             self.pause('Foreign order/position on XAUUSD.s; ownership conflict')
             return
@@ -234,11 +414,15 @@ class Controller:
                 return
             self.state['cycle'] = {
                 'id': uuid.uuid4().hex, 'currency': spec.currency,
+                'started_at_utc': self.clock(), 'max_duration_seconds': 86400,
                 'settings': cfg.dump(), 'original_center': str(center),
                 'center': str(center), 'branch': 'FIRST', 'first': True,
                 'target': None, 'recovery': None, 'realized': '0', 'round': 0,
                 'entries': [], 'position': None, 'opened_ids': [],
             }
+            self.state['cycle']['deadline_utc']=self.state['cycle']['started_at_utc']+86400
+            self.state['cycle']['last_observed_utc']=self.state['cycle']['started_at_utc']
+            self._cycle_clock=None
             self.state['last_candle'] = snap['candle']['id']
             self.state['phase'] = 'NEXT_PAIR'
             self.save('new_cycle_snapshot')
@@ -295,6 +479,7 @@ class Controller:
                 self.save('cancel_intent')
 
     def _cycle_tick(self, snap):
+        if not self._mutation_allowed(): return
         c = self.state['cycle']; phase = self.state['phase']
         if phase == 'PAUSED_CYCLE':
             return
@@ -326,6 +511,14 @@ class Controller:
             self.pause('Both OCO triggers executed (including positions already closed)')
             return
         if ids:
+            if self.evidence_contract == 'per_obligation_v1':
+                filled=[snap['obligations'].get(cid,{}) for cid in entries
+                        if any(d.get('command_id')==cid for d in opening)]
+                if any(r.get('status') in {'PARTIAL_FILL','PARTIAL_CLOSE','EXTERNAL_EXIT','UNSUPPORTED_EXIT',
+                                          'VOLUME_EVIDENCE_INCONSISTENT','MIXED_EXIT_REASONS','AMBIGUOUS_HISTORY_TIME'} for r in filled):
+                    self.pause('Per-obligation evidence requires manual reconciliation'); return
+                if any(r.get('status') not in {'FILLED_OPEN_EVIDENCE','CLOSED_EVIDENCE'} for r in filled):
+                    return
             if self.state['stop_mode'] == 'CANCEL':
                 self.state['stop_mode'] = 'FINISH'
             self._cancel_pending(snap, entries)
@@ -334,9 +527,12 @@ class Controller:
             for cid in entries:
                 if self.state['commands'][cid]['status'] == 'READY':
                     self.state['commands'][cid]['status'] = 'CANCELLED'
+                    self.state['commands'][cid]['never_sent'] = True
             self.save('fill_oco_intents')
             # Cancellation must not wait for an OrderCalcProfit round trip or its timeout.
             self.dispatch({'CANCEL'})
+            if c.get('manual'):
+                self._manual_reconcile(snap); return
             if not c['position']:
                 self._adopt(opening, snap)
                 if self.state['phase'] == 'SAFE_PAUSE':
@@ -394,12 +590,15 @@ class Controller:
             if target <= 0:
                 self.pause('Nonpositive OrderCalcProfit target'); return
             c['target'] = c['recovery'] = str(target)
+        self._deadline_guard()
         c['position'] = dict(id=opening[0]['position_id'], entry=str(entry), size=str(size),
                              side=side, stepped=False, reanchored=False)
-        self.state['phase'] = 'POSITION'
+        self.state['phase'] = 'MANUAL' if c.get('manual') else 'POSITION'
         self.save('actual_fill_adopted')
 
     def _position(self, snap):
+        if self._deadline_guard():
+            self._manual_reconcile(snap); return
         c = self.state['cycle']; p = c['position']; cfg = Settings.load(c['settings'])
         live = next((x for x in snap['positions'] if x['id'] == p['id']), None)
         exits = [d for d in snap['deals'] if d['position_id'] == p['id'] and d['entry'] == 'OUT']
@@ -408,6 +607,7 @@ class Controller:
         for cmd in modifications:
             if exits and not live and cmd['status'] == 'READY':
                 cmd['status'] = 'CANCELLED'
+                cmd['never_sent'] = True
             if cmd['status'] == 'DONE':
                 if cmd['purpose'] == 'ANCHOR':
                     p['reanchored'] = True
@@ -418,6 +618,10 @@ class Controller:
                     D(d.get('sl', '0')) == D(cmd['sl']) for d in exits):
                 p['stepped'] = True
         if exits:
+            if self.evidence_contract == 'per_obligation_v1':
+                proofs=[r for r in snap['obligations'].values() if r.get('position_id')==p['id']]
+                if not any(r.get('status')=='CLOSED_EVIDENCE' for r in proofs):
+                    return
             if live or sum((D(d['volume']) for d in exits), D(0)) != D(p['size']):
                 self.pause('Partial/external close: no guessed full-close P&L'); return
             # Full native close evidence makes an outstanding modification ineffectual.
@@ -475,9 +679,19 @@ class Controller:
             LOG.info('Protection unchanged: %s', exc)
 
     def _closed(self, deals, snap):
+        self._deadline_guard()
         c = self.state['cycle']; p = c['position']
-        if any(d['id'] in self.state['seen_deals'] for d in deals):
+        atomic=self.evidence_contract=='per_obligation_v1'
+        expected=deepcopy(self._durable_state) if atomic else None
+        overlap={d['id'] for d in deals} & set(self.state['seen_deals'])
+        if overlap:
+            if atomic:
+                raise DurabilityError('Closure batch overlaps consumed deals; preserve and reconcile')
             return
+        if snap['positions'] or snap['orders']:
+            return
+        if atomic and any(d.get('cycle_id')!=c['id'] for d in deals):
+            raise DurabilityError('Cross-cycle closure is forbidden')
         reasons = {d['reason'] for d in deals}
         if len(reasons) != 1 or not reasons <= {'TP', 'SL'}:
             self.pause('External/ambiguous closing reason'); return
@@ -493,6 +707,13 @@ class Controller:
         c['realized'] = str(D(c['realized']) + profit)
         c['recovery'] = str(remaining)
         eligible = reason == 'TP' or p['stepped']
+        if c.get('manual'):
+            c['position']=None
+            c['manual_closure']=dict(reason=reason, accounted_deals=[d['id'] for d in deals],
+                                    target_satisfied=bool(eligible and remaining<=COMPLETION_TOLERANCE))
+            self.state['phase']='MANUAL'
+            self._save_closure('manual_closure_accounted',expected,deals,snap) if atomic else self.save('manual_closure_accounted')
+            return
         if eligible and remaining <= COMPLETION_TOLERANCE:
             if snap['positions'] or snap['orders']:
                 return
@@ -502,7 +723,7 @@ class Controller:
             self.state['cycle'] = None
             self.state['phase'] = 'PAUSED' if self.state['stop'] else 'COOLDOWN'
             self.notify(f'Cycle complete: realized={c["realized"]} {c["currency"]}, tolerance remainder={max(D(0), remaining)} {c["currency"]} (not profit).')
-            self.save('cycle_complete')
+            self._save_closure('cycle_complete', expected, deals, snap) if atomic else self.save('cycle_complete')
             return
         if c['first'] and reason == 'SL':
             c['branch'], c['center'] = 'BRANCH1_RECOVERY', c['original_center']
@@ -512,4 +733,16 @@ class Controller:
         c['first'] = False
         c['position'] = None
         self.state['phase'] = 'NEXT_PAIR'
-        self.save('closure_accounted_and_next_branch')
+        self._save_closure('closure_accounted_and_next_branch', expected, deals, snap) if atomic else self.save('closure_accounted_and_next_branch')
+
+    def _save_closure(self, event, expected, deals, snap):
+        try:
+            records=[dict(backend=self.state['backend'],account=self.state['account'],currency=self.state['currency'],
+                          ticket=d['id'],position_id=d['position_id'],cycle_id=expected['cycle']['id'],
+                          raw=snap['ledger_facts'][d['id']]) for d in deals]
+            self.store.commit_deals(expected,self.state,records,event)
+            self._durable_state=deepcopy(self.state)
+        except BaseException:
+            self.state=self.store.load() or expected
+            self._durable_state=deepcopy(self.state)
+            raise

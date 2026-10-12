@@ -41,7 +41,7 @@ def account_lock_path(config):
     return directory/(digest + '.lock')
 
 
-def _run_mt5(config, inspect):
+def _run_mt5(config, inspect, *, evidence=False, journal_path=None):
     from .mt5_adapter import MT5Broker
     if inspect:
         # No SQLite, account owner lock, Telegram imports or credentials. Never inherit execution opt-in.
@@ -49,7 +49,21 @@ def _run_mt5(config, inspect):
         broker = MT5Broker(config)
         try:
             broker.connect()
-            print(json.dumps(broker.preflight(), indent=2, ensure_ascii=False))
+            result = broker.preflight()
+            if evidence:
+                from collections import Counter
+                audit = broker.reconciliation_evidence(journal_path=journal_path)
+                result['reconciliation'] = dict(
+                    obligation_status_counts=dict(Counter(r['status'] for r in audit['obligations'].values())),
+                    discovered_orders=len(audit['raw_facts']['order']),
+                    discovered_deals=len(audit['raw_facts']['deal']),
+                    unavailable_sources=sum(v=='UNAVAILABLE' for v in audit['source_status'].values()),
+                    foreign_order_count=len(audit['foreign_orders']),
+                    foreign_position_count=len(audit['foreign_positions']),
+                    evidence_blocked=audit['evidence_blocked'],
+                    history_complete=False, execution_ready=False,
+                    journal_source='offline_snapshot' if journal_path else 'none')
+            print(json.dumps(result, indent=2, ensure_ascii=False))
         finally:
             broker.close()
         return
@@ -114,7 +128,11 @@ def main(argv=None):
     parser.add_argument('--mode', choices=('simulate', 'mt5', 'gateway'), default='simulate')
     parser.add_argument('--config', default='tradfi_config.json')
     parser.add_argument('--inspect', action='store_true', help='Read-only MT5 preflight; no SQLite/Telegram/trading')
+    parser.add_argument('--inspect-evidence', action='store_true', help='Read-only obligation evidence summary; never execute')
+    parser.add_argument('--journal-snapshot', help='Existing compatible offline rollback-journal SQLite snapshot for evidence audit')
     args = parser.parse_args(argv)
+    if (args.inspect_evidence and args.mode != 'mt5') or (args.journal_snapshot and not args.inspect_evidence):
+        parser.error('Evidence inspection requires --mode mt5 --inspect-evidence')
     if args.mode == 'simulate':
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
@@ -140,7 +158,8 @@ def main(argv=None):
         for key in ('enable_trading', 'legacy_ea_removed', 'legacy_state_reconciled'):
             if not isinstance(config.get(key, False), bool):
                 raise ValueError('Execution flags must be JSON booleans')
-        _run_mt5(config, args.inspect)
+        _run_mt5(config, args.inspect or args.inspect_evidence,
+                 evidence=args.inspect_evidence, journal_path=args.journal_snapshot)
     except KeyboardInterrupt:
         parser.exit(130, 'TradFi stopped.\n')
     except (Exception, DurabilityError) as exc:
