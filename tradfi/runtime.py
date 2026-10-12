@@ -40,12 +40,13 @@ def account_lock_path(config):
     return directory/(digest + '.lock')
 
 
-def _run_mt5(config, inspect, *, evidence=False, journal_path=None):
+def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=False, execute=False,
+             api=None, telegram_factory=None, stop_event=None, clock=time.time, monotonic=time.monotonic):
     from .mt5_adapter import MT5Broker
     if inspect:
         # No SQLite, account owner lock, Telegram imports or credentials. Never inherit execution opt-in.
         config = dict(config, enable_trading=False)
-        broker = MT5Broker(config)
+        broker = MT5Broker(config,api=api,clock=clock,monotonic=monotonic)
         try:
             broker.connect()
             result = broker.preflight()
@@ -66,18 +67,24 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None):
         finally:
             broker.close()
         return
-    if config.get('enable_trading') is not True:
+    if not service and config.get('enable_trading') is not True:
         print('MT5 execution is disabled. Use --mode mt5 --inspect for read-only preflight.')
         return
     from .time_profile import require_execution_profile
-    require_execution_profile(config)
-    if config.get('legacy_ea_removed') is not True:
+    if execute and not service:
+        raise ValueError('Execution requires explicit service mode')
+    if not service:
+        require_execution_profile(config)  # no implicit activation through the old CLI
+    if execute:
+        require_execution_profile(config,evidence_contract='per_obligation_v1')
+    config=dict(config,enable_trading=bool(execute))
+    if execute and config.get('legacy_ea_removed') is not True:
         raise ValueError('Legacy EA removal must be explicitly confirmed')
-    if config.get('legacy_state_reconciled') is not True:
+    if execute and config.get('legacy_state_reconciled') is not True:
         raise ValueError('Legacy strategy state and obligations must be explicitly reconciled')
     login = config.get('expected_login')
     if isinstance(login, bool) or not isinstance(login, int) or login <= 0:
-        raise ValueError('Explicit positive expected_login is required for execution')
+        raise ValueError('Explicit positive expected_login is required for a persistent service')
     if not config.get('expected_server') or not config.get('symbol'):
         raise ValueError('Explicit expected_server and symbol are required for execution')
     token, chat = os.environ.get('TRADFI_TELEGRAM_TOKEN'), os.environ.get('TRADFI_TELEGRAM_CHAT_ID')
@@ -91,21 +98,28 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None):
         resources.enter_context(owner_lock(account_lock_path(config)))
         store = Store(state_file)
         resources.callback(store.close)
-        broker = MT5Broker(config, store=store)
+        from .evidence_broker import MT5EvidenceBroker
+        broker = MT5EvidenceBroker(config, store=store,api=api,clock=clock,monotonic=monotonic)
         resources.callback(broker.close)
         broker.connect()
-        controller = Controller(store, broker)
+        controller = Controller(store, broker,clock=clock,monotonic=monotonic)
         from .log_export import diagnostic_handler
         log_path=Path(config.get('log_file','tradfi_mt5.log')).resolve()
         handler = diagnostic_handler(log_path)
         resources.callback(handler.close)
-        logging.basicConfig(level=logging.INFO, handlers=[handler])
+        previous_log_level=logging.getLogger().level
+        resources.callback(logging.getLogger().setLevel,previous_log_level)
+        logging.getLogger().addHandler(handler)
+        logging.getLogger().setLevel(logging.INFO)
         resources.callback(logging.getLogger().removeHandler, handler)
         from .telegram import Telegram
-        telegram = Telegram(token, chat, user_id=os.environ.get('TRADFI_TELEGRAM_USER_ID'),
+        telegram = (telegram_factory or Telegram)(token, chat, user_id=os.environ.get('TRADFI_TELEGRAM_USER_ID'),
                             log_path=log_path)
         resources.callback(telegram.http.close)
         resources.callback(telegram.close)
+        controller.notify('TradFi READ_ONLY service: native observations; /start and trading mutations disabled.'
+                          if broker.read_only else 'TradFi EXECUTION service: explicit trading activation enabled.')
+        controller.save('service_started')
         if not controller.state.get('telegram_initialized'):
             backlog = telegram.updates(-1)
             if backlog:
@@ -113,14 +127,15 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None):
             controller.state['telegram_initialized'] = True
             controller.save('telegram_first_start_discard_backlog')
         telegram.start(controller.state['telegram_offset'])
-        while True:
+        while stop_event is None or not stop_event.is_set():
             telegram.process(controller)
             try:
                 controller.tick()
             except (OSError, TimeoutError) as exc:
                 # Terminal exception payloads can contain private account/order data.
                 logging.warning('MT5 temporarily unavailable: %s', type(exc).__name__)
-            time.sleep(.2)
+            if stop_event is None: time.sleep(.2)
+            else: stop_event.wait(.2)
 
 
 def main(argv=None):
@@ -130,7 +145,12 @@ def main(argv=None):
     parser.add_argument('--inspect', action='store_true', help='Read-only MT5 preflight; no SQLite/Telegram/trading')
     parser.add_argument('--inspect-evidence', action='store_true', help='Read-only obligation evidence summary; never execute')
     parser.add_argument('--journal-snapshot', help='Existing compatible offline rollback-journal SQLite snapshot for evidence audit')
+    parser.add_argument('--service',action='store_true',help='Native MT5 + Telegram service; trading disabled by default')
+    parser.add_argument('--execute',action='store_true',help='Explicit execution activation; requires --service and config opt-ins')
     args = parser.parse_args(argv)
+    if (args.service and (args.mode!='mt5' or args.inspect or args.inspect_evidence)
+            or args.execute and not args.service):
+        parser.error('--service requires --mode mt5 without inspect; --execute requires --service')
     if (args.inspect_evidence and args.mode != 'mt5') or (args.journal_snapshot and not args.inspect_evidence):
         parser.error('Evidence inspection requires --mode mt5 --inspect-evidence')
     if args.mode == 'simulate':
@@ -159,7 +179,8 @@ def main(argv=None):
             if not isinstance(config.get(key, False), bool):
                 raise ValueError('Execution flags must be JSON booleans')
         _run_mt5(config, args.inspect or args.inspect_evidence,
-                 evidence=args.inspect_evidence, journal_path=args.journal_snapshot)
+                 evidence=args.inspect_evidence, journal_path=args.journal_snapshot,
+                 service=args.service,execute=args.execute)
     except KeyboardInterrupt:
         parser.exit(130, 'TradFi stopped.\n')
     except (Exception, DurabilityError) as exc:

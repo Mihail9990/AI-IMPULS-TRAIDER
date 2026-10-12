@@ -66,7 +66,11 @@ class MT5Broker:
         self.clock_anchor = None
         self.clock_failed = False
         if self.time_profile == BYBIT_PROFILE and (config.get('enable_trading') is True or store is not None):
-            raise HistoryTimeUnverified()
+            if getattr(self,'evidence_contract',None)!='per_obligation_v1':
+                raise HistoryTimeUnverified()
+            if config.get('enable_trading') is True:
+                from .time_profile import require_execution_profile
+                require_execution_profile(config,evidence_contract=self.evidence_contract)
         self.enable_trading = config.get('enable_trading', False)
         if not isinstance(self.enable_trading, bool):
             raise ValueError('enable_trading must be a boolean')

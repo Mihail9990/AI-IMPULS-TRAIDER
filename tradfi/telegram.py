@@ -103,8 +103,12 @@ class Telegram:
                         self._request_document(controller,uid)
                     else:
                         controller.command(message['text'], uid)
-                except (ValueError, OSError, TimeoutError) as exc:
-                    controller.notify('Команда не принята: ' + str(exc))
+                except (ValueError, OSError, TimeoutError):
+                    # Native API exception strings may contain private account/order data.
+                    message_text=('READ_ONLY: /start отклонён; торговые операции запрещены.'
+                        if message['text'].strip().lower()=='/start' and getattr(controller.broker,'read_only',False)
+                        else 'Команда не принята: проверьте /status, формат /settings и доступность брокерских доказательств.')
+                    controller.notify(message_text)
                     controller.state['telegram_offset'] = uid + 1
                     controller.save('telegram_command_rejected')
             else:

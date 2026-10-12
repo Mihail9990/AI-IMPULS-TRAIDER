@@ -5,9 +5,147 @@ EA, `FILE_COMMON`, snapshot/command/ack-файлы больше не участ�
 Стратегия, Recovery в UST, SQLite durability и Telegram-команды остаются прежними.
 Legacy Capital.com (`main.py`, `trader/`, его зависимости) не меняется.
 
-**Торговое исполнение временно заблокировано:** шкала timestamps и временного фильтра
-истории Bybit ещё не проверена. Пустая история не подтверждает полноту и не разрешает
-запуск. Рабочий путь текущей версии — read-only inspect.
+**Интеграция после `4488b23`, публикация одобрена пользователем 2026-10-12:** native
+MT5 подключён к per-obligation Controller/ledger. Новый `--service` по умолчанию запрещает
+торговые мутации и обслуживает настоящий Telegram. Это не симулятор. Реальная торговля
+этой интеграции не проверена и на VPS не включалась. Исторический UTC остаётся
+`UNVERIFIED`, `history_complete=false`; пустая история ничего не доказывает.
+
+### Native service: безопасная конфигурация и конечная граница включения
+
+Для отдельно согласованной проверки сервиса использовать новую папку.
+В копии проверенного `inspect.json`, названной `service.json`, сохранить точные
+`backend=mt5_direct_v1`, `time_profile=bybit_live6_time_v1`, terminal_path, server, symbol и
+magic. Установить `expected_login` в фактический положительный integer номера выбранного
+счёта **локально**, `enable_trading=false`, `legacy_ea_removed=false`,
+`legacy_state_reconciled=false`. Для новой установки задать отдельные
+`state_file=tradfi_native_service.sqlite3`, `log_file=tradfi_native_service.log`.
+Не подставлять чужую или искусственную identity, не мигрировать старую базу автоматически.
+
+```bat
+py tradfi_main.py --mode mt5 --service --config service.json
+```
+
+Это постоянный native read-only сервис с SQLite и Telegram. В отличие от одноразового
+inspect, он требует точный login и блокирует вторую копию по account/server/symbol.
+`/status`, `/settings`, полный `/SETTINGS:` и `/sendlog` доступны; `/start` явно
+отклоняется. Текущий цикл не исполняется и READY-команды не отправляются даже после
+restart. `/reset_manual` допускается только для своего MANUAL-цикла с полной положительной
+сверкой; на новой пустой базе отказывает. Он не отправляет торговых команд.
+Истечение 24h может сохранить MANUAL; read-only наблюдения не запускают следующую ветку.
+
+Переменные **только текущего процесса**: `TRADFI_TELEGRAM_TOKEN`,
+`TRADFI_TELEGRAM_CHAT_ID`, `TRADFI_TELEGRAM_USER_ID`. Токен вводить локально скрытым вводом,
+не в CLI, JSON, исходники, скриншот или чат. Для проверки использовать отдельного бота
+и личный чат; один polling-процесс на бота. Проверяются chat и sender, бот/anonymous
+sender отклоняется. Старые updates при первом создании состояния отбрасываются.
+Telegram token не предоставляет торговых прав. После выхода удалить переменные процесса.
+Allow Algo Trading/AutoTrading терминала для этого режима включать не требуется.
+
+Временный безусловный research gate заменён **только в новом bridge** явным контрактом
+активации: одновременно CLI `--service --execute`, JSON `enable_trading=true`,
+`execution_contract=cycle_scoped_identity_v1`, положительный bound login и оба прежних
+подтверждения legacy EA/state. Это описание границы для отдельного согласованного этапа,
+не инструкция включать её на текущем VPS. Один JSON-флаг без `--execute` ничего не
+разрешает. Старый native `MT5Broker` с глобальным history_complete по-прежнему не может
+исполнять стратегию production-профиля. TEST_PROFILE с настоящим модулем запрещён.
+
+До каждого реального send остаются context/permissions/fresh quote, durable may-send,
+повторная сверка запроса и Controller deadline/read-only guards. UNKNOWN без доказанной
+identity не повторяется. Собственные позиции определяются journal+intent+order+position,
+не magic или количеством записей. Следующий цикл требует положительного завершения
+старых обязательств и broker-flat. Эти разрешения не устанавливаются программой.
+
+Финансовый ledger использует уникальные deal IDs, принадлежность текущему циклу,
+неизменные факты, согласованный полный объём и terminal order. Он не использует
+гипотетический UTC как доказательство денег. Выходные order witnesses читаются отдельно
+по ticket; position deals — по position ID. Суммирование не зависит от порядка выдачи API;
+для детерминированного выбора последнего closing witness используется числовой deal ID,
+а не неподтверждённая конверсия времени. Raw timestamps сохраняются; их UTC не объявлен
+проверенным. Нормализуются только уже проверенные market quote/M1; последняя закрытая M1
+должна совпадать с минутой свежего тика. DST fold/gap market data остаётся запрещённым.
+
+### Ограниченный native fixture без новой сделки
+
+Подготовлен `tools/mt5_chain_fixture.py`: один **уже существующий закрытый** order →
+position → deals → exit orders. Вызовы только initialize/read/shutdown, без SQLite,
+Telegram, order_check или order_send. Локальный пример, не запускался на VPS:
+
+```bat
+py tools/mt5_chain_fixture.py --config inspect.json --order-ticket EXISTING_ORDER_ID --output chain-fixture.json
+```
+
+Подставить известный opening order ID локально. Выход создаётся только новым файлом.
+Allowlist полей: enum type/state/entry/reason, отношения order/position/deal, объём,
+цена/SL/TP, profit/commission/swap/fee и относительные raw times. Идентификаторы,
+комментарии, magic, абсолютные цены/объёмы и календарные даты преобразуются; account,
+server/path, token и сырые ошибки не экспортируются. Сохраняются price deltas, volume
+ratios и PnL на нормированный объём, поэтому это псевдонимизированный технический fixture,
+не публичный отчёт о счёте. Он помечен `not_an_ownership_journal=true`, не может стать
+production ownership и не подтверждает UTC/filter semantics либо live execution.
+
+Дальнейшая конечная проверка: replay такого fixture для native shape/correlation,
+read-only запуск сервиса с Telegram на VPS после отдельного разрешения, затем отдельная
+приёмка фактического исполнения при явном разрешении пользователя. Сейчас проверяется
+native wiring офлайн через ModuleType на границе импорта; это не реальный order_send.
+Ниже сохранены исторические этапы; их утверждения о безусловном запрете native bridge
+относятся к прежним версиям, а не к новой локальной интеграции.
+
+Проверка локальной интеграции 2026-10-12: **721 tests — OK, 50.703 s**, сеть заблокирована
+через offline `sitecustomize.py`; лог `/tmp/tradfi-native-full-tests.log`. Включены 16
+новых native-service регрессий и отдельная прежняя локальная правка history-probe.
+Проверены импорт ModuleType, production time profile, оба пути runtime, полный цикл,
+ledger/restart, UNKNOWN, read-only запреты, MANUAL reset, конфликты/недоступность данных,
+закрытая M1, сохранение запрета терминала и псевдонимизированный exporter. Это
+**native-wired, tested offline**, а не приёмка фактического исполнения. На этом этапе
+публикация ещё не выполнялась; запуск на VPS не выполнялся.
+
+### Двойной клик: check_mt5.cmd
+
+Пользователь отдельно одобрил создание launcher и публикацию проверенного состава.
+`check_mt5.cmd` можно открыть двойным кликом либо выполнить из cmd. Он переходит в
+собственную папку, предпочитает `.venv\Scripts\python.exe`, затем `py -3`, затем `python`.
+Требуются Windows, 64-bit Python 3.10+ и установленный MetaTrader5. Ничего автоматически
+не устанавливается; при отсутствии зависимости выводится FAIL с подсказкой.
+
+Конфиг выбирается в порядке `inspect.json`, `tradfi_config.json`,
+`tradfi_config.example.json`. Выбранный файл только читается. Launcher вызывает ровно
+`--mode mt5 --inspect-evidence --config ...`: без `--service`, `--execute`, Telegram,
+SQLite или ownership journal. Даже `enable_trading=true` в старом конфиге принудительно
+отключается внутри inspect. Разрешения терминала не изменяются.
+
+В папке создаётся **новый** `mt5_check_YYYYMMDD_HHMMSS_...txt` с UTC timestamp и случайным
+суффиксом; существующие отчёты, конфиги и базы не перезаписываются. Если Python отсутствует,
+CMD пробует создать короткий FAIL-report через штатный PowerShell. Если запись в папку
+запрещена, выводится сообщение; отчёт не считается сохранённым.
+
+`read_only_checks=PASS` означает успешное чтение, а общий **WARN** ожидаем для текущего
+контракта: исторический UTC UNVERIFIED, history_complete=false, ownership journal не задан,
+execution_ready=false. Это не разрешение торговли и не ошибка подключения. **FAIL** означает
+невыполненную проверку: например, нет Python/MetaTrader5, неверный конфиг, stale quote,
+timeout или неожиданный результат. Сырые stdout/stderr, token, account IDs, пути конфигурации
+и raw facts в отчёт не копируются: остаются фиксированные статусы, counts, quote age/offset.
+Для разбора отправлять только этот отчёт, не токен, JSON-конфиг, SQLite или сырые логи.
+Окно остаётся открытым на `pause`. Проверены CRLF, quoted paths и spaces/Unicode/`!`
+в тестах аргументов Python; реальный запуск Windows CMD здесь не выполнялся.
+
+Независимое ревью native/service и launcher завершено: raw native exception сообщения
+убраны из Telegram и всех exception-derived pauses, заменены безопасными фиксированными
+ответами. Независимо прошли 19 native-service и 8 launcher тестов; evidence/reset reviewer
+также проверил 19 reset tests. Обязательных неисправленных замечаний нет. Ограничение:
+read-only service при старте требует свежую котировку ещё до запуска Telegram; на закрытом
+рынке может не запуститься. Одноразовая диагностика покажет соответствующий FAIL.
+
+Финальный повтор после исправлений ревью и добавления launcher: **732 tests — OK,
+50.188 s**, сеть заблокирована. Лог `/tmp/tradfi-native-reviewed-full-tests.log`.
+Этот локальный набор включает отдельную сохранённую history-probe правку, исключённую
+из публикации. Native fixture с VPS, настоящий Telegram/service, Windows CMD и реальные
+торговые исполнения всё ещё не проверены.
+
+Точный публикуемый состав без отдельной history-probe правки проверен в изолированном
+checkout: **731 tests — OK, 49.829 s**, сеть заблокирована. Лог:
+`/tmp/tradfi-native-publication-tests.log`. Разница с локальными 732 — один отдельный
+тест history-probe; он не входит в одобренные 16 файлов этой публикации.
 
 ## Минимальная подготовка Windows VPS: только чтение
 

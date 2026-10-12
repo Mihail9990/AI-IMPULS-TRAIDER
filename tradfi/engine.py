@@ -82,6 +82,10 @@ class Controller:
         self.notify('SAFE_PAUSE: ' + reason + '. Broker SL/TP remain; no automatic close.')
         self.save('safe_pause')
 
+    def _pause_exception(self, exc):
+        self.pause('Native validation failed; reconcile before execution'
+                   if self.evidence_contract=='per_obligation_v1' else str(exc))
+
     def snapshot(self, *, for_reset=False):
         self._validate_currency()
         snap = self.broker.manual_reset_snapshot() if for_reset else self.broker.snapshot()
@@ -155,6 +159,8 @@ class Controller:
             self.state['settings'] = settings.dump()
             self.notify('Settings saved atomically; active cycle snapshot is unchanged.')
         elif raw.lower() == '/start':
+            if getattr(self.broker,'read_only',False):
+                raise ValueError('READ_ONLY service: /start disabled; no trading mutations are permitted')
             if (self.state.get('cycle') or {}).get('manual'):
                 raise ValueError('Manual cycle remains unresolved; /start cannot reset it or Recovery')
             snap = self.snapshot()
@@ -292,12 +298,12 @@ class Controller:
 
     def status(self):
         c = self.state['cycle'] or {}
-        return (f"TradFi {self.state['phase']} stop={self.state['stop']} "
+        return (f"TradFi {'READ_ONLY' if getattr(self.broker,'read_only',False) else 'EXECUTION'} {self.state['phase']} stop={self.state['stop']} "
                 f"cycle={c.get('id', '-')} branch={c.get('branch', '-')} "
                 f"target={c.get('target', '-')} recovery={c.get('recovery', '-')} {self.state['currency']} "
                 f"position={c.get('position', {})} manual={c.get('manual',False)} "
                 f"manual_reason={c.get('manual_reason','-')} deadline_utc={c.get('deadline_utc','-')} "
-                f"observation={c.get('manual_observation',c.get('last_broker_observation',{}))}")
+                f"observation={c.get('manual_observation',c.get('last_broker_observation',self.state.get('service_observation',{})))}")
 
     def _archived(self, command):
         return (command['status'] in TERMINAL and command.get('cycle_id') in
@@ -348,7 +354,7 @@ class Controller:
         return True
 
     def _mutation_allowed(self):
-        return not self._deadline_guard() and self.state['phase']!='SAFE_PAUSE'
+        return not getattr(self.broker,'read_only',False) and not self._deadline_guard() and self.state['phase']!='SAFE_PAUSE'
 
     def _manual_reconcile(self, snap):
         c=self.state['cycle']
@@ -381,6 +387,8 @@ class Controller:
         return any(c['status'] not in TERMINAL for c in self.state['commands'].values())
 
     def _intent(self, kind, **params):
+        if getattr(self.broker,'read_only',False):
+            raise ValueError('READ_ONLY service cannot create trading intents')
         if self._deadline_guard():
             raise ValueError('Manual cycle cannot create automatic intents')
         if self.state.get('cycle'):
@@ -480,13 +488,19 @@ class Controller:
         except (OSError, TimeoutError):
             return  # stale/unavailable gateway cannot justify any mutation
         except ValueError as exc:
-            self.pause(str(exc))
+            self._pause_exception(exc)
             return
         if self.state.get('cycle'):
             self.state['cycle']['last_broker_observation']=dict(
                 utc=snap['now'],order_statuses=[o['status'] for o in snap['orders']],
                 positions=len(snap['positions']))
         self._deadline_guard()
+        if getattr(self.broker,'read_only',False):
+            self.state['service_observation']=dict(utc=snap['now'],positions=len(snap['positions']),
+                orders=len(snap['orders']),history_complete=False,history_time_status='UNVERIFIED',
+                obligations={cid:r['status'] for cid,r in snap['obligations'].items()})
+            self.save('service_observation')
+            return
         self._reconcile_commands(snap)
         if (self.state.get('cycle') or {}).get('manual'):
             self._manual_reconcile(snap); return
@@ -513,7 +527,7 @@ class Controller:
                 spec.validate(cfg)
                 center = spec.price(snap['candle']['close'])
             except ValueError as exc:
-                self.pause(str(exc))
+                self._pause_exception(exc)
                 return
             self.state.pop('require_fresh_candle',None)
             self.state['cycle'] = {
@@ -595,7 +609,7 @@ class Controller:
             try:
                 self._pair(snap)
             except (ValueError, ArithmeticError) as exc:
-                self.pause(str(exc))
+                self._pause_exception(exc)
             return
         entries = c['entries']
         if any(o.get('command_id') not in entries and not any(
@@ -660,7 +674,7 @@ class Controller:
                             self.broker, spec, side, cfg.INITIAL_SIZE, price, D(c['recovery']))
                         spec.protection(side, price, sl, tp, snap['quote'])
                     except ValueError as exc:
-                        self.pause(str(exc)); return
+                        self._pause_exception(exc); return
                     entries[index] = self._intent('MARKET', side=side, size=cmd['size'],
                         trigger=cmd['trigger'], price=str(price), sl=str(sl), tp=str(tp),
                         sl_distance=cmd['sl_distance'])
@@ -803,6 +817,8 @@ class Controller:
         profit = sum((D(d['profit']) for d in deals), D(0))  # excludes commission and swap
         def execution_order(deal):
             ticket = str(deal['id'])
+            if snap.get('settlement_basis')=='cycle_scoped_identity_v1':
+                return int(ticket)  # deterministic deal sequence; never reinterpret raw time as UTC
             # MT5 tickets are numeric strings; lexicographic "9" > "10" is not chronology.
             return (deal['time'], (0, int(ticket)) if ticket.isdecimal() else (1, ticket))
         close = D(max(deals, key=execution_order)['price'])

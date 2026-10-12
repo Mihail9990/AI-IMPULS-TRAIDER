@@ -15,7 +15,7 @@ from test_tradfi_mt5 import record
 from tradfi.engine import Controller
 from tradfi.evidence_broker import MT5EvidenceBroker
 from tradfi.storage import Store, DurabilityError
-from tradfi.time_profile import HistoryTimeUnverified
+from tradfi.time_profile import HistoryTimeUnverified, TimeProfileError
 
 
 class TradingAPI(API):
@@ -333,8 +333,8 @@ class EvidenceControllerTest(unittest.TestCase):
                 self.assertEqual(D(self.bot.state['completed'][0]['realized']),D('1.8'))
                 self.assertEqual(len(self.ledger()),1)
 
-    def test_native_constructor_stays_blocked(self):
+    def test_test_profile_native_and_unactivated_production_stay_blocked(self):
         for api,profile in ((None,'injected_utc_test_v1'),(ModuleType('MetaTrader5'),'injected_utc_test_v1'),(self.api,'bybit_live6_time_v1')):
-            with self.assertRaises(HistoryTimeUnverified): MT5EvidenceBroker(dict(self.config,time_profile=profile),api=api)
+            with self.assertRaises(TimeProfileError): MT5EvidenceBroker(dict(self.config,time_profile=profile),api=api)
 
 if __name__=='__main__': unittest.main()

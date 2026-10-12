@@ -15,7 +15,7 @@ DOCUMENT_BYTES = 1024 * 1024
 MAX_LINE_BYTES = 4096
 PHASES = {'IDLE','WAIT_CANDLE','NEXT_PAIR','PAIR','POSITION','COOLDOWN','PAUSED',
           'PAUSED_CYCLE','SAFE_PAUSE','MANUAL','WAIT_START'}
-EVENTS = set('''manual_reconciliation_error safe_pause telegram_command cycle_manual_required
+EVENTS = set('''service_started service_observation manual_reconciliation_error safe_pause telegram_command cycle_manual_required
 manual_observation may_send obligations_reconciled broker_reconciled
 cooldown_finished_wait_new_close new_cycle_snapshot pair_intents_atomic cancel_intent
 stop_between_branches fill_oco_intents crossed_stop_explicit_rejection_market_intent

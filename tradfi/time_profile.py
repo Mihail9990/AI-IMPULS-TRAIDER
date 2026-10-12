@@ -26,10 +26,15 @@ def validate_profile(config, *, injected=False):
     return profile
 
 
-def require_execution_profile(config):
+def require_execution_profile(config, *, evidence_contract=None):
     validate_profile(config)
-    # No production history timestamp/filter profile has been validated yet.
-    # User config cannot mark an unverified history profile as verified.
+    # Only the cycle-scoped bridge can replace the legacy global-history gate.
+    # Activation acknowledges the execution contract, never verifies historical UTC.
+    if (evidence_contract=='per_obligation_v1' and config.get('enable_trading') is True
+            and config.get('execution_contract')=='cycle_scoped_identity_v1'):
+        return
+    if evidence_contract is not None:
+        raise TimeProfileError('EXPLICIT_EXECUTION_ACTIVATION_REQUIRED')
     raise HistoryTimeUnverified()
 
 

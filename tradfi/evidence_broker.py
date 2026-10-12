@@ -1,21 +1,20 @@
-"""End-to-end per-obligation transport, currently restricted to an injected offline API.
-
-The native runtime cannot select this class. No global history-completeness claim.
-"""
+"""Native/injected MT5 transport with cycle-scoped evidence and no history-completeness claim."""
 import json
 from types import ModuleType
 
 from .mt5_adapter import MT5Broker, QuoteFreshnessError, dec
-from .time_profile import TEST_PROFILE, HistoryTimeUnverified
+from .settings import number
+from .time_profile import TEST_PROFILE, BYBIT_PROFILE, HistoryTimeUnverified, server_to_utc
 
 
 class MT5EvidenceBroker(MT5Broker):
     evidence_contract='per_obligation_v1'
 
     def __init__(self, config, store=None, *, api=None, **kwargs):
-        if api is None or isinstance(api,ModuleType) or config.get('time_profile')!=TEST_PROFILE:
+        if config.get('time_profile')==TEST_PROFILE and (api is None or isinstance(api,ModuleType)):
             raise HistoryTimeUnverified()
         super().__init__(config,store=store,api=api,**kwargs)
+        self.read_only=not self.enable_trading
 
     def _check_quote_time(self, tick, stage):
         try:
@@ -49,6 +48,8 @@ class MT5EvidenceBroker(MT5Broker):
         state=self.store.load() if self.store else None
         state=state or dict(backend=self.backend_id,account=self.account,currency='UST',
                             scope_contract='cycle_scope_v1',commands={},completed=[],cycle=None)
+        if state.get('account') is None and not state.get('commands') and not state.get('cycle'):
+            state=dict(state,account=self.account)
         return collect(self.api,rows=self.rows,state=state,account=self.account,
                        symbol=self.symbol,magic=self.magic,now=self.clock(),cached=self.facts,
                        check_context=lambda:self._context(stage='cycle_evidence'))
@@ -66,6 +67,14 @@ class MT5EvidenceBroker(MT5Broker):
         rates=self.api.copy_rates_from_pos(self.symbol,self.api.TIMEFRAME_M1,1,1)
         if orders is None or positions is None or rates is None or len(rates)!=1:
             raise OSError('Incomplete current market observation')
+        quote_time=self._check_quote_time(tick,'evidence_market_time')
+        candle_time=number(rates[0]['time'])
+        if self.time_profile==BYBIT_PROFILE:
+            candle_time=server_to_utc(float(candle_time))
+            if candle_time%60 or candle_time+60>self.clock():
+                raise ValueError('Invalid closed native M1 candle')
+            if quote_time and candle_time!=int(quote_time['utc_time']//60)*60-60:
+                raise OSError('Latest closed native M1 candle is unavailable')
         self._context(stage='evidence_snapshot_complete')
         self._check_quote_time(tick,'evidence_snapshot_complete')
         # Re-read current objects must agree with the evidence batch. Never fuse changing snapshots.
@@ -125,8 +134,10 @@ class MT5EvidenceBroker(MT5Broker):
         return dict(protocol=1,backend=self.backend_id,account=self.account,connected=True,hedging=True,
                     reconciliation_contract=self.evidence_contract,history_complete=False,
                     observations_usable=usable,obligations=obligations,ledger_facts=facts['deal'],
-                    now=self.clock(),spec=spec,quote=dict(bid=dec(tick.bid),ask=dec(tick.ask),utc_time=tick.time_msc/1000),
-                    candle=dict(id=int(rates[0]['time']),close=dec(rates[0]['close'])),
+                    history_time_status='UNVERIFIED',settlement_basis='cycle_scoped_identity_v1',
+                    now=self.clock(),spec=spec,quote=dict(bid=dec(tick.bid),ask=dec(tick.ask),
+                        utc_time=quote_time['utc_time'] if quote_time else None),
+                    candle=dict(id=int(candle_time),close=dec(rates[0]['close'])),
                     orders=[order_json(plain(o)) for o in orders],order_history=[order_json(r) for r in facts['order'].values()],
                     positions=[dict(id=str(p.identifier),ticket=str(p.ticket),owned=str(p.identifier) in owned_positions,
                                     side='BUY' if p.type==self.api.POSITION_TYPE_BUY else 'SELL',entry=dec(p.price_open),

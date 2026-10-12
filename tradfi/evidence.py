@@ -259,13 +259,23 @@ def collect(api, *, rows, state, account, symbol, magic, now, check_context,
         if any(ident(r['position_id'])!=pid for r in records or []):
             raise EvidenceConflict('WRONG_POSITION_RESPONSE')
         merge('deal',records or [])
+    # Exit order SL/TP witnesses must not depend on a history range finding them.
+    for key in sorted({ident(d['order']) for d in facts['deal'].values()
+                       if str(d['position_id']) in pids}):
+        if 'order:'+key in sources: continue
+        records=read('order:'+key,api.history_orders_get,ticket=int(key))
+        if any(ident(r['ticket'])!=key for r in records or []):
+            raise EvidenceConflict('WRONG_ORDER_TICKET_RESPONSE')
+        merge('order',records or [])
     check_context()
     return evaluate(api, rows=rows, facts=facts, ownership=ownership,
                     active=active, positions=positions or [], sources=sources,
-                    symbol=symbol, magic=magic, manual=bool(state and (state.get('cycle') or {}).get('manual')))
+                    symbol=symbol, magic=magic, identity_settlement=scoped,
+                    manual=bool(state and (state.get('cycle') or {}).get('manual')))
 
 
-def evaluate(api, *, rows, facts, ownership, active, positions, sources, symbol, magic, manual=False):
+def evaluate(api, *, rows, facts, ownership, active, positions, sources, symbol, magic, manual=False,
+             identity_settlement=False):
     reports={}; position_owner={}; closed_profit={}; times={}
     unavailable=[key for key,value in sources.items() if value=='UNAVAILABLE']
     for key,deal in facts['deal'].items():
@@ -348,7 +358,7 @@ def evaluate(api, *, rows, facts, ownership, active, positions, sources, symbol,
             report['status']='EXTERNAL_EXIT'; continue
         if len({d['reason'] for d in exits})>1:
             report['status']='MIXED_EXIT_REASONS'; continue
-        if (any(times[ident(d['ticket'])]['utc_candidate_s'] is None for d in related)
+        if not identity_settlement and (any(times[ident(d['ticket'])]['utc_candidate_s'] is None for d in related)
                 or len({times[ident(d['ticket'])]['raw_time_msc']/1000-times[ident(d['ticket'])]['utc_candidate_s']
                         for d in related if times[ident(d['ticket'])]['utc_candidate_s'] is not None})>1):
             report['status']='AMBIGUOUS_HISTORY_TIME'; continue
@@ -384,7 +394,7 @@ def evaluate(api, *, rows, facts, ownership, active, positions, sources, symbol,
             if not 0<volume<=target or volume!=closed or number(order['volume_current'])!=target-volume: continue
             if order['state']==api.ORDER_STATE_FILLED and volume!=target: continue
             if any(str(d['order'])!=key for d in ins): continue
-            if any(times[ident(d['ticket'])]['utc_candidate_s'] is None for d in related): continue
+            if not identity_settlement and any(times[ident(d['ticket'])]['utc_candidate_s'] is None for d in related): continue
             report['reset_closed']=True
             report['reset_closing_deals']=sorted(ident(d['ticket']) for d in outs)
     for cid,row in rows.items():
