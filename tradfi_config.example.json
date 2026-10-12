@@ -1,6 +1,13 @@
 {
-  "gateway_directory": "C:/Users/USER/AppData/Roaming/MetaQuotes/Terminal/Common/Files/AI_IMPULS_TRADFI",
-  "state_file": "tradfi_state.sqlite3",
-  "log_file": "tradfi.log",
-  "enable_trading": false
+  "backend": "mt5_direct_v1",
+  "terminal_path": "C:/Program Files/MetaTrader 5/terminal64.exe",
+  "expected_server": "Bybit-Live-6",
+  "expected_login": null,
+  "symbol": "XAUUSD.s",
+  "magic": 25101102,
+  "enable_trading": false,
+  "legacy_ea_removed": false,
+  "legacy_state_reconciled": false,
+  "state_file": "tradfi_mt5_state.sqlite3",
+  "log_file": "tradfi_mt5.log"
 }

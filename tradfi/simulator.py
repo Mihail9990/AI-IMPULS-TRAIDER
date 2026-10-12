@@ -10,6 +10,7 @@ ARTIFICIAL_SPEC = dict(symbol='XAUUSD.s', currency='UST', contract_size='200', t
 
 
 class Simulator:
+    backend_id = "simulator_v1"
     def __init__(self, spec=None):
         self.data = dict(account='SIMULATOR_ONLY', hedging=True, history_complete=True,
             spec=deepcopy(spec or ARTIFICIAL_SPEC), now=0,

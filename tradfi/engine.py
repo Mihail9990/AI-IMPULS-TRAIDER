@@ -20,7 +20,12 @@ class Controller:
             'stop': False, 'stop_mode': '', 'commands': {}, 'seen_deals': [],
             'notifications': [], 'telegram_offset': 0, 'last_candle': 0,
             'completed': [], 'account': None, 'currency': ACCOUNT_CURRENCY,
+            'backend': getattr(broker, 'backend_id', 'file_gateway_v1'),
         }
+
+        backend = getattr(broker, 'backend_id', 'file_gateway_v1')
+        if self.state.get('backend', 'file_gateway_v1') != backend:
+            raise DurabilityError('Incompatible backend state; preserve and reconcile, never replay')
 
         # Legacy monetary state must never be silently relabelled or converted.
         self._validate_currency()
@@ -143,6 +148,12 @@ class Controller:
         for cmd in list(self.state['commands'].values()):
             if cmd['status'] != 'READY' or (kinds is not None and cmd['kind'] not in kinds):
                 continue
+            if (getattr(self.broker, 'backend_id', '') == 'mt5_direct_v1'
+                    and cmd['kind'] in {'STOP', 'MARKET'}
+                    and any(other['kind'] in {'STOP', 'MARKET'} and other['status'] == 'UNKNOWN'
+                            and self.broker.result(other['id']).get('status') == 'UNKNOWN'
+                            for other in self.state['commands'].values())):
+                continue  # unresolved send cannot justify another entry; cancellation remains allowed
             cmd['status'] = 'UNKNOWN'
             self.save('may_send:' + cmd['id'])
             try:
@@ -337,7 +348,7 @@ class Controller:
                 cmd = self.state['commands'][cid]
                 if (cmd['kind'] == 'STOP' and cmd['status'] == 'REJECTED'
                         and cmd.get('result', {}).get('reason') == 'CROSSED'):
-                    # EA explicitly rejected BEFORE OrderSend. UNKNOWN never permits this path.
+                    # Executor explicitly rejected before send. UNKNOWN never permits this path.
                     cfg = Settings.load(c['settings']); spec = Spec.load(snap['spec'])
                     side = cmd['side']; sign = D(1) if side == 'BUY' else D(-1)
                     try:
