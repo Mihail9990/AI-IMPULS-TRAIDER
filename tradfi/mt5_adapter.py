@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from decimal import Decimal as D
 import importlib
 import json
+import math
 import ntpath
 import re
 import time
@@ -14,6 +15,20 @@ import time
 from .broker import Spec
 from .settings import number
 from .storage import DurabilityError
+from .time_profile import (BYBIT_PROFILE, TEST_PROFILE, TimeProfileError,
+                           HistoryTimeUnverified, validate_profile, server_to_utc)
+
+
+class QuoteFreshnessError(TimeoutError):
+    """Only public clock measurements; never raw terminal/account error text."""
+
+    def __init__(self, stage, reason, now, tick_time, limit, *, raw_time_msc=None, time_profile=None):
+        self.details = dict(stage=stage, reason=reason, pc_epoch_s=now,
+                            tick_epoch_s=tick_time,
+                            age_s=None if tick_time is None else now-tick_time,
+                            max_age_s=limit, raw_time_msc=raw_time_msc, time_profile=time_profile,
+                            offset_seconds=None if raw_time_msc is None or tick_time is None else raw_time_msc/1000-tick_time)
+        super().__init__('MT5 quote freshness check failed')
 
 
 class NotSent(ValueError):
@@ -44,8 +59,14 @@ class MT5Broker:
     backend_id = 'mt5_direct_v1'
     max_age = 5
 
-    def __init__(self, config, store=None, *, api=None, clock=time.time):
+    def __init__(self, config, store=None, *, api=None, clock=time.time, monotonic=time.monotonic):
         self.config, self.store, self.api, self.clock = dict(config), store, api, clock
+        self.time_profile = validate_profile(config, injected=api is not None)
+        self.monotonic = monotonic
+        self.clock_anchor = None
+        self.clock_failed = False
+        if self.time_profile == BYBIT_PROFILE and (config.get('enable_trading') is True or store is not None):
+            raise HistoryTimeUnverified()
         self.enable_trading = config.get('enable_trading', False)
         if not isinstance(self.enable_trading, bool):
             raise ValueError('enable_trading must be a boolean')
@@ -114,7 +135,7 @@ class MT5Broker:
         self.rows[cid] = json.loads(payload)
 
     def _binding(self):
-        return dict(backend=self.backend_id, account=self.account, symbol=self.symbol, magic=self.magic,
+        return dict(backend=self.backend_id, time_profile=self.time_profile, account=self.account, symbol=self.symbol, magic=self.magic,
                     terminal=ntpath.normcase(ntpath.normpath(self.path)), currency='UST')
 
     def connect(self):
@@ -131,7 +152,7 @@ class MT5Broker:
             raise OSError('MT5 initialize failed')
         self.connected = True
         try:
-            self._context()
+            self._context(stage='connect')
             if self.store is not None:
                 binding = self._binding()
                 row = self.store.db.execute('SELECT payload FROM mt5_binding WHERE id=1').fetchone()
@@ -150,7 +171,41 @@ class MT5Broker:
             self.api.shutdown()
             self.connected = False
 
-    def _context(self, mutation=False):
+    def _check_quote_time(self, tick, stage):
+        now = float(self.clock())
+        if self.time_profile == BYBIT_PROFILE:
+            mono = self.monotonic()
+            if self.clock_failed or not math.isfinite(now) or not math.isfinite(mono):
+                self.clock_failed = True
+                raise TimeProfileError('PC_CLOCK_DISCONTINUITY')
+            if self.clock_anchor is not None:
+                old_wall, old_mono = self.clock_anchor
+                if mono < old_mono or abs((now-old_wall)-(mono-old_mono)) > self.max_age:
+                    self.clock_failed = True
+                    raise TimeProfileError('PC_CLOCK_DISCONTINUITY')
+            else:
+                self.clock_anchor = (now, mono)
+        raw = getattr(tick, 'time_msc', None)
+        stamp = float(raw) / 1000 if isinstance(raw, (int, float)) and not isinstance(raw, bool) else None
+        if stamp is not None and (not math.isfinite(stamp) or stamp <= 0):
+            stamp = None
+        if stamp is not None and self.time_profile == BYBIT_PROFILE:
+            seconds = getattr(tick, 'time', None)
+            if (isinstance(seconds, bool) or not isinstance(seconds, (int, float))
+                    or not math.isfinite(seconds) or not 0 <= stamp-seconds < 1):
+                raise TimeProfileError('TICK_SECONDS_MILLISECONDS_DISAGREE')
+            stamp = server_to_utc(stamp)
+        if stamp is None:
+            reason = 'TICK_UNAVAILABLE' if tick is None else 'TICK_TIME_INVALID'
+        elif abs(now-stamp) <= self.max_age:
+            return dict(raw_time_msc=raw, utc_time=stamp, offset_seconds=raw/1000-stamp, age_s=now-stamp)
+        else:
+            reason = 'TICK_OLD' if now > stamp else 'TICK_AHEAD_OF_PC'
+        safe_raw = raw if isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(raw) else None
+        raise QuoteFreshnessError(stage, reason, now, stamp, self.max_age,
+                                  raw_time_msc=safe_raw, time_profile=self.time_profile)
+
+    def _context(self, mutation=False, *, stage='context'):
         if not self.connected:
             raise OSError('MT5 adapter is not connected')
         terminal, account = self.api.terminal_info(), self.api.account_info()
@@ -174,8 +229,7 @@ class MT5Broker:
         if info is None or not info.visible:
             raise ValueError('XAUUSD.s must already be visible in Market Watch')
         tick = self.api.symbol_info_tick(self.symbol)
-        if tick is None or abs(self.clock() - tick.time_msc / 1000) > self.max_age:
-            raise TimeoutError('MT5 quote is stale/unavailable')
+        self._check_quote_time(tick, stage)
         if number(tick.bid) <= 0 or number(tick.ask) < number(tick.bid):
             raise ValueError('Invalid executable quote')
         spec = dict(symbol=self.symbol, currency=account.currency, profit_currency=info.currency_profit,
@@ -224,7 +278,9 @@ class MT5Broker:
                 [(kind,str(r['ticket']),encoded(r)) for r in records]))
 
     def snapshot(self):
-        _, _, info, tick, spec = self._context()
+        if self.time_profile == BYBIT_PROFILE:
+            raise HistoryTimeUnverified()  # inspect must not impersonate a reconciled strategy snapshot
+        _, _, info, tick, spec = self._context(stage='snapshot_start')
         start = datetime.fromtimestamp(0, timezone.utc)
         end = datetime.fromtimestamp(self.clock()+60, timezone.utc)
         orders = self.api.orders_get(symbol=self.symbol)
@@ -235,7 +291,7 @@ class MT5Broker:
         if any(x is None for x in (orders,positions,history,deals,rates)) or len(rates)!=1:
             raise OSError('Incomplete MT5 snapshot/history')
         # Recheck identity and freshness after potentially slow reads.
-        self._context()
+        self._context(stage='snapshot_after_reads')
         history = [plain(x) for x in history if x.symbol==self.symbol]
         deals = [plain(x) for x in deals if x.symbol==self.symbol]
         self._cache('order',history); self._cache('deal',deals)
@@ -307,8 +363,7 @@ class MT5Broker:
                   candle=dict(id=int(rates[0]['time']),close=dec(rates[0]['close'])),
                   orders=[order_json(plain(o)) for o in orders],positions=converted_positions,
                   order_history=[order_json(o) for o in self.facts['order'].values()],deals=converted_deals)
-        if abs(self.clock()-snap['quote']['utc_time'])>self.max_age:
-            raise TimeoutError('Snapshot read exceeded quote freshness')
+        self._check_quote_time(tick, 'snapshot_complete')
         # Convert successful mutation replies into DONE only with broker readback evidence.
         for cid,row in list(self.rows.items()):
             cmd=row['command']; result=row.get('result',{})
@@ -483,8 +538,45 @@ class MT5Broker:
             row['result']=dict(status='UNKNOWN',reason='order_send outcome uncertain',error_type=type(exc).__name__)
         self._save_row(cid,row,'send_result')
 
+    def _market_preflight(self):
+        terminal, account, info, tick, spec = self._context(stage='preflight')
+        orders = self.api.orders_get(symbol=self.symbol)
+        positions = self.api.positions_get(symbol=self.symbol)
+        rates = self.api.copy_rates_from_pos(self.symbol, self.api.TIMEFRAME_M1, 0, 3)
+        if orders is None or positions is None or rates is None or len(rates) != 3:
+            raise OSError('Incomplete market-data inspection')
+        values = [number(r['time']) for r in rates]
+        if any(t <= 0 or t % 60 for t in values):
+            raise TimeProfileError('INVALID_M1_TIME_SEQUENCE')
+        raw_bars = [int(t) for t in values]
+        bars = [server_to_utc(t) for t in raw_bars]
+        if bars != sorted(set(bars)) or any(t % 60 for t in bars):
+            raise TimeProfileError('INVALID_M1_TIME_SEQUENCE')
+        # A live tick must belong to the current bar; previous available bars must be closed.
+        quote = self._check_quote_time(tick, 'preflight_after_reads')
+        if not bars[-1] <= quote['utc_time'] < bars[-1]+60:
+            raise TimeProfileError('M1_CURRENT_BAR_NOT_ALIGNED_WITH_TICK')
+        if any(t+60 > bars[-1] for t in bars[:-1]):
+            raise TimeProfileError('M1_PREVIOUS_BAR_NOT_CLOSED')
+        self._context(stage='preflight_after_reads')
+        result = self.profit('BUY', number(spec['volume_min']), number(tick.ask),
+                             number(tick.ask)+number(spec['tick_size']))
+        quote = self._check_quote_time(tick, 'preflight_complete')
+        return dict(backend=self.backend_id, time_profile=self.time_profile, mode='READ_ONLY',
+                    inspect_status='OK', market_data_time_status='VERIFIED',
+                    history_time_status='UNVERIFIED', history_complete=False, execution_ready=False,
+                    execution_blocker='HISTORY_TIME_PROFILE_UNVERIFIED',
+                    connected=True, hedging=True, currency=account.currency, symbol=self.symbol,
+                    profit_currency=spec['profit_currency'], spec=spec, quote_time=quote,
+                    m1_raw_times=raw_bars, m1_utc_times=bars,
+                    trade_allowed=bool(terminal.trade_allowed), tradeapi_disabled=bool(terminal.tradeapi_disabled),
+                    adapter_trading_enabled=False, orders=len(orders), positions=len(positions),
+                    order_calc_profit=dec(result), account_binding='configured' if self.login else 'session_only')
+
     def preflight(self):
-        terminal,account,info,tick,spec=self._context()
+        if self.time_profile == BYBIT_PROFILE:
+            return self._market_preflight()
+        terminal,account,info,tick,spec=self._context(stage='preflight')
         snap=self.snapshot()
         result=self.profit('BUY',number(spec['volume_min']),number(tick.ask),number(tick.ask)+number(spec['tick_size']))
         return dict(backend=self.backend_id,connected=True,hedging=True,currency=account.currency,

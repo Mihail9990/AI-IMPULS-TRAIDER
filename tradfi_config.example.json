@@ -1,6 +1,7 @@
 {
   "backend": "mt5_direct_v1",
   "terminal_path": "C:/Program Files/MetaTrader 5/terminal64.exe",
+  "time_profile": "bybit_live6_time_v1",
   "expected_server": "Bybit-Live-6",
   "expected_login": null,
   "symbol": "XAUUSD.s",

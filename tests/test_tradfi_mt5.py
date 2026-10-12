@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from tradfi.engine import Controller
-from tradfi.mt5_adapter import MT5Broker
+from tradfi.mt5_adapter import MT5Broker, QuoteFreshnessError
 from tradfi.storage import Store, DurabilityError
 
 
@@ -85,7 +85,7 @@ class MT5Test(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.store = Store(Path(self.tmp.name)/'state.sqlite3'); self.addCleanup(self.store.close)
         self.api = FakeMT5()
-        self.config = dict(backend='mt5_direct_v1', terminal_path=r'C:\Program Files\MetaTrader 5\terminal64.exe',
+        self.config = dict(backend='mt5_direct_v1', time_profile='injected_utc_test_v1', terminal_path=r'C:\Program Files\MetaTrader 5\terminal64.exe',
             expected_login=111111111, expected_server='Bybit-Live-6', symbol='XAUUSD.s',
             enable_trading=True, legacy_ea_removed=True, legacy_state_reconciled=True)
         self.broker = self.make_broker(); self.addCleanup(self.broker.close)
@@ -301,6 +301,82 @@ class MT5Test(unittest.TestCase):
         with self.assertRaises(TimeoutError): self.broker.preflight()
         with self.assertRaises(TimeoutError): self.broker.profit('BUY', D('.01'), D(4000), D('4000.01'))
         self.assertFalse(self.api.calcs)
+
+    def test_quote_diagnostics_distinguish_missing_old_future_and_invalid(self):
+        for offset, reason in ((-6, 'TICK_OLD'), (3600, 'TICK_AHEAD_OF_PC'),
+                               (None, 'TICK_UNAVAILABLE'), ('invalid', 'TICK_TIME_INVALID')):
+            with self.subTest(reason=reason):
+                self.api.tick = (None if offset is None else record(bid=4000., ask=4000.1,
+                    time_msc=0 if offset == 'invalid' else (self.api.now+offset)*1000))
+                with self.assertRaises(QuoteFreshnessError) as caught:
+                    self.broker.preflight()
+                details = caught.exception.details
+                self.assertEqual(details['reason'], reason)
+                self.assertEqual(details['stage'], 'preflight')
+                self.assertEqual(details['age_s'], -offset if isinstance(offset, int) else None)
+                self.assertEqual(details['max_age_s'], 5)
+        self.assertFalse(self.api.sends); self.assertFalse(self.api.checks)
+        self.assertFalse(self.api.calcs)
+
+    def test_connect_timing_failure_shuts_down_readonly_session(self):
+        self.api.tick = self.api.tick._replace(time_msc=(self.api.now+7200)*1000)
+        broker = MT5Broker(dict(self.config, enable_trading=False), api=self.api, clock=lambda:self.api.now)
+        with self.assertRaises(QuoteFreshnessError) as caught:
+            broker.connect()
+        self.assertEqual(caught.exception.details['stage'], 'connect')
+        self.assertEqual(caught.exception.details['age_s'], -7200)
+        self.assertFalse(broker.connected)
+        self.assertEqual(self.api.shutdowns, 1)
+        self.assertFalse(self.api.sends)
+
+    def test_five_second_boundary_preserved_in_both_directions(self):
+        for offset in (-5, 5):
+            self.api.tick = self.api.tick._replace(time_msc=(self.api.now+offset)*1000)
+            self.broker.preflight()
+        self.assertFalse(self.api.sends)
+
+    def test_history_delay_diagnostic_identifies_post_read_guard(self):
+        def slow_history(*args):
+            self.api.now += 6
+            return []
+        self.api.history_orders_get = slow_history
+        with self.assertRaises(QuoteFreshnessError) as caught:
+            self.broker.snapshot()
+        self.assertEqual(caught.exception.details['stage'], 'snapshot_after_reads')
+        self.assertEqual(caught.exception.details['age_s'], 6)
+
+    def test_snapshot_original_quote_age_remains_guarded(self):
+        def slow_history(*args):
+            self.api.now += 6
+            self.api.tick = self.api.tick._replace(time_msc=self.api.now*1000)
+            return []
+        self.api.history_orders_get = slow_history
+        with self.assertRaises(QuoteFreshnessError) as caught:
+            self.broker.snapshot()
+        self.assertEqual(caught.exception.details['stage'], 'snapshot_complete')
+        self.assertEqual(caught.exception.details['age_s'], 6)
+
+    def test_cli_timing_is_safe_and_unrelated_errors_stay_redacted(self):
+        import contextlib
+        import io
+        from tradfi.runtime import main
+        path = Path(self.tmp.name)/'inspect.json'
+        path.write_text(json.dumps(self.config))
+        error = QuoteFreshnessError('connect', 'TICK_AHEAD_OF_PC', self.api.now, self.api.now+3600, 5)
+        error.args = ('PRIVATE_ACCOUNT_AND_TOKEN',)
+        for exc in (error, TimeoutError('PRIVATE_ACCOUNT_AND_TOKEN')):
+            stderr = io.StringIO()
+            with patch('tradfi.runtime._run_mt5', side_effect=exc), contextlib.redirect_stderr(stderr):
+                with self.assertRaises(SystemExit) as caught:
+                    main(['--mode', 'mt5', '--inspect', '--config', str(path)])
+            self.assertEqual(caught.exception.code, 2)
+            self.assertNotIn('PRIVATE_ACCOUNT_AND_TOKEN', stderr.getvalue())
+            self.assertNotIn(str(self.api.account.login), stderr.getvalue())
+            if exc is error:
+                self.assertIn('TICK_AHEAD_OF_PC', stderr.getvalue())
+                self.assertIn('-3600', stderr.getvalue())
+            else:
+                self.assertIn('(TimeoutError)', stderr.getvalue())
 
     def test_account_switch_rejected(self):
         self.api.account = self.api.account._replace(login=222222222)

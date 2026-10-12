@@ -56,6 +56,8 @@ def _run_mt5(config, inspect):
     if config.get('enable_trading') is not True:
         print('MT5 execution is disabled. Use --mode mt5 --inspect for read-only preflight.')
         return
+    from .time_profile import require_execution_profile
+    require_execution_profile(config)
     if config.get('legacy_ea_removed') is not True:
         raise ValueError('Legacy EA removal must be explicitly confirmed')
     if config.get('legacy_state_reconciled') is not True:
@@ -142,6 +144,15 @@ def main(argv=None):
     except KeyboardInterrupt:
         parser.exit(130, 'TradFi stopped.\n')
     except (Exception, DurabilityError) as exc:
+        from .mt5_adapter import QuoteFreshnessError
+        from .time_profile import TimeProfileError
+        if isinstance(exc, TimeProfileError):
+            parser.exit(2, 'MT5 time profile: ' + exc.code + '. Trading permissions were not changed.\n')
+        if isinstance(exc, QuoteFreshnessError):
+            parser.exit(2, 'MT5 quote timing: ' + json.dumps(exc.details, allow_nan=False) +
+                        '\nCheck incoming ticks and Windows clock synchronization; '
+                        'do not compensate broker timestamps or relax freshness without evidence. '
+                        'Trading permissions were not changed.\n')
         # Never echo raw MT5 errors, config paths, account identity or Telegram credentials.
         parser.exit(2, 'MT5 check/runner stopped (' + type(exc).__name__ + '). '
                     'Verify config, terminal connection, UST hedging account and fresh quotes; '
