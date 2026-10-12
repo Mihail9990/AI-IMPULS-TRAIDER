@@ -321,13 +321,13 @@ class TelegramTest(unittest.TestCase):
         self.assertGreater(len(template), 256)
         self.assertEqual(payload['text'], '<pre>' + template + '</pre>')
         self.assertEqual(payload['parse_mode'], 'HTML')
-        self.assertEqual({x['command'] for x in Telegram.COMMANDS}, {'start', 'stop', 'settings', 'status'})
+        self.assertEqual({x['command'] for x in Telegram.COMMANDS}, {'start', 'stop', 'settings', 'status', 'sendlog', 'reset_manual'})
 
     def test_allowed_chat_durable_offset_and_invalid_block(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp)/'s.sqlite3'); self.addCleanup(store.close)
             bot = Controller(store, Simulator()); tg = Telegram('fake', '123', Mock())
-            def event(i, chat, text): return dict(update_id=i, message={'chat': {'id': chat}, 'text': text})
+            def event(i, chat, text): return dict(update_id=i, message={'chat': {'id': chat}, 'from': {'id': chat}, 'text': text})
             tg.incoming.put(event(1, 999, '/start')); tg.incoming.put(event(2, 123, '/start'))
             tg.incoming.put(event(2, 123, '/stop')); tg.incoming.put(event(3, 123, '/SETTINGS:\nINITIAL_SIZE=NaN'))
             tg.process(bot)

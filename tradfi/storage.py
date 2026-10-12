@@ -78,25 +78,30 @@ class Store:
                     or str(row['raw']['position_id'])!=row['position_id']):
                 raise DurabilityError('Consumed deal ledger identity mismatch')
 
-    def commit_deals(self, expected, data, records, event):
+    def commit_deals(self, expected, data, records, event, *, manual_reset=False):
         """CAS snapshot + immutable consumed deals + audit, in one FULL/WAL transaction."""
         encode=lambda value: json.dumps(value,sort_keys=True,allow_nan=False)
         try:
             self.db.execute('BEGIN IMMEDIATE')
             current=self.load()
             encoded=[(r,encode(r)) for r in records]
-            if not records or len({r['ticket'] for r in records})!=len(records):
+            if (not records and not manual_reset) or len({r['ticket'] for r in records})!=len(records):
                 raise DurabilityError('Invalid closure deal batch')
             before=set(expected['seen_deals']); batch={r['ticket'] for r in records}
             if any(data[k]!=expected[k] for k in ('backend','account','currency','ledger_contract')):
                 raise DurabilityError('Closure cannot change ledger identity')
             if before & batch or set(data['seen_deals'])!=before | batch:
                 raise DurabilityError('Closure must append exactly its new consumed deal batch')
+            if manual_reset and (expected['phase']!='MANUAL' or not expected['cycle'].get('manual')
+                    or data['phase']!='WAIT_START' or data['cycle'] is not None
+                    or data.get('last_manual_reset')!=expected['cycle']['id']):
+                raise DurabilityError('Invalid manual reset transition')
+            positions=set(expected['cycle'].get('reset_position_ids',[])) if manual_reset else {expected['cycle']['position']['id']}
             for row,payload in encoded:
                 if (row['backend']!=data['backend'] or row['account']!=data['account']
                         or row['currency']!=data['currency'] or row['ticket'] not in data['seen_deals']
                         or row['cycle_id']!=expected['cycle']['id']
-                        or row['position_id']!=expected['cycle']['position']['id']
+                        or row['position_id'] not in positions
                         or str(row['raw']['ticket'])!=row['ticket']
                         or str(row['raw']['position_id'])!=row['position_id']
                         or row['raw']['entry']!=1):
@@ -115,15 +120,16 @@ class Store:
             for row,payload in encoded:
                 self.db.execute('INSERT INTO consumed_deals VALUES(?,?,?,?)',
                                 (row['backend'],row['account'],row['ticket'],payload))
-            if self.fault: self.fault('deals_inserted')
+            if self.fault: self.fault('manual_reset_deals_inserted' if manual_reset else 'deals_inserted')
             self.db.execute('INSERT OR REPLACE INTO snapshot VALUES(1,?)',(encode(data),))
-            if self.fault: self.fault('closure_snapshot_written')
+            if self.fault: self.fault('manual_reset_snapshot_written' if manual_reset else 'closure_snapshot_written')
             self.verify_deal_ledger(data)
-            self.db.execute('INSERT INTO audit(event,payload) VALUES(?,?)',
-                            (event,encode(dict(phase=data['phase'],deal_count=len(records)))))
-            if self.fault: self.fault('closure_before_commit')
+            detail=dict(phase=data['phase'],deal_count=len(records))
+            if manual_reset: detail['settlement']=data['completed'][-1]
+            self.db.execute('INSERT INTO audit(event,payload) VALUES(?,?)',(event,encode(detail)))
+            if self.fault: self.fault('manual_reset_before_commit' if manual_reset else 'closure_before_commit')
             self.db.execute('COMMIT')
-            if self.fault: self.fault('closure_after_commit')
+            if self.fault: self.fault('manual_reset_after_commit' if manual_reset else 'closure_after_commit')
             return True
         except BaseException as exc:
             if self.db.in_transaction: self.db.execute('ROLLBACK')

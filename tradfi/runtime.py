@@ -4,7 +4,6 @@ from contextlib import contextmanager, ExitStack
 import hashlib
 import json
 import logging
-from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import time
@@ -96,14 +95,15 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None):
         resources.callback(broker.close)
         broker.connect()
         controller = Controller(store, broker)
-        handler = RotatingFileHandler(config.get('log_file', 'tradfi_mt5.log'),
-                                      maxBytes=5_000_000, backupCount=5, encoding='utf-8')
+        from .log_export import diagnostic_handler
+        log_path=Path(config.get('log_file','tradfi_mt5.log')).resolve()
+        handler = diagnostic_handler(log_path)
         resources.callback(handler.close)
-        logging.basicConfig(level=logging.INFO, handlers=[handler],
-                            format='%(asctime)s %(levelname)s %(message)s')
+        logging.basicConfig(level=logging.INFO, handlers=[handler])
         resources.callback(logging.getLogger().removeHandler, handler)
         from .telegram import Telegram
-        telegram = Telegram(token, chat)
+        telegram = Telegram(token, chat, user_id=os.environ.get('TRADFI_TELEGRAM_USER_ID'),
+                            log_path=log_path)
         resources.callback(telegram.http.close)
         resources.callback(telegram.close)
         if not controller.state.get('telegram_initialized'):

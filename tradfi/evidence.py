@@ -262,10 +262,10 @@ def collect(api, *, rows, state, account, symbol, magic, now, check_context,
     check_context()
     return evaluate(api, rows=rows, facts=facts, ownership=ownership,
                     active=active, positions=positions or [], sources=sources,
-                    symbol=symbol, magic=magic)
+                    symbol=symbol, magic=magic, manual=bool(state and (state.get('cycle') or {}).get('manual')))
 
 
-def evaluate(api, *, rows, facts, ownership, active, positions, sources, symbol, magic):
+def evaluate(api, *, rows, facts, ownership, active, positions, sources, symbol, magic, manual=False):
     reports={}; position_owner={}; closed_profit={}; times={}
     unavailable=[key for key,value in sources.items() if value=='UNAVAILABLE']
     for key,deal in facts['deal'].items():
@@ -364,6 +364,29 @@ def evaluate(api, *, rows, facts, ownership, active, positions, sources, symbol,
                 closed_profit[ident(d['ticket'])]=str(number(d['profit']))
         else:
             report['status']='PARTIAL_CLOSE' if out else 'AWAIT_POSITION_EVIDENCE'
+    if manual and not unavailable:
+        # Explicit manual settlement accepts user-initiated exits only through an already
+        # owned opening order/position. It never changes automatic strategy classification.
+        for cid,report in reports.items():
+            cmd=rows[cid]['command']; key=report.get('order_id'); pid=report.get('position_id')
+            if not key or not pid or key in active or any(str(p['identifier'])==pid for p in positions):
+                continue
+            order=facts['order'].get(key)
+            if not order or order['state'] not in {api.ORDER_STATE_FILLED,api.ORDER_STATE_CANCELED,api.ORDER_STATE_EXPIRED}:
+                continue
+            related=[d for d in facts['deal'].values() if str(d['position_id'])==pid]
+            ins=[d for d in related if d['entry']==api.DEAL_ENTRY_IN]
+            outs=[d for d in related if d['entry']==api.DEAL_ENTRY_OUT]
+            if not ins or not outs or len(ins)+len(outs)!=len(related): continue
+            volume=sum((number(d['volume']) for d in ins),number(0))
+            closed=sum((number(d['volume']) for d in outs),number(0))
+            target=number(cmd['size'])
+            if not 0<volume<=target or volume!=closed or number(order['volume_current'])!=target-volume: continue
+            if order['state']==api.ORDER_STATE_FILLED and volume!=target: continue
+            if any(str(d['order'])!=key for d in ins): continue
+            if any(times[ident(d['ticket'])]['utc_candidate_s'] is None for d in related): continue
+            report['reset_closed']=True
+            report['reset_closing_deals']=sorted(ident(d['ticket']) for d in outs)
     for cid,row in rows.items():
         cmd=row['command']
         if cmd['kind'] in {'STOP','MARKET'}:

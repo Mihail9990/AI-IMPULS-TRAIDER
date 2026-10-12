@@ -53,9 +53,12 @@ class MT5EvidenceBroker(MT5Broker):
                        symbol=self.symbol,magic=self.magic,now=self.clock(),cached=self.facts,
                        check_context=lambda:self._context(stage='cycle_evidence'))
 
-    def snapshot(self):
+    def manual_reset_snapshot(self):
+        return self.snapshot(require_fresh=True)
+
+    def snapshot(self, *, require_fresh=False):
         state=self.store.load() if self.store else None
-        self._manual_readonly=bool(((state or {}).get('cycle') or {}).get('manual'))
+        self._manual_readonly=not require_fresh and bool(((state or {}).get('cycle') or {}).get('manual'))
         _,_,_,tick,spec=self._context(stage='evidence_snapshot_start')
         audit=self.reconciliation_evidence()
         orders=self.api.orders_get(symbol=self.symbol)

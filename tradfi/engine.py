@@ -2,6 +2,7 @@
 from copy import deepcopy
 from decimal import Decimal as D
 import logging
+import json
 import time
 import uuid
 
@@ -81,9 +82,9 @@ class Controller:
         self.notify('SAFE_PAUSE: ' + reason + '. Broker SL/TP remain; no automatic close.')
         self.save('safe_pause')
 
-    def snapshot(self):
+    def snapshot(self, *, for_reset=False):
         self._validate_currency()
-        snap = self.broker.snapshot()
+        snap = self.broker.manual_reset_snapshot() if for_reset else self.broker.snapshot()
         identity = snap['account']
         if self.state['account'] is not None and self.state['account'] != identity:
             raise ValueError('Gateway account identity changed')
@@ -146,8 +147,10 @@ class Controller:
         if raw.upper().startswith('/SETTINGS:'):
             settings = parse_settings(raw)
             Spec.load(self.snapshot()['spec']).validate(settings)
-        elif raw.lower() not in {'/start', '/stop', '/settings', '/status'}:
-            raise ValueError('Commands: /settings, complete /SETTINGS: block, /start, /stop, /status')
+        elif raw.lower() not in {'/start', '/stop', '/settings', '/status', '/reset_manual'}:
+            raise ValueError('Commands: /settings, complete /SETTINGS: block, /start, /stop, /status, /reset_manual')
+        if raw.lower()=='/reset_manual':
+            return self._reset_manual(update_id)
         if settings:
             self.state['settings'] = settings.dump()
             self.notify('Settings saved atomically; active cycle snapshot is unchanged.')
@@ -155,6 +158,8 @@ class Controller:
             if (self.state.get('cycle') or {}).get('manual'):
                 raise ValueError('Manual cycle remains unresolved; /start cannot reset it or Recovery')
             snap = self.snapshot()
+            if self.state['phase']=='WAIT_START' and not self._fresh_closed_candle(snap):
+                raise ValueError('A fresh closed UTC M1 candle is required after manual reset')
             Spec.load(snap['spec']).validate(Settings.load(self.state['settings']))
             if self.state['phase'] == 'SAFE_PAUSE':
                 raise ValueError('SAFE_PAUSE requires broker reconciliation; /start cannot clear it')
@@ -189,6 +194,101 @@ class Controller:
         if update_id is not None:
             self.state['telegram_offset'] = update_id + 1
         self.save('telegram_command')
+
+    def _reset_manual(self, update_id):
+        c=self.state.get('cycle')
+        if not c and self.state['phase']=='WAIT_START' and self.state.get('last_manual_reset'):
+            if update_id is not None:
+                self.state['telegram_offset']=update_id+1
+                self.save('manual_reset_duplicate')
+            return
+        if not c or self.state['phase']!='MANUAL' or not c.get('manual'):
+            raise ValueError('/reset_manual requires the unfinished MANUAL cycle')
+        if self.evidence_contract!='per_obligation_v1':
+            raise ValueError('/reset_manual requires per-obligation broker evidence')
+        snap=self.snapshot(for_reset=True)
+        if snap['orders'] or snap['positions']:
+            raise ValueError('Close positions and cancel pending orders manually first; bot sends no trading actions')
+        self._reconcile_evidence_commands(snap)
+        positions=set(); closing=set()
+        for cid,cmd in self.state['commands'].items():
+            if cmd.get('cycle_id')!=c['id']:
+                if cmd['status'] not in TERMINAL:
+                    raise ValueError('Older unresolved obligation prevents reset')
+                continue
+            proof=snap['obligations'].get(cid,{})
+            if proof.get('cycle_id')!=c['id']:
+                raise ValueError('Missing cycle-bound obligation evidence')
+            status=proof.get('status')
+            never_sent=(status=='NO_SEND_EVIDENCE' and (cmd['status']=='READY' or cmd.get('never_sent') is True))
+            if cmd['kind'] in {'STOP','MARKET'}:
+                if proof.get('reset_closed'):
+                    positions.add(proof['position_id']); closing.update(proof['reset_closing_deals'])
+                elif status not in {'TERMINAL_UNFILLED_EVIDENCE','REJECTED_RESPONSE'} and not never_sent:
+                    raise ValueError('Entry obligation has no positive final settlement evidence')
+            elif cmd['kind']=='CANCEL':
+                if status not in {'CANCEL_TERMINAL_READBACK','REJECTED_RESPONSE'} and not never_sent:
+                    raise ValueError('Cancellation remains unresolved')
+            elif cmd['kind']=='MODIFY':
+                closed=any(r.get('reset_closed') and r.get('position_id')==cmd['position_id']
+                           for r in snap['obligations'].values())
+                if not never_sent and status!='REJECTED_RESPONSE' and not (
+                        closed and status!='MISSING_DURABLE_JOURNAL' and cid in self.broker.rows):
+                    raise ValueError('Protection command remains unresolved')
+            else:
+                raise ValueError('Unsupported obligation kind')
+        # All identities and amounts come from current-cycle correlated facts, not emptiness.
+        exits=[d for d in snap['deals'] if d['id'] in closing]
+        if ({d['id'] for d in exits}!=closing or any(d['entry']!='OUT' or d.get('cycle_id')!=c['id'] for d in exits)):
+            raise ValueError('Incomplete cycle closing deal evidence')
+        for deal in exits:
+            if deal['id'] in self.state['seen_deals']:
+                previous=self.store.db.execute('SELECT payload FROM consumed_deals WHERE backend=? AND account=? AND ticket=?',
+                    (self.state['backend'],self.state['account'],deal['id'])).fetchone()
+                prior=json.loads(previous[0]) if previous else {}
+                if (prior.get('cycle_id')!=c['id'] or prior.get('position_id')!=deal['position_id']
+                        or prior.get('backend')!=self.state['backend'] or prior.get('account')!=self.state['account']
+                        or prior.get('currency')!=self.state['currency'] or prior.get('raw')!=snap['ledger_facts'].get(deal['id'])):
+                    raise DurabilityError('Consumed deal fingerprint disagrees with reset evidence')
+        fresh=[d for d in exits if d['id'] not in self.state['seen_deals']]
+        c['reset_position_ids']=sorted(positions)
+        self.save('manual_reset_evidence')
+        expected=deepcopy(self._durable_state)
+        try:
+            delta=sum((D(d['profit']) for d in fresh),D(0))
+            actual=D(c['realized'])+delta
+            remaining=None if c['recovery'] is None else D(c['recovery'])-delta
+            summary=dict(id=c['id'],currency=c['currency'],target=c['target'],realized=str(actual),
+                completion='MANUAL_RESET',profitable_completion=False,
+                recovery_before_writeoff=None if remaining is None else str(remaining),
+                written_off_recovery=None if remaining is None else str(max(D(0),remaining)),
+                recovery_initialized=remaining is not None,started_at_utc=c['started_at_utc'],
+                reset_at_utc=snap['now'])
+            self.state['completed'].append(summary)
+            self.state['seen_deals'].extend(d['id'] for d in fresh)
+            for cmd in self.state['commands'].values():
+                if cmd.get('cycle_id')==c['id'] and cmd['status'] not in TERMINAL:
+                    cmd['status']='OBSOLETE'  # terminal cycle proof; never a false send acknowledgement
+            self.state.update(cycle=None,phase='WAIT_START',stop=True,stop_mode='',last_manual_reset=c['id'],require_fresh_candle=True)
+            self.state.pop('cooldown_until',None)
+            if update_id is not None: self.state['telegram_offset']=update_id+1
+            residual=summary['written_off_recovery'] if remaining is not None else 'not initialized'
+            self.notify(f'Manual cycle finalized: deal profit={actual} UST (commission/swap/fee excluded); Recovery written off={residual}. '
+                        'This is not profitable strategy completion or recovery of account losses. Waiting for /start.')
+            records=[dict(backend=self.state['backend'],account=self.state['account'],currency=self.state['currency'],
+                          cycle_id=c['id'],position_id=d['position_id'],ticket=d['id'],raw=snap['ledger_facts'][d['id']])
+                     for d in fresh]
+            self.store.commit_deals(expected,self.state,records,'manual_reset',manual_reset=True)
+            self._durable_state=deepcopy(self.state)
+            LOG.info('%s phase=%s','manual_reset',self.state['phase'])
+        except BaseException:
+            self.state=self.store.load() or expected
+            self._durable_state=deepcopy(self.state)
+            raise
+
+    @staticmethod
+    def _fresh_closed_candle(snap):
+        return number(snap['candle']['id'])==int(number(snap['now'])//60)*60-60
 
     def status(self):
         c = self.state['cycle'] or {}
@@ -319,7 +419,9 @@ class Controller:
                 continue
             evidence=snap['obligations'].get(cid,{})
             status=evidence.get('status')
-            if status in mapping:
+            if evidence.get('reset_closed') and (self.state.get('cycle') or {}).get('manual'):
+                cmd['status']='FILLED'
+            elif status in mapping:
                 cmd['status']=mapping[status]
             elif status=='TERMINAL_UNFILLED_EVIDENCE':
                 order=next(o for o in snap['order_history'] if o['id']==evidence['order_id'])
@@ -401,6 +503,7 @@ class Controller:
                 self.state['phase'] = 'PAUSED' if self.state['stop'] else 'WAIT_CANDLE'
                 self.save('cooldown_finished_wait_new_close')
         elif phase == 'WAIT_CANDLE' and snap['candle']['id'] > self.state['last_candle']:
+            if self.state.get('require_fresh_candle') and not self._fresh_closed_candle(snap): return
             if snap['orders'] or snap['positions'] or self._unresolved():
                 self.pause('Cannot start fresh cycle without confirmed flat')
                 return
@@ -412,6 +515,7 @@ class Controller:
             except ValueError as exc:
                 self.pause(str(exc))
                 return
+            self.state.pop('require_fresh_candle',None)
             self.state['cycle'] = {
                 'id': uuid.uuid4().hex, 'currency': spec.currency,
                 'started_at_utc': self.clock(), 'max_duration_seconds': 86400,
@@ -742,6 +846,7 @@ class Controller:
                           raw=snap['ledger_facts'][d['id']]) for d in deals]
             self.store.commit_deals(expected,self.state,records,event)
             self._durable_state=deepcopy(self.state)
+            LOG.info('%s phase=%s',event,self.state['phase'])
         except BaseException:
             self.state=self.store.load() or expected
             self._durable_state=deepcopy(self.state)
