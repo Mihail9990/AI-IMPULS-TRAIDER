@@ -1,4 +1,4 @@
-"""Separate TradFi Telegram adapter; no reuse of Capital trading commands."""
+"""TradFi Telegram adapter."""
 import queue
 import threading
 import time

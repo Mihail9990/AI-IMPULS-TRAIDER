@@ -141,7 +141,7 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='Independent TradFi runner; no Capital.com imports')
+    parser = argparse.ArgumentParser(description='TradFi MT5 runner')
     parser.add_argument('--mode', choices=('simulate', 'mt5', 'gateway'), default='simulate')
     parser.add_argument('--config', default='tradfi_config.json')
     parser.add_argument('--inspect', action='store_true', help='Read-only MT5 preflight; no SQLite/Telegram/trading')

@@ -1,1 +1,1 @@
-"""Independent MT5 TradFi strategy. No Capital.com imports or startup side effects."""
+"""MT5 TradFi strategy without startup side effects."""
