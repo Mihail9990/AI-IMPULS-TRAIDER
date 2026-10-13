@@ -93,13 +93,18 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
     from .credentials import load_telegram_credentials
     token, chat, user = load_telegram_credentials(credentials_file, config_path=config_path)
     state_file = Path(config.get('state_file', 'tradfi_mt5_state.sqlite3')).resolve()
-    state_file.parent.mkdir(parents=True, exist_ok=True)
     # Both locks precede Store construction and ANY MT5 initialize/connect call.
     with ExitStack() as resources:
+        from .managed import runtime_guard, stop_request, bind_state
+        resources.enter_context(runtime_guard(state_file))
+        if stop_event is None:
+            stop_event = stop_request()
+        state_file.parent.mkdir(parents=True, exist_ok=True)
         resources.enter_context(owner_lock(str(state_file)+'.lock'))
         resources.enter_context(owner_lock(account_lock_path(config)))
         store = Store(state_file)
         resources.callback(store.close)
+        bind_state(state_file)
         from .evidence_broker import MT5EvidenceBroker
         broker = MT5EvidenceBroker(config, store=store,api=api,clock=clock,monotonic=monotonic)
         resources.callback(broker.close)

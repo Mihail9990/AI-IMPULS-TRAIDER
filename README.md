@@ -5,6 +5,14 @@
 Точка входа: **`tradfi_main.py`**. Полная логика, ограничения и исторические этапы
 проверки описаны в [инструкции](docs/TRADFI_MT5_RU.md).
 
+## Установка одним Python-файлом
+
+Скачать `install_tradfi.py` из ветки `work` через **Download raw file** и открыть
+Python 3.13 x64. Откроется окно с кнопками установки/обновления, настройки Telegram,
+READ_ONLY и rollback кода. Ручные CMD и ZIP не нужны. Постоянные данные отделены от версий
+кода в `%LOCALAPPDATA%\AI_IMPULS_TRADFI_Manager`. Подробная
+[инструкция загрузчика](docs/WINDOWS_INSTALLER_RU.md).
+
 ## Windows VPS: установка и read-only запуск
 
 Нужны Windows, 64-bit Python 3.10+ и установленный MetaTrader 5 с выбранным счётом.
