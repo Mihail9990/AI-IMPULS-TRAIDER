@@ -41,8 +41,11 @@ def account_lock_path(config):
 
 
 def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=False, execute=False,
-             api=None, telegram_factory=None, stop_event=None, clock=time.time, monotonic=time.monotonic):
+             api=None, telegram_factory=None, stop_event=None, clock=time.time, monotonic=time.monotonic,
+             config_path=None):
     from .mt5_adapter import MT5Broker
+    config = dict(config)
+    credentials_file = config.pop('telegram_credentials_file', None)
     if inspect:
         # No SQLite, account owner lock, Telegram imports or credentials. Never inherit execution opt-in.
         config = dict(config, enable_trading=False)
@@ -87,9 +90,8 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
         raise ValueError('Explicit positive expected_login is required for a persistent service')
     if not config.get('expected_server') or not config.get('symbol'):
         raise ValueError('Explicit expected_server and symbol are required for execution')
-    token, chat = os.environ.get('TRADFI_TELEGRAM_TOKEN'), os.environ.get('TRADFI_TELEGRAM_CHAT_ID')
-    if not token or not chat:
-        raise ValueError('Telegram process environment credentials are required for execution')
+    from .credentials import load_telegram_credentials
+    token, chat, user = load_telegram_credentials(credentials_file, config_path=config_path)
     state_file = Path(config.get('state_file', 'tradfi_mt5_state.sqlite3')).resolve()
     state_file.parent.mkdir(parents=True, exist_ok=True)
     # Both locks precede Store construction and ANY MT5 initialize/connect call.
@@ -113,7 +115,7 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
         logging.getLogger().setLevel(logging.INFO)
         resources.callback(logging.getLogger().removeHandler, handler)
         from .telegram import Telegram
-        telegram = (telegram_factory or Telegram)(token, chat, user_id=os.environ.get('TRADFI_TELEGRAM_USER_ID'),
+        telegram = (telegram_factory or Telegram)(token, chat, user_id=user,
                             log_path=log_path)
         resources.callback(telegram.http.close)
         resources.callback(telegram.close)
@@ -180,7 +182,7 @@ def main(argv=None):
                 raise ValueError('Execution flags must be JSON booleans')
         _run_mt5(config, args.inspect or args.inspect_evidence,
                  evidence=args.inspect_evidence, journal_path=args.journal_snapshot,
-                 service=args.service,execute=args.execute)
+                 service=args.service,execute=args.execute,config_path=args.config)
     except KeyboardInterrupt:
         parser.exit(130, 'TradFi stopped.\n')
     except (Exception, DurabilityError) as exc:

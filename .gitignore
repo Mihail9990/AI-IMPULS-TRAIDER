@@ -11,3 +11,7 @@ bot_diagnostics*.log*
 tradfi_config.json
 tradfi_state.sqlite3*
 tradfi.log*
+service.json
+telegram.json
+telegram.local.json
+*.credentials.json
