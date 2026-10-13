@@ -9,6 +9,7 @@ import uuid
 from .broker import ACCOUNT_CURRENCY, COMPLETION_TOLERANCE, Spec, target_price, stepped_stop
 from .settings import Settings, parse_settings, number
 from .storage import DurabilityError
+from .observation import Observation
 
 LOG = logging.getLogger(__name__)
 TERMINAL = {'DONE', 'REJECTED', 'CANCELLED', 'FILLED', 'OBSOLETE'}
@@ -18,6 +19,7 @@ class Controller:
     def __init__(self, store, broker, *, clock=time.time, monotonic=time.monotonic):
         self.clock, self.monotonic = clock, monotonic
         self._cycle_clock = None
+        self.observation = Observation(clock, monotonic)
         self.store, self.broker = store, broker
         self.evidence_contract = getattr(broker, 'evidence_contract', None)
         self._durable_state=store.load()
@@ -87,6 +89,16 @@ class Controller:
                    if self.evidence_contract=='per_obligation_v1' else str(exc))
 
     def snapshot(self, *, for_reset=False):
+        started = self.observation.begin()
+        try:
+            snap = self._validated_snapshot(for_reset=for_reset)
+        except (Exception, DurabilityError):
+            self.observation.fail()
+            raise
+        self.observation.record(snap, started)
+        return snap
+
+    def _validated_snapshot(self, *, for_reset=False):
         self._validate_currency()
         snap = self.broker.manual_reset_snapshot() if for_reset else self.broker.snapshot()
         identity = snap['account']
@@ -301,9 +313,9 @@ class Controller:
         return (f"TradFi {'READ_ONLY' if getattr(self.broker,'read_only',False) else 'EXECUTION'} {self.state['phase']} stop={self.state['stop']} "
                 f"cycle={c.get('id', '-')} branch={c.get('branch', '-')} "
                 f"target={c.get('target', '-')} recovery={c.get('recovery', '-')} {self.state['currency']} "
-                f"position={c.get('position', {})} manual={c.get('manual',False)} "
+                f"cycle_position={c.get('position', {})} manual={c.get('manual',False)} "
                 f"manual_reason={c.get('manual_reason','-')} deadline_utc={c.get('deadline_utc','-')} "
-                f"observation={c.get('manual_observation',c.get('last_broker_observation',self.state.get('service_observation',{})))}")
+                f"observation={json.dumps(self.observation.view(), sort_keys=True)}")
 
     def _archived(self, command):
         return (command['status'] in TERMINAL and command.get('cycle_id') in
@@ -411,6 +423,7 @@ class Controller:
             if not self._mutation_allowed(): return
             cmd['status'] = 'UNKNOWN'
             self.save('may_send:' + cmd['id'])
+            self.observation.fail('AWAITING_POST_MUTATION_READBACK')
             try:
                 self.broker.submit(deepcopy(cmd))
             except (OSError, TimeoutError) as exc:
