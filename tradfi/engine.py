@@ -186,7 +186,7 @@ class Controller:
                 if proof=='MISSING_DURABLE_JOURNAL':
                     raise ValueError('Missing durable command journal; no further execution')
                 allowed={'FILLED':{'FILLED_OPEN_EVIDENCE','CLOSED_EVIDENCE'},
-                         'DONE':{'CANCEL_TERMINAL_READBACK','PROTECTION_READBACK'},
+                         'DONE':{'CANCEL_TERMINAL_READBACK','PROTECTION_READBACK','CLOSE_TERMINAL_READBACK'},
                          'CANCELLED':{'TERMINAL_UNFILLED_EVIDENCE','NO_SEND_EVIDENCE'},
                          'REJECTED':{'TERMINAL_UNFILLED_EVIDENCE','REJECTED_RESPONSE','NO_SEND_EVIDENCE'}}
                 # An old acknowledgement cannot override missing current evidence.
@@ -316,7 +316,7 @@ class Controller:
             elif cmd['kind']=='CANCEL':
                 if status not in {'CANCEL_TERMINAL_READBACK','REJECTED_RESPONSE'} and not never_sent:
                     raise ValueError('Cancellation remains unresolved')
-            elif cmd['kind']=='MODIFY':
+            elif cmd['kind'] in {'MODIFY','CLOSE'}:
                 closed=any(r.get('reset_closed') and r.get('position_id')==cmd['position_id']
                            for r in snap['obligations'].values())
                 if not never_sent and status!='REJECTED_RESPONSE' and not (
@@ -523,7 +523,7 @@ class Controller:
     def _reconcile_evidence_commands(self, snap):
         mapping={'FILLED_OPEN_EVIDENCE':'FILLED','CLOSED_EVIDENCE':'FILLED',
                  'PENDING_OBSERVED':'PENDING','CANCEL_TERMINAL_READBACK':'DONE',
-                 'PROTECTION_READBACK':'DONE'}
+                 'PROTECTION_READBACK':'DONE','CLOSE_TERMINAL_READBACK':'DONE'}
         for cid,cmd in self.state['commands'].items():
             if self._archived(cmd): continue
             if cmd['status'] in {'READY','OBSOLETE'}:
@@ -806,7 +806,8 @@ class Controller:
             for index, cid in enumerate(entries):
                 cmd = self.state['commands'][cid]
                 if (cmd['kind'] == 'STOP' and cmd['status'] == 'REJECTED'
-                        and cmd.get('result', {}).get('reason') == 'CROSSED'):
+                        and cmd.get('result', {}).get('reason') == 'CROSSED'
+                        and cmd.get('crossed_policy','legacy_market')=='legacy_market'):
                     # Executor explicitly rejected before send. UNKNOWN never permits this path.
                     cfg = Settings.load(c['settings']); spec = Spec.load(snap['spec'])
                     side = cmd['side']; sign = D(1) if side == 'BUY' else D(-1)

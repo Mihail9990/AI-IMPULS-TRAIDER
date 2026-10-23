@@ -156,7 +156,7 @@ class NativeServiceTest(unittest.TestCase):
             def start(self,*args): pass
             def close(self): pass
             def process(self,controller):
-                controller.command('/start'); api.now+=60; api.rates[0]['time']+=60; stopped.set()
+                controller.command('/start auto'); api.now+=60; api.rates[0]['time']+=60; stopped.set()
         config=dict(self.config,enable_trading=True,execution_contract='cycle_scoped_identity_v1',
                     legacy_ea_removed=True,legacy_state_reconciled=True)
         real_import=importlib.import_module

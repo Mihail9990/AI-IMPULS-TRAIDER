@@ -25,3 +25,25 @@ Reviewer: `/root/independent_review`, read-only. Native сервисы и HTTP �
 
 Ограничение review: новый торговый контур simulator-only. Native engine/adapters не
 изменены; review не является подтверждением готовности production-интеграции.
+
+## Native integration — последующий review
+
+Предыдущее ограничение simulator-only выше относится только к commit 8a2de9e.
+В новом diff runtime, адаптер, ledger и feed интегрированы; real execution не запускался.
+Reviewer `/root/independent_review` проверил изменения read-only и воспроизвёл:
+
+1. Settings до первого tick могли перевести сохранённый legacy cycle в fixed с нулевым долгом — metadata legacy теперь фиксируется при загрузке.
+2. RECOVERY_TARGET CLOSE мог уйти после движения цены в убыток между check/send — target/Bid/Ask/profit повторно проверяются при каждой пересборке request, false условие = доказанный not sent.
+3. Старый preview мог получить scope новой БД/счёта — captured scope сверяется, сервер scope включает durable store UUID; pending receipt тоже привязан к scope.
+4. Истёкшая session давала 401 и оставляла вечный UNKNOWN UI — 401 является доказанным not queued, после login можно подтвердить новую команду.
+5. Fresh tick ошибочно делал будущие/устаревшие свечи FRESH — отдельная проверка временного окна свечей и статусы.
+6. Legacy reset не понимал CLOSE; fixed наследовал семантику списания — legacy доказательства расширены, fixed reset явно запрещён до ответа пользователя, debt сохраняется.
+
+Независимо прошли 482 backend tests (0 network) и 21 Chromium test.
+После этого добавлены ещё 6 native regressions (replace/fill race/unknown cancel,
+time latch cancel/restart/protection, fixed reset guard); полный основной run 488 OK.
+Заключительный независимый review: 488 backend tests OK, network 0; ещё раз 3 native Chromium tests OK. Новых функциональных дефектов не обнаружено.
+Оставшееся ограничение — только ожидающая семантика fixed emergency reset и
+отдельные реальные MT5/VPS проверки, которые запрещены текущим заданием.
+
+Финальная дополнительная auth regression: не-ASCII неверный пароль возвращает AUTH_FAILED, а не исключение транспорта; полный основной run 489 OK, network 0.

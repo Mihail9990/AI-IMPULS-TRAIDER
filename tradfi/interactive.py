@@ -1,8 +1,4 @@
-"""Staged interactive controller, restricted to the offline simulator adapter.
-
-The production MT5 service continues to use the audited Controller until the new
-CLOSE/evidence contract has a separately verified native adapter. No bypass flag.
-"""
+"""Interactive owner controller over simulator or native per-obligation evidence."""
 from copy import deepcopy
 from decimal import Decimal as D
 import json
@@ -18,14 +14,28 @@ from .strategies.fixed_recovery import RecoveryConfig, initial, installment, res
 
 class InteractiveController(Controller):
     def __init__(self, store, broker, **kwargs):
-        if getattr(broker,'backend_id',None) != 'interactive_simulator_v1':
-            raise ActionRejected('Interactive upgrades require the explicit offline simulator adapter')
+        native=(getattr(broker,'backend_id',None)=='mt5_direct_v1' and
+                getattr(broker,'evidence_contract',None)=='per_obligation_v1')
+        if not native and getattr(broker,'backend_id',None)!='interactive_simulator_v1':
+            raise ActionRejected('Interactive operations require native obligation evidence or explicit simulator')
         fresh=store.load() is None
         super().__init__(store,broker,**kwargs)
         if fresh:
             self.state['settings']['BASE_TP_DISTANCE']='0.25'
+        self.state.setdefault('interactive_contract','interactive_v1')
         self.state.setdefault('operation_mode','auto')
         self.state.setdefault('modules',dict(engine='legacy',recovery=RecoveryConfig().dump()))
+        c=self.state.get('cycle')
+        if c and 'engine' not in c:
+            # Existing base-controller cycles always retain their legacy engine.
+            c.update(engine='legacy',operation_mode='auto',module_config=RecoveryConfig().dump())
+            self.save('bind_existing_legacy_cycle')
+        self.panel_url=None if native else 'http://127.0.0.1:8765/?controller=mock'
+
+    def _reset_manual(self,update_id):
+        if (self.state.get('cycle') or {}).get('engine')=='fixed':
+            raise ActionRejected('Fixed recovery emergency reset is disabled: debt write-off is not authorized; debt is retained and reset was not performed')
+        return super()._reset_manual(update_id)
 
     def action(self, action):
         """Common authenticated transport boundary; caller uses ActionGateway."""
@@ -66,6 +76,7 @@ class InteractiveController(Controller):
         if entry and (self.state.get('time_block') or (self.state.get('cycle') or {}).get('manual')):
             raise ActionRejected('Time/manual guard blocks new entries')
         snap=self.snapshot()
+        if entry:self._require_price_observation(snap)
         if any(not x.get('owned',False) for x in snap['orders']+snap['positions']): raise ActionRejected('Ownership conflict')
         c=self.state.get('cycle') or {}
         known=set(c.get('opened_ids',[]))|{d['position_id'] for d in snap['deals'] if d['entry']=='IN' and d.get('command_id') in c.get('entries',[])}
@@ -73,14 +84,21 @@ class InteractiveController(Controller):
         if any(p['id'] not in known for p in snap['positions']):raise ActionRejected('Unidentified position; reconcile first')
         return snap
 
+    def _require_price_observation(self,snap):
+        if self.evidence_contract=='per_obligation_v1' and snap['quote'].get('utc_time') is None:
+            raise ActionRejected('Fresh verified quote required')
+
     def command(self,text,update_id=None):
         if update_id is not None and update_id<self.state['telegram_offset']:return
         raw=text.strip()
         if raw=='/start':
+            if getattr(self.broker,'read_only',False):raise ActionRejected('READ_ONLY: trading controls disabled')
             self.notify('Выберите режим: /start auto — прежняя стратегия; /start semi — ждать уровни. Панель открывается кнопкой, не автоматически.')
             self.state['notifications'][-1]['reply_markup']={'inline_keyboard':[
                 [{'text':'Авто','callback_data':'/start auto'},{'text':'Полуавто','callback_data':'/start semi'}],
-                [{'text':'Локальная MOCK панель','url':'http://127.0.0.1:8765/?controller=mock'}]]}
+                ]}
+            panel_url=getattr(self,'panel_url',None)
+            if panel_url:self.state['notifications'][-1]['reply_markup']['inline_keyboard'].append([{'text':'Открыть панель','url':panel_url}])
             self._finish_command(update_id,'mode_selection');return
         if raw in {'/start auto','/start semi'}:
             mode=raw.split()[1];c=self.state.get('cycle')
@@ -224,7 +242,7 @@ class InteractiveController(Controller):
             money=installment(c['fixed_recovery']) if c['engine']=='fixed' else number(c.get('recovery') or 0)
             tp=entry+sign*cfg.BASE_TP_DISTANCE if c['first'] else target_price(self.broker,spec,side,cfg.INITIAL_SIZE,entry,money)
             sl=entry-sign*distance;spec.protection(side,entry,sl,tp)
-            plans.append(dict(kind='STOP',side=side,trigger=str(entry),price=str(entry),sl=str(sl),tp=str(tp),size=str(cfg.INITIAL_SIZE),sl_distance=str(distance)))
+            plans.append(dict(kind='STOP',side=side,trigger=str(entry),price=str(entry),sl=str(sl),tp=str(tp),size=str(cfg.INITIAL_SIZE),sl_distance=str(distance),crossed_policy='reject'))
         c.update(round=c['round']+1,entries=[],position=None,opened_ids=[],sl_distance=str(distance));c.pop('level_plan',None)
         for plan in plans:c['entries'].append(self._intent(**plan))
         self.state['phase']='PAIR';self.save('interactive_pair_intents')
@@ -234,12 +252,15 @@ class InteractiveController(Controller):
         if c.get('engine')!='fixed':
             super()._adopt(opening,snap)
             if c.get('position'):
-                c['position']['opening_net']=str(net_money(opening));self.save('opening_costs_observed')
+                try:c['position']['opening_net']=str(net_money(opening))
+                except ValueError:self.pause('Opening costs unavailable; no inferred net');return
+                self.save('opening_costs_observed')
             return
         cfg=Settings.load(c['settings']);size=sum((number(d['volume']) for d in opening),D(0))
         if size!=cfg.INITIAL_SIZE:self.pause('Partial/oversize opening requires reconciliation');return
         entry=sum((number(d['price'])*number(d['volume']) for d in opening),D(0))/size
-        costs=net_money(opening)
+        try:costs=net_money(opening)
+        except ValueError:self.pause('Opening costs unavailable; no inferred net');return
         c['target']='0';c['recovery']=c['fixed_recovery']['debt']
         c['position']=dict(id=opening[0]['position_id'],entry=str(entry),size=str(size),side=opening[0]['side'],stepped=False,reanchored=False,opening_net=str(costs))
         self.state['phase']='MANUAL' if c.get('manual') else 'POSITION';self.save('fixed_actual_fill_adopted')
@@ -247,6 +268,7 @@ class InteractiveController(Controller):
     def _position(self,snap):
         c=self.state['cycle'];p=c.get('position')
         if not p:return
+        if self.evidence_contract=='per_obligation_v1' and snap['quote'].get('utc_time') is None:return super()._position(snap)
         live=next((x for x in snap['positions'] if x['id']==p['id']),None)
         exits=[d for d in snap['deals'] if d['entry']=='OUT' and d['position_id']==p['id']]
         if exits or not live:return super()._position(snap)
@@ -274,7 +296,7 @@ class InteractiveController(Controller):
             goal=installment(c['fixed_recovery'])-number(p.get('opening_net',0))
             tp=entry+sign*cfg.BASE_TP_DISTANCE if c['first'] else target_price(self.broker,spec,side,size,entry,max(D(0),goal))
         executable=number(snap['quote']['bid' if side=='BUY' else 'ask'])
-        if p.get('recalculate_tp') and sign*(executable-tp)>=0 and self.broker.profit(side,size,entry,executable)>0:
+        if self._mutation_allowed('CLOSE') and p.get('recalculate_tp') and sign*(executable-tp)>=0 and self.broker.profit(side,size,entry,executable)>0:
             self._intent('CLOSE',position_id=p['id'],size=p['size'],purpose='RECOVERY_TARGET',expected_tp=str(tp));self.save('recovery_target_reached_close');return
         if number(live['sl'])==sl and number(live['tp'])==tp:
             p['reanchored']=True;p.pop('recalculate_tp',None);self.save('interactive_protection_readback');return
@@ -286,6 +308,7 @@ class InteractiveController(Controller):
         snap=self._interactive_guard();c=self.state.get('cycle');p=(c or {}).get('position')
         if not p or p['id']!=pid:raise ActionRejected('Owned active position required')
         live=next((x for x in snap['positions'] if x['id']==pid),None)
+        self._require_price_observation(snap)
         if not live or not isinstance(old,dict) or not isinstance(new,dict) or set(old)!={'sl','tp'} or set(new)!={'sl','tp'}:raise ActionRejected('Complete protection preview required')
         if any(number(old[k])!=number(live[k]) for k in old):raise ActionRejected('Protection changed; refresh preview')
         try:Spec.load(snap['spec']).protection(p['side'],number(p['entry']),number(new['sl']),number(new['tp']),snap['quote'],modify=True)
@@ -300,6 +323,8 @@ class InteractiveController(Controller):
 
     def close_position(self,pid,expected_size):
         snap=self._interactive_guard();c=self.state.get('cycle');p=(c or {}).get('position')
+        self._require_price_observation(snap)
+        if not self._mutation_allowed('CLOSE'):raise ActionRejected('Current safety guard forbids close')
         live=next((x for x in snap['positions'] if x['id']==pid and x['owned']),None)
         if not p or p['id']!=pid or not live or number(live['size'])!=number(expected_size):raise ActionRejected('Position changed; refresh confirmation')
         if any(cmd['kind']=='CLOSE' and cmd.get('position_id')==pid and cmd['status'] not in TERMINAL for cmd in self.state['commands'].values()):raise ActionRejected('Close outcome unresolved')
@@ -312,12 +337,19 @@ class InteractiveController(Controller):
         if c.get('engine')!='fixed' and not c.get('user_close_requested'):
             return super()._closed(deals,snap)
         if snap['positions'] or snap['orders'] or self._unresolved():return
+        expected=deepcopy(self._durable_state) if self.evidence_contract=='per_obligation_v1' else None
         if any(d['id'] in self.state['seen_deals'] for d in deals):return
         if sum((number(d['volume']) for d in deals),D(0))!=number(p['size']):self.pause('Full close evidence required');return
         reasons={d['reason'] for d in deals}
         if len(reasons)!=1 or not reasons<={'SL','TP','MANUAL','RECOVERY_TARGET'}:self.pause('Explicit closure evidence required');return
-        reason=next(iter(reasons));net=net_money(deals)+number(p.get('opening_net',0))
-        close=number(deals[-1]['price'])
+        reason=next(iter(reasons))
+        opening=[d for d in snap['deals'] if d['entry']=='IN' and d['position_id']==p['id']]
+        try:
+            if sum((number(d['volume']) for d in opening),D(0))!=number(p['size']):raise ValueError('Incomplete opening costs')
+            opening_net=net_money(opening);net=net_money(deals)+opening_net
+            if number(p.get('opening_net',opening_net))!=opening_net:raise ValueError('Opening costs changed')
+        except ValueError:self.pause('Full immutable net-cost evidence required');return
+        close=number(max(deals,key=lambda d:int(d['id']) if str(d['id']).isdecimal() else d['time'])['price'])
         if c.get('engine')=='fixed':
             c['fixed_recovery']=settle(c['fixed_recovery'],round_id=p['id'],reason='TP' if reason=='RECOVERY_TARGET' else reason,net=net)
             c['recovery']=c['fixed_recovery']['debt'];c['realized']=c['fixed_recovery']['realized_net'];complete=number(c['recovery'])<=0
@@ -344,7 +376,18 @@ class InteractiveController(Controller):
                 after_sl=cfg.after_sl,continuation=cfg.continuation,opposite=cfg.opposite)
             c['branch']='FIXED_RECOVERY';c['center']=str(close);self.state['phase']='NEXT_PAIR'
             if reason=='SL':self._start_branch_clock(self.clock())
-        self.save('interactive_confirmed_closure')
+        if expected is None:self.save('interactive_confirmed_closure')
+        else:
+            try:
+                opening_raw=[snap['ledger_facts'][d['id']] for d in opening]
+                records=[dict(backend=self.state['backend'],account=self.state['account'],currency=self.state['currency'],
+                    ticket=d['id'],position_id=d['position_id'],cycle_id=expected['cycle']['id'],raw=snap['ledger_facts'][d['id']],
+                    net_accounting=dict(contract='full_position_costs_v1',opening_facts=opening_raw if i==0 else [],
+                        closing_net=str(net_money([d])),opening_net=str(opening_net) if i==0 else '0')) for i,d in enumerate(deals)]
+                self.store.commit_deals(expected,self.state,records,'interactive_confirmed_closure')
+                self._durable_state=deepcopy(self.state)
+            except BaseException:
+                self.state=self.store.load() or expected;self._durable_state=deepcopy(self.state);raise
 
     def _reconcile_commands(self,snap):
         super()._reconcile_commands(snap)

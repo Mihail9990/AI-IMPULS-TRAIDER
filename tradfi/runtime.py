@@ -42,7 +42,7 @@ def account_lock_path(config):
 
 def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=False, execute=False,
              api=None, telegram_factory=None, stop_event=None, clock=time.time, monotonic=time.monotonic,
-             config_path=None):
+             config_path=None, panel_factory=None):
     from .mt5_adapter import MT5Broker
     config = dict(config)
     credentials_file = config.pop('telegram_credentials_file', None)
@@ -109,7 +109,22 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
         broker = MT5EvidenceBroker(config, store=store,api=api,clock=clock,monotonic=monotonic)
         resources.callback(broker.close)
         broker.connect()
-        controller = Controller(store, broker,clock=clock,monotonic=monotonic)
+        from .interactive import InteractiveController
+        controller = InteractiveController(store, broker,clock=clock,monotonic=monotonic)
+        panel=None
+        web_config=config.get('web',{})
+        if not isinstance(web_config,dict):raise ValueError('web must be a configuration object')
+        if not isinstance(web_config.get('enabled',False),bool):raise ValueError('web.enabled must be boolean')
+        if web_config.get('enabled',False):
+            if web_config.get('host','127.0.0.1')!='127.0.0.1':raise ValueError('Web server requires loopback')
+            port=web_config.get('port',8765)
+            if isinstance(port,bool) or not isinstance(port,int) or not 1024<=port<=65535:raise ValueError('Invalid loopback port')
+            from .web_control import NativePanel
+            authority='127.0.0.1:'+str(port)
+            panel=(panel_factory or NativePanel)(controller,authority=authority,password=os.environ.get('TRADFI_WEB_PASSWORD'),clock=clock,monotonic=monotonic)
+            resources.callback(panel.close)
+            panel.start()
+            controller.panel_url='http://'+authority+'/?controller=native'
         from .log_export import diagnostic_handler
         log_path=Path(config.get('log_file','tradfi_mt5.log')).resolve()
         handler = diagnostic_handler(log_path)
@@ -143,6 +158,7 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
             telegram.process(controller)
             try:
                 controller.tick()
+                if panel is not None:panel.step()
             except (OSError, TimeoutError) as exc:
                 # Terminal exception payloads can contain private account/order data.
                 logging.warning('MT5 temporarily unavailable: %s', type(exc).__name__)

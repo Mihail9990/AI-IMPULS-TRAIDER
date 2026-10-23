@@ -233,4 +233,68 @@ class ConnectedMockUI(unittest.TestCase):
         self.assertLessEqual(self.page.evaluate('document.documentElement.scrollWidth'),390)
 
 
+class NativePanelUI(unittest.TestCase):
+    setUpClass=classmethod(LocalPanelUI.setUpClass.__func__)
+    tearDownClass=classmethod(LocalPanelUI.tearDownClass.__func__)
+    def setUp(self):
+        import sys,json
+        sys.path.insert(0,str(ROOT.parents[1]/'tests'))
+        sys.path.insert(0,str(ROOT.parents[1]))
+        import test_tradfi_native_interactive as fixture
+        from tradfi.web_control import NativePanel
+        self.fixture=fixture.NativeInteractiveTest();self.fixture.setUp();self.fixture.position()
+        self.app=NativePanel(self.fixture.bot,password='explicit-fake-ui-password-not-real'*2,clock=lambda:self.fixture.api.now,monotonic=lambda:self.fixture.api.now)
+        self.app.step();self.expired=False;self.posts=[];self.errors=[];self.blocked=[]
+        self.context=self.browser.new_context(viewport={'width':390,'height':844},is_mobile=True,has_touch=True)
+        def route(request):
+            from urllib.parse import urlsplit
+            path=urlsplit(request.request.url).path
+            names={'/':'index.html','/panel.js':'panel.js','/panel.css':'panel.css'}
+            if request.request.url.startswith(ORIGIN) and path in names:
+                p=ROOT/names[path];request.fulfill(body=p.read_bytes(),content_type={'.html':'text/html','.js':'text/javascript','.css':'text/css'}[p.suffix]);return
+            if request.request.url.startswith(ORIGIN) and path.startswith('/api/'):
+                if path=='/api/state':self.fixture.tick();self.app.next_feed=0;self.app.step()
+                headers=dict(request.request.headers,Host='127.0.0.1:8765');body=request.request.post_data_buffer or b''
+                if path=='/api/action':self.posts.append(json.loads(body))
+                code,data,extra=self.app.transport.request(request.request.method,path,headers,body)
+                request.fulfill(status=code,body=json.dumps(data),content_type='application/json',headers=extra);return
+            self.blocked.append(request.request.url);request.abort()
+        self.context.route('**/*',route)
+        self.page=self.context.new_page();self.page.on('pageerror',lambda e:self.errors.append(str(e)))
+        self.page.goto(ORIGIN+'/?controller=native');self.login()
+    def login(self):
+        self.page.locator('#web-password').fill('explicit-fake-ui-password-not-real'*2)
+        self.page.locator('#native-login button').click()
+        expect(self.page.locator('.demo-banner')).to_contain_text('INJECTED_MT5')
+        expect(self.page.locator('[data-level=tp]')).to_be_visible()
+    def tearDown(self):
+        self.assertFalse(self.errors);self.assertFalse(self.blocked);self.context.close()
+        self.fixture.tearDown();self.fixture.doCleanups()
+    def test_native_authenticated_apply_through_actual_adapter(self):
+        p=self.fixture.api.positions[0];target=p.tp+.25
+        self.page.locator('[data-level=tp]').click();self.page.locator('#new-price').fill(str(target))
+        self.assertEqual(self.fixture.api.positions[0].tp,p.tp)
+        self.page.locator('#apply-preview').click()
+        expect(self.page.locator('[data-level=tp]')).to_have_attribute('data-price',f'{target:.2f}')
+        self.assertEqual(self.fixture.api.positions[0].tp,target);self.assertEqual(len(self.posts),1)
+        self.assertLessEqual(self.page.evaluate('document.documentElement.scrollWidth'),390)
+        self.page.screenshot(path='/workspace/scratch/local-panel-injected-mt5-mobile.png',full_page=True)
+    def test_expired_session_apply_is_known_not_queued_then_login(self):
+        p=self.fixture.api.positions[0];target=p.tp+.25
+        self.page.locator('[data-level=tp]').click();self.page.locator('#new-price').fill(str(target))
+        self.app.transport.sessions.clear();self.page.locator('#apply-preview').click()
+        expect(self.page.locator('#preview-error')).to_contain_text('отклонена')
+        self.assertEqual(self.page.evaluate("localStorage.getItem('tradfi-native-pending-request')"),None)
+        expect(self.page.locator('#native-login')).to_be_visible();self.login()
+        self.page.locator('#apply-preview').click()
+        expect(self.page.locator('[data-level=tp]')).to_have_attribute('data-price',f'{target:.2f}')
+        self.assertEqual(len(self.posts),2)
+    def test_scope_switch_refuses_old_preview(self):
+        self.page.locator('[data-level=tp]').click();self.app.scope='other-store'
+        self.page.wait_for_timeout(1200)
+        self.page.locator('#apply-preview').click()
+        expect(self.page.locator('#preview-error')).to_contain_text('Контекст счёта изменился')
+        self.assertFalse(self.posts)
+
+
 if __name__=='__main__': unittest.main(verbosity=2)

@@ -1,62 +1,45 @@
-# Апгрейды: сохранённый offline этап
+# Апгрейды: native pipeline, проверенный offline
 
-База: `9519208e09f680d003ce893e6dc8688870823d63`, ветка `upgrades/local-control`.
-Защиты времени из этой базы сохранены. Это отдельный deliverable; исправленный
-архив time-safety не заменяется. Весь новый торговый контур ограничен явным
-`interactive_simulator_v1`; production runtime по-прежнему создаёт прежний Controller.
-Отсутствие production-интеграции ниже означает отсутствующую реализацию/подключение,
-а не только то, что реальные сделки не запускались.
+База защит времени: `9519208e09f680d003ce893e6dc8688870823d63`.
+Предыдущий simulator этап: `8a2de9e35a0e2dd0037915d873f34e9f6299ffc5`.
+Ветка `upgrades/local-control`. Этот результат обновляет только архив апгрейдов.
+Time-safety ZIP не заменяется. Реальные MT5, Telegram, сеть, сделки и VPS не запускались.
 
-## Матрица требований
+## Матрица реализации
 
-| Требование | Что реализовано и проверено на fake | UI/mock | Что отсутствует в production |
-|---|---|---|---|
-| Auto/semi | InteractiveController: auto ждёт закрытую M1 прежней стратегии; semi ждёт команду, после полного цикла снова ждёт. Цены одного/двух triggers и два диапазона; BUY от Ask, SELL от Bid снимка получения команды | Выбор режима, Apply через общий controller; смена режима активного цикла отклоняется | Новый controller не выбран в production runtime; native state migration отсутствует |
-| Fixed SL recovery | Долг по фактическому net, включая обязательные commission/swap/fee открытия и закрытия; N=3, оставшиеся части, новый SL добавляет долг и делит на N; no forgiveness даже 0.01; BUY/SELL зеркала, OCO, фиксированный SL без trailing | Долг/части читаются из controller; демонстрационные примеры | Native CLOSE/evidence и денежный ledger нового модуля не интегрированы с MT5; simulator settlement не выдаётся за native ledger |
-| Движки и обычный TP | Один engine на цикл; switch со следующего полного цикла. Legacy stepped engine сохранён. В новом controller ordinary TP default 0.25 | Настройки engine/N/расстояний; одна атомарная запись mode/phase/modules при смене режима | Legacy production Settings default остаётся 0.20; не мигрирован молча |
-| N/TP/SL во время позиции | N переразбивает текущий долг заново, немедленно меняет TP; текущий SL не меняется. Достигнутый новый TP -> отдельный CLOSE intent и фактическое подтверждение. Ручные TP/SL сохраняются до явного пересчёта N | Browser Apply N проверен до simulator readback; drag/edit TP/SL old/new -> Apply | Новый protective/close contract реализован только fake-адаптером |
-| Manual close | Подтверждение ID/size, фактические deals/costs, долг пересчитан, новые входы остановлены. Полностью погашенный цикл архивируется с reason MANUAL; непогашенный возобновляется только явной командой. UNKNOWN не повторяется | Кнопка -> preview -> Apply -> общий controller -> fake close -> WAIT_TRIGGER проверены браузером | Native market close и его reconciliation не реализованы |
-| Pending replace/delete | Замена только после подтверждённых отмен; fill/cancel race сохраняет позицию и долг. UNKNOWN cancellation не повторяется. Crossed levels отказ без MARKET. Чужие/неидентифицированные позиции блокируют sync-команды | Tap/drag existing side показывает перенос с old price; delete требует подтверждения | Новые handlers не подключены к native adapter/runtime |
-| Telegram /start и общий controller | /start предлагает auto/semi и URL-кнопку; callback проверяет chat/user, /action использует durable gateway с защитой повторов после crash. UI owner mailbox -> тот же InteractiveController.action. Браузер не владеет loop | URL ведёт только на localhost mock, не открывается автоматически. HTTP transport отдельно от owner/SQLite | Реальный Telegram worker не запускался; реальный URL/доступ/credentials вне этапа. С телефона localhost означает сам телефон, это не готовая удалённая ссылка |
-| График | Отдельная вкладка, read-only entry, цветные уровни, tap/drag preview, явный Apply, delete/close confirm, pan/pinch/третье касание не создают preview, zoom. Backend уровни/quotes из fake | XAUUSD.s, явно synthetic M1 свечи и демонстрационные зоны. Два режима: статический макет и подключённый mock controller | MT5 history/candles feed не реализован; свечи и зоны не являются native-данными, зоны пока демонстрационные |
-| Раз в секунду, freshness | CLI генерирует только явно synthetic quote раз в секунду; UI опрашивает backend раз в секунду. Timestamp меняется при quote, не от heartbeat. Stale/disconnect блокирует Apply; очередь и owner независимы от HTTP клиента | Статический макет имеет отдельный отмеченный fake поток и кнопки stop/disconnect | Реальный MT5 tick feed, его подписка и доставка браузеру отсутствуют |
-| Доступ и сохранность | Только 127.0.0.1; exact Host/Origin, no cross-site requests, bounded JSON/queue, CSP, без frontend secrets. Durable command receipts, unknown/502 сверяются, не replay. Рестарт controller проверен с сохранёнными broker facts | Mock CLI намеренно создаёт новую временную БД при каждом запуске; reload страницы backend не сбрасывает | Production authentication/TLS/network configuration, credentials, постоянный market store и restart broker feed не реализованы и не настроены |
+| Требование | Реализация в коде | Проверка offline / ограничения |
+|---|---|---|
+| Auto/semi | Runtime создаёт InteractiveController с native per-obligation broker. Auto сохраняет прежний M1 алгоритм; semi принимает один/два exact trigger или два диапазона от снимка команды (BUY Ask, SELL Bid), ждёт следующую команду после полного цикла | Runtime → adapter → fake MT5: auto и semi. Existing active legacy cycle получает legacy metadata при загрузке до обработки настроек; долг не переинициализируется |
+| Fixed SL recovery | Один engine на цикл, переключение со следующего полного цикла. Фактический net с commission/swap/fee открытия и закрытия, N=3 default, оставшиеся части, новый SL добавляет долг и переразбивает, без прощения 0.01. SL фиксирован на сделку; старый stepped TP сохранён | Fake MT5 OCO, SL, новый recovery, N, costs и atomic ledger/restart. Native closure ledger коммитится вместе с состоянием, не только simulator memory |
+| Обычный TP | Для новой БД InteractiveController default 0.25; расчётный recovery TP отдельно | Сохранённые настройки старой БД не переписываются молча, включая ранее установленный TP 0.20 |
+| Изменение N/TP/SL | N переразбивает текущий долг на N, сразу рассчитывает TP, SL сохраняется. MODIFY проходит native SLTP и readback. Profitably reached target вызывает отдельный CLOSE с повторной проверкой Bid/Ask/target/profit после order_check | Native tests проверяют SLTP, сохранение SL и гонку потери прибыльного target. Browser Apply → очередь → controller → adapter → fake MT5 |
+| Manual close | Exact owned position identifier → текущий ticket, full volume, FOK; durable may-send boundary. EXPERT exit признаётся нашим только при точной корреляции CLOSE/order marker/response/entry identity; фактический net пересчитывает долг и останавливает входы | Runtime → adapter → fake MT5 полный close. Lost reply + restart без второго send; UNKNOWN без подтверждения не повторяется; чужой EXPERT exit блокирует учёт |
+| Pending create/replace/cancel | Exact levels с crossed_policy=reject; после подтверждённых отмен новая пара. Fill/cancel race оставляет защиту позиции, UNKNOWN не порождает слепой repeat | Native adapter tests: pair create, OCO, replacement/restart, fill race, unknown cancel. Чужие позиции/ордера не получают права управления |
+| Time safety | Baseline latch, async HTTP UTC, ownership/evidence и MT5_TIMESTAMP_SEMANTICS_UNVERIFIED сохранены. Time block отменяет pending, запрещает входы и сохраняет защиту позиции. Unverified quote не используется для новых ценовых действий | Полный baseline runner + native latch cancel/restart/protection tests. Семантика late SL branch clock не менялась: момент наблюдения, не непроверенный MT5 timestamp |
+| Telegram /start/button | Native runtime использует тот же controller, chooser auto/semi, URL button при включённой localhost панели. /action идёт через durable ActionGateway; callback auth сохраняется | Telegram double в runtime + прежние Telegram auth/callback tests. Реальный worker/credentials не использованы. Localhost URL с телефона указывает на телефон; удалённый доступ отдельно вне объёма |
+| Общий web controller | HTTP workers только очередь/копия view. SQLite и MT5 только owner thread. Action receipts durable, revision/scope проверка; scope включает account/symbol/store UUID, preview сохраняет контекст | Fake transport и Chromium проверяют реальный native adapter путь. Explicit password из окружения, отсутствие auth запрещает API; session expiry, origin/Host, scope и ограничение очереди/JSON/threads |
+| Native chart feed | copy_rates_from_pos XAUUSD.s M1, 120 OHLC; snapshot Bid/Ask; feed version/instance/sequence, raw time и отдельное verified UTC. Future candles отклоняются, старые явно STALE, missing feed DISCONNECTED | Fake MT5 bindings с явно INJECTED_MT5. UI получает native candles, не synthetic fallback. Static/mock режимы по-прежнему явно MOCK |
+| Секундное обновление | Owner capture не чаще 1 секунды, UI poll 1 секунда. Timestamp котировки не продвигается heartbeat; возраст растёт по monotonic, stale/disconnected видны | Fake clock/feed tests. Реальная задержка native terminal API не измерялась; синхронный вызов MT5 выполняет owner, HTTP клиент его не блокирует |
+| График/управление | Отдельная вкладка, цветные BUY/SELL/TP/SL/entry, Bid/Ask, zoom/pan/pinch, tap/drag preview и явный Apply, delete/close confirm; entry read-only. Native зоны связаны с текущими pending | 21 Chromium test, включая native auth/Apply/session/scope. Скриншот INJECTED_MT5 в архиве; данные тестовые |
+| Emergency /reset_manual | Legacy reset понимает положительно подтверждённый CLOSE. Fixed reset явно запрещён до решения по сохранению долга после аварийного MANUAL | Нельзя наследовать старое списание долга. Вопрос передан пользователю: flat сверка позиций и pending, сохранение actual debt, ожидание команды. Обычный confirmed manual close реализован; expiry safety по-прежнему может запрещать CLOSE |
 
-## Проверка
+## Проверки и воспроизведение
 
-- Полный `tools/run_offline_tests.py`: **466 tests OK**, `Blocked real network attempts: 0`.
-- Chromium `tools/test_local_panel.py`: **18 tests OK**. Включает UI -> transport queue ->
-  controller -> fake broker: TP Apply, N Apply, manual close, потерянный ответ, HTTP502.
-  Запросы перехватываются и исполняются из файлов/чистого handler; HTTP сервер не запускался.
-- Независимый reviewer повторил все 466 backend tests, а также 17 UI tests до добавления
-  последней регрессии N Apply. Последний N Apply проверен основным агентом в полном UI run.
-- Проверены рестарт, неизвестный исход, double-send prevention, fill/cancel race,
-  новый SL, 3 полных TP, остаток 0.01, costs, SELL mirror, time latch и работа защиты.
-- `git diff --check` без ошибок. Реальные MT5/Telegram/торговые сервисы не запускались.
-  Системные часы не менялись; push/PR/deploy/publication не выполнялись.
+- `python tools/run_offline_tests.py`: **489 tests OK**, `Blocked real network attempts: 0`.
+- `python tools/test_local_panel.py`: **21 Chromium tests OK**, все HTTP routes перехвачены из файлов/handlers, сервер не запускался.
+- В данной среде backend Python: `/workspace/.venvs/ai-impuls-traider/bin/python`.
+  Для системного Python с Playwright использован уже установленный requests через
+  `PYTHONPATH=/workspace/.venvs/ai-impuls-traider/lib/python3.13/site-packages`.
+  На обычной машине нужны зависимости проекта, Playwright и Chromium; бинарники в ZIP не входят.
+- Независимый read-only review описан в `UPGRADES_REVIEW_RU.md`.
 
-## Локальное воспроизведение
+Native web config: `web.enabled` boolean (default false), `host` только `127.0.0.1`,
+`port` default 8765. `TRADFI_WEB_PASSWORD` должен быть явно настроен пользователем
+(не менее 32 символов); без него API возвращает AUTH_NOT_CONFIGURED. В frontend
+нет credentials; HttpOnly SameSite session. При включении URL —
+`http://127.0.0.1:8765/?controller=native`. Это описание реализации, не команда
+подключаться к терминалу или торговать. Настройка удалённого доступа/TLS/секретов,
+реальные MT5/VPS проверки и deployment не выполнялись и не входят в этот результат.
 
-Из корня исходников, Python 3.10+ с requirements проекта:
-
-```sh
-python tools/run_offline_tests.py
-python tools/test_local_panel.py
-python -m tradfi.local_panel
-```
-
-UI tests требуют Playwright и установленный Chromium `/usr/bin/chromium` (не входят
-в архив как бинарники). Последняя команда — опциональный локальный mock preview:
-`http://127.0.0.1:8765/?controller=mock`. Она не была запущена при проверках.
-`/` без query — самостоятельный UI mock. Оба режима запрещены для публичного размещения.
-Mock CLI не импортирует MetaTrader5 и не содержит токена Telegram. Порт жёстко loopback.
-
-## Границы и следующие шаги
-
-Внешних отказов или блокера доступа к исходникам нет. Оставшаяся работа — техническая
-production-интеграция: native CLOSE intent/evidence, atomic cost-aware ledger и migration,
-подключение нового controller в runtime, native quote/candle adapter и реальная access
-модель. Это не готово в данном commit. Снимать backend restriction ради демонстрации нельзя.
-Все это можно проектировать и проверять fake-API отдельно; реальное подключение и торговля
-не разрешены текущим заданием. Неоднозначная семантика начала ветки позднего SL не менялась:
-как в baseline, clock ветки запускается в момент наблюдения, а не из непроверенного MT5 time.
+В ZIP: исходники, patch от time-safety базы, git bundle с дельтой, этот README,
+review, оба testlog и явно тестовые screenshots. Никаких новых реальных credentials.

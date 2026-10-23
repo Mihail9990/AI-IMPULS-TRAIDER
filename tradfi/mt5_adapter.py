@@ -482,6 +482,24 @@ class MT5Broker:
             if spec.freeze_level>0 and abs(number(o['price'])-quote)<=spec.freeze_level*spec.point:
                 raise NotSent('Order inside freeze level')
             req.update(action=self.api.TRADE_ACTION_REMOVE,order=int(o['id']))
+        elif kind=='CLOSE':
+            matches=[p for p in snap['positions'] if p['id']==cmd['position_id'] and p['owned']]
+            if len(matches)!=1:raise TimeoutError('Position absent/ambiguous; reconcile close evidence')
+            p=matches[0];size=number(cmd['size'])
+            if size!=number(p['size']) or size<=0:raise NotSent('Exact full position volume required')
+            if cmd.get('purpose') not in {'MANUAL','RECOVERY_TARGET'}:raise NotSent('Invalid close purpose')
+            if cmd['purpose']=='RECOVERY_TARGET':
+                executable=number(tick.bid if p['side']=='BUY' else tick.ask)
+                target=number(cmd['expected_tp']);sign=1 if p['side']=='BUY' else -1
+                if sign*(executable-target)<0 or self.profit(p['side'],size,number(p['entry']),executable)<=0:
+                    raise NotSent('Recovery target no longer reached profitably')
+            if info.trade_exemode not in (self.api.SYMBOL_TRADE_EXECUTION_REQUEST,self.api.SYMBOL_TRADE_EXECUTION_INSTANT) and not info.filling_mode & 1:
+                raise NotSent('Full-or-kill closing required')
+            req.update(action=self.api.TRADE_ACTION_DEAL,position=int(p['ticket']),
+                       type=self.api.ORDER_TYPE_SELL if p['side']=='BUY' else self.api.ORDER_TYPE_BUY,
+                       volume=float(size),type_filling=self.api.ORDER_FILLING_FOK)
+            if info.trade_exemode!=self.api.SYMBOL_TRADE_EXECUTION_MARKET:
+                req['price']=float(tick.bid if p['side']=='BUY' else tick.ask)
         elif kind=='MODIFY':
             matches=[p for p in snap['positions'] if p['id']==cmd['position_id'] and p['owned']]
             if len(matches)!=1:
@@ -510,7 +528,7 @@ class MT5Broker:
         row = self.rows.get(cid, {})
         if (row.get('send_started') is not False or
                 not row.get('result', {}).get('retryable_not_sent') or
-                row.get('command', {}).get('kind') not in {'CANCEL', 'MODIFY'}):
+                row.get('command', {}).get('kind') not in {'CANCEL', 'MODIFY', 'CLOSE'}):
             return False
         try:
             self._request(row['command'])

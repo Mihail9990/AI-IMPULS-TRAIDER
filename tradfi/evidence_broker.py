@@ -63,7 +63,7 @@ class MT5EvidenceBroker(MT5Broker):
             raise OSError('Manual/deadline guard forbids automatic mutation')
         old = getattr(self, '_strict_quote', False)
         self._strict_quote = True
-        self._protective_request = command['kind'] in {'CANCEL', 'MODIFY'}
+        self._protective_request = command['kind'] in {'CANCEL', 'MODIFY', 'CLOSE'}
         self._cancel_request = command['kind'] == 'CANCEL'
         try:
             request=super()._request(command)
@@ -151,6 +151,8 @@ class MT5EvidenceBroker(MT5Broker):
                 continue
             entry={self.api.DEAL_ENTRY_IN:'IN',self.api.DEAL_ENTRY_OUT:'OUT'}.get(r['entry'],'OTHER')
             reason={self.api.DEAL_REASON_TP:'TP',self.api.DEAL_REASON_SL:'SL'}.get(r['reason'],'EXTERNAL')
+            close_cid=audit.get('controlled_closes',{}).get(key)
+            if close_cid:reason=self.rows[close_cid]['command']['purpose']
             closing=facts['order'].get(str(r['order']),{})
             protection=(entry=='OUT' and str(closing.get('position_id'))==str(r['position_id'])
                         and closing.get('state')==self.api.ORDER_STATE_FILLED and closing.get('type')==r['type'])
@@ -158,6 +160,8 @@ class MT5EvidenceBroker(MT5Broker):
                               command_id=owners.get(str(r['order']),'') if entry=='IN' else '',entry=entry,
                               side='BUY' if r['type']==self.api.DEAL_TYPE_BUY else 'SELL',volume=dec(r['volume']),
                               price=dec(r['price']),profit=dec(r['profit']),time=int(r['time_msc']),reason=reason,
+                              **{k:dec(r[k]) for k in ('commission','swap','fee') if k in r},
+                              close_command_id=close_cid,
                               sl=dec(closing.get('sl',0)) if protection else '0',tp=dec(closing.get('tp',0)) if protection else '0'))
         usable=all(value=='RETURNED' for value in audit['source_status'].values())
         if not usable:
@@ -172,7 +176,7 @@ class MT5EvidenceBroker(MT5Broker):
                 row=self.rows.get(cid)
                 if not row: continue
                 status=evidence['status']
-                proven='DONE' if status in {'CANCEL_TERMINAL_READBACK','PROTECTION_READBACK'} else (
+                proven='DONE' if status in {'CANCEL_TERMINAL_READBACK','PROTECTION_READBACK','CLOSE_TERMINAL_READBACK'} else (
                        'ACCEPTED' if status in {'PENDING_OBSERVED','FILLED_OPEN_EVIDENCE','CLOSED_EVIDENCE'} else None)
                 if proven and row.get('result',{}).get('status')!=proven:
                     self._save_row(cid,dict(row,result=dict(status=proven,reason='OBLIGATION_EVIDENCE')),'evidence_readback')

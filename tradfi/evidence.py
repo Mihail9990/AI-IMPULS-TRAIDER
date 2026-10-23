@@ -274,9 +274,36 @@ def collect(api, *, rows, state, account, symbol, magic, now, check_context,
                     manual=bool(state and (state.get('cycle') or {}).get('manual')))
 
 
+def correlated_close(api, deal, rows, facts, *, entry_command, symbol, magic):
+    """A non-SL/TP exit needs an exact durable CLOSE/order/position witness."""
+    if deal['reason']!=getattr(api,'DEAL_REASON_EXPERT',3):return None
+    order=facts['order'].get(str(deal['order']))
+    if not order:return None
+    matches=[]
+    for cid,row in rows.items():
+        cmd=row['command']
+        if cmd['kind']!='CLOSE' or row.get('send_started') is not True:continue
+        if str(deal['position_id'])!=str(cmd['position_id']):continue
+        known=str((row.get('raw_result') or {}).get('order') or '')
+        if order.get('comment')!=cid and known!=str(order['ticket']):continue
+        expected=api.DEAL_TYPE_SELL if entry_command['side']=='BUY' else api.DEAL_TYPE_BUY
+        if (cmd.get('cycle_id')!=entry_command.get('cycle_id') or cmd.get('purpose') not in {'MANUAL','RECOVERY_TARGET'}
+                or order['symbol']!=symbol or order['magic']!=magic or deal['magic']!=magic
+                or str(order['position_id'])!=str(cmd['position_id']) or order['type']!=expected
+                or deal['type']!=expected or order['state']!=api.ORDER_STATE_FILLED
+                or number(order['volume_initial'])!=number(cmd['size']) or number(order['volume_current'])!=0
+                or number(cmd['size'])!=number(entry_command['size'])
+                or (known not in {'','0'} and known!=str(order['ticket']))
+                or row.get('result',{}).get('status')=='REJECTED'):
+            raise EvidenceConflict('CLOSE_INTENT_EVIDENCE_CONFLICT')
+        matches.append(cid)
+    if len(matches)>1:raise EvidenceConflict('MULTIPLE_CLOSE_OWNERS')
+    return matches[0] if matches else None
+
+
 def evaluate(api, *, rows, facts, ownership, active, positions, sources, symbol, magic, manual=False,
              identity_settlement=False):
-    reports={}; position_owner={}; closed_profit={}; times={}
+    reports={}; position_owner={}; closed_profit={}; times={}; controlled_closes={}
     unavailable=[key for key,value in sources.items() if value=='UNAVAILABLE']
     for key,deal in facts['deal'].items():
         times[key]=history_time(deal['time_msc'])
@@ -354,7 +381,10 @@ def evaluate(api, *, rows, facts, ownership, active, positions, sources, symbol,
             report['current_position_ticket']=ident(p['ticket'])
         if volume<target:
             report['status']='PARTIAL_FILL'; continue
-        if any(d['reason'] not in {api.DEAL_REASON_SL,api.DEAL_REASON_TP} or d['magic']!=magic for d in exits):
+        for d in exits:
+            close_cid=correlated_close(api,d,rows,facts,entry_command=cmd,symbol=symbol,magic=magic)
+            if close_cid:controlled_closes[ident(d['ticket'])]=close_cid
+        if any((d['reason'] not in {api.DEAL_REASON_SL,api.DEAL_REASON_TP} and ident(d['ticket']) not in controlled_closes) or d['magic']!=magic for d in exits):
             report['status']='EXTERNAL_EXIT'; continue
         if len({d['reason'] for d in exits})>1:
             report['status']='MIXED_EXIT_REASONS'; continue
@@ -413,6 +443,15 @@ def evaluate(api, *, rows, facts, ownership, active, positions, sources, symbol,
             order=facts['order'].get(key)
             if key in ownership and order and not unavailable and key not in active and order['state'] in {api.ORDER_STATE_CANCELED,api.ORDER_STATE_EXPIRED,api.ORDER_STATE_FILLED}:
                 report['status']='CANCEL_TERMINAL_READBACK'
+        elif cmd['kind']=='CLOSE':
+            pid=str(cmd['position_id']);owner=reports.get(position_owner.get(pid),{})
+            exits=[d for key,d in facts['deal'].items() if controlled_closes.get(key)==cid]
+            if (owner.get('status')=='CLOSED_EVIDENCE' and not unavailable
+                    and sum((number(d['volume']) for d in exits),number(0))==number(cmd['size'])):
+                linked_deal=str((row.get('raw_result') or {}).get('deal') or '0')
+                if linked_deal!='0' and linked_deal not in {ident(d['ticket']) for d in exits}:raise EvidenceConflict('CLOSE_RESPONSE_DEAL_MISMATCH')
+                report.update(status='CLOSE_TERMINAL_READBACK',position_id=pid,
+                              closing_deals=sorted(ident(d['ticket']) for d in exits))
         elif cmd['kind']=='MODIFY':
             pid=str(cmd['position_id'])
             live=[p for p in positions if str(p['identifier'])==pid]
@@ -426,7 +465,7 @@ def evaluate(api, *, rows, facts, ownership, active, positions, sources, symbol,
     foreign_orders=[key for key in active if key not in ownership]
     foreign_positions=[ident(p['identifier']) for p in positions if str(p['identifier']) not in position_owner]
     return dict(history_complete=False, execution_ready=False, execution_blocker='HISTORY_TIME_PROFILE_UNVERIFIED',
-                obligations=reports, source_status=sources, foreign_orders=foreign_orders,
+                obligations=reports, controlled_closes=controlled_closes, source_status=sources, foreign_orders=foreign_orders,
                 current_orders=active,current_positions={ident(p['identifier']):p for p in positions},
                 foreign_positions=foreign_positions, raw_facts=facts, deal_times=times,
                 order_times={key:{field:history_time(r[field]) for field in ('time_setup_msc','time_done_msc')
@@ -436,4 +475,4 @@ def evaluate(api, *, rows, facts, ownership, active, positions, sources, symbol,
                 pnl_semantics='REPLACEMENT_OBSERVATION_NOT_LEDGER_INCREMENT',
                 evidence_blocked=bool(unavailable or foreign_orders or foreign_positions or not rows or
                     any(r['status'] not in {'FILLED_OPEN_EVIDENCE','CLOSED_EVIDENCE','TERMINAL_UNFILLED_EVIDENCE',
-                                           'CANCEL_TERMINAL_READBACK','PROTECTION_READBACK'} for r in reports.values())))
+                                           'CANCEL_TERMINAL_READBACK','PROTECTION_READBACK','CLOSE_TERMINAL_READBACK'} for r in reports.values())))
