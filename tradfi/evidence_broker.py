@@ -2,9 +2,9 @@
 import json
 from types import ModuleType
 
-from .mt5_adapter import MT5Broker, QuoteFreshnessError, dec
+from .mt5_adapter import MT5Broker, QuoteFreshnessError, NotSent, dec
 from .settings import number
-from .time_profile import TEST_PROFILE, BYBIT_PROFILE, HistoryTimeUnverified, server_to_utc
+from .time_profile import TEST_PROFILE, BYBIT_PROFILE, HistoryTimeUnverified, TimeProfileError, server_to_utc
 
 
 class MT5EvidenceBroker(MT5Broker):
@@ -28,12 +28,25 @@ class MT5EvidenceBroker(MT5Broker):
         except Exception:
             return False
 
+    def _quote_clock(self):
+        if self.time_safety is not None:
+            reference = self.time_safety.trusted_utc()
+            if reference is not None:
+                return reference
+        return super()._quote_clock()
+
     def _check_quote_time(self, tick, stage):
+        if not self._timestamp_semantics_verified():
+            if getattr(self, '_cancel_request', False) and stage != 'cancel_freeze_check':
+                return None  # ticket-only REMOVE; a nonzero freeze level is checked separately
+            if getattr(self, '_strict_quote', False) or getattr(self, '_require_fresh', False):
+                raise NotSent('MT5_TIMESTAMP_SEMANTICS_UNVERIFIED')
+            return None  # observation only: never interpret raw broker wall time as UTC
         try:
             return super()._check_quote_time(tick,stage)
-        except QuoteFreshnessError as exc:
-            if getattr(self,'_manual_readonly',False) and exc.details['reason']=='TICK_OLD':
-                return None  # stale market quote is not used for execution in durable MANUAL
+        except (QuoteFreshnessError, TimeProfileError):
+            if not getattr(self, '_strict_quote', False) and not getattr(self, '_require_fresh', False):
+                return None  # identity evidence remains usable; mutations revalidate quote time
             raise
 
     def _context(self, mutation=False, *, stage='context'):
@@ -48,7 +61,16 @@ class MT5EvidenceBroker(MT5Broker):
         guard=getattr(self,'before_mutation',None)
         if guard is None or not guard(command['kind']):
             raise OSError('Manual/deadline guard forbids automatic mutation')
-        request=super()._request(command)
+        old = getattr(self, '_strict_quote', False)
+        self._strict_quote = True
+        self._protective_request = command['kind'] in {'CANCEL', 'MODIFY'}
+        self._cancel_request = command['kind'] == 'CANCEL'
+        try:
+            request=super()._request(command)
+        finally:
+            self._strict_quote = old
+            self._protective_request = False
+            self._cancel_request = False
         if not guard(command['kind']):
             raise OSError('Cycle deadline crossed during request preparation')
         return request
@@ -70,6 +92,14 @@ class MT5EvidenceBroker(MT5Broker):
         return self.snapshot(require_fresh=True)
 
     def snapshot(self, *, require_fresh=False):
+        old = getattr(self, '_require_fresh', False)
+        self._require_fresh = require_fresh
+        try:
+            return self._snapshot(require_fresh=require_fresh)
+        finally:
+            self._require_fresh = old
+
+    def _snapshot(self, *, require_fresh=False):
         state=self.store.load() if self.store else None
         self._manual_readonly=not require_fresh and bool(((state or {}).get('cycle') or {}).get('manual'))
         _,_,_,tick,spec=self._context(stage='evidence_snapshot_start')
@@ -80,15 +110,15 @@ class MT5EvidenceBroker(MT5Broker):
         if orders is None or positions is None or rates is None or len(rates)!=1:
             raise OSError('Incomplete current market observation')
         quote_time=self._check_quote_time(tick,'evidence_market_time')
-        candle_time=number(rates[0]['time'])
         semantics_verified = self._timestamp_semantics_verified()
-        if not semantics_verified:
+        candle_time=number(rates[0]['time']) if semantics_verified else 0
+        if not semantics_verified or quote_time is None:
             # Unknown MT5 wall-time is display-only, never a UTC candle identity.
             quote_time = None
             candle_time = 0
         elif self.time_profile==BYBIT_PROFILE:
             candle_time=server_to_utc(float(candle_time))
-            if candle_time%60 or candle_time+60>self.clock():
+            if candle_time%60 or candle_time+60>self._quote_clock():
                 raise ValueError('Invalid closed native M1 candle')
             if quote_time and candle_time!=int(quote_time['utc_time']//60)*60-60:
                 raise OSError('Latest closed native M1 candle is unavailable')
@@ -147,14 +177,16 @@ class MT5EvidenceBroker(MT5Broker):
                 if proven and row.get('result',{}).get('status')!=proven:
                     self._save_row(cid,dict(row,result=dict(status=proven,reason='OBLIGATION_EVIDENCE')),'evidence_readback')
         self._context(stage='evidence_snapshot_return')
-        self._check_quote_time(tick,'evidence_snapshot_return')
+        quote_time = self._check_quote_time(tick,'evidence_snapshot_return')
+        if quote_time is None:
+            candle_time = 0
         return dict(protocol=1,backend=self.backend_id,account=self.account,connected=True,hedging=True,
                     reconciliation_contract=self.evidence_contract,history_complete=False,
                     observations_usable=usable,obligations=obligations,ledger_facts=facts['deal'],
                     history_time_status='UNVERIFIED',settlement_basis='cycle_scoped_identity_v1',
                     mt5_timestamp_semantics='VERIFIED' if semantics_verified else 'UNVERIFIED',
                     mt5_display_time=dict(tick_time_msc=getattr(tick,'time_msc',None),
-                        candle_time=dec(rates[0]['time'])),
+                        candle_time=rates[0]['time']),
                     now=self.clock(),spec=spec,quote=dict(bid=dec(tick.bid),ask=dec(tick.ask),
                         utc_time=quote_time['utc_time'] if quote_time else None),
                     candle=dict(id=int(candle_time),close=dec(rates[0]['close'])),

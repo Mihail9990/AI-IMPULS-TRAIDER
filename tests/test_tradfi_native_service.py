@@ -165,6 +165,42 @@ class NativeServiceTest(unittest.TestCase):
             _run_mt5(config,False,service=True,execute=True,telegram_factory=TelegramDouble,
                 stop_event=stopped,clock=lambda:self.api.now,monotonic=lambda:self.api.now)
         self.assertEqual(len(self.api.sends),2)  # in-memory API double only
+    def test_runtime_stalled_utc_does_not_delay_telegram_or_tick(self):
+        import time
+        stopped, entered, release = threading.Event(), threading.Event(), threading.Event()
+        instances=[]; ticks=[]
+        def safety_factory(**kwargs):
+            safety=verified_time(**kwargs)
+            original=safety.get
+            def blocked(*a, **kw):
+                entered.set(); release.wait(2); return original(*a, **kw)
+            safety.get=blocked; instances.append(safety)
+            return safety
+        class TelegramDouble:
+            def __init__(self,*args,**kwargs): self.http=self
+            def updates(self,*args): return []
+            def start(self,*args): pass
+            def close(self): pass
+            def process(self,controller):
+                ticks.append(controller); stopped.set()
+        config=dict(self.config,enable_trading=True,execution_contract='cycle_scoped_identity_v1',
+                    legacy_ea_removed=True,legacy_state_reconciled=True)
+        real_import=importlib.import_module
+        try:
+            with patch.dict('os.environ',{'TRADFI_TELEGRAM_TOKEN':'fake','TRADFI_TELEGRAM_CHAT_ID':'123','LOCALAPPDATA':str(self.root)}), \
+                 patch('tradfi.time_safety.TimeSafety',side_effect=safety_factory), \
+                 patch('tradfi.mt5_adapter.importlib.import_module',side_effect=lambda name,*a,**kw: self.api.module() if name=='MetaTrader5' else real_import(name,*a,**kw)):
+                start=time.monotonic()
+                _run_mt5(config,False,service=True,execute=True,telegram_factory=TelegramDouble,
+                    stop_event=stopped,clock=lambda:self.api.now,monotonic=lambda:self.api.now)
+                self.assertLess(time.monotonic()-start,1.)
+                self.assertTrue(ticks); self.assertTrue(entered.wait(1))
+        finally:
+            release.set()
+            for safety in instances:
+                if safety._worker: safety._worker.join(1)
+        self.assertIsNotNone(ticks[0].observation.last_good)  # runtime still completed controller.tick
+
     def test_missing_history_blocks_manual_reset_and_keeps_money(self):
         self.position(); self.bot._enter_manual(self.bot.state['cycle'],'MANUAL',self.api.now)
         self.api.close_position(reason=0,profit=-7); self.open(False)

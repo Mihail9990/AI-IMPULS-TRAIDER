@@ -175,7 +175,7 @@ class MT5Broker:
             self.api.shutdown()
             self.connected = False
 
-    def _check_quote_time(self, tick, stage):
+    def _quote_clock(self):
         now = float(self.clock())
         if self.time_profile == BYBIT_PROFILE:
             mono = self.monotonic()
@@ -189,6 +189,10 @@ class MT5Broker:
                     raise TimeProfileError('PC_CLOCK_DISCONTINUITY')
             else:
                 self.clock_anchor = (now, mono)
+        return now
+
+    def _check_quote_time(self, tick, stage):
+        now = self._quote_clock()
         raw = getattr(tick, 'time_msc', None)
         stamp = float(raw) / 1000 if isinstance(raw, (int, float)) and not isinstance(raw, bool) else None
         if stamp is not None and (not math.isfinite(stamp) or stamp <= 0):
@@ -472,6 +476,8 @@ class MT5Broker:
             matches=[o for o in snap['orders'] if o['id']==cmd['order_id'] and o['owned']]
             if len(matches)!=1:
                 raise TimeoutError('Order absent/ambiguous; reconcile history')
+            if spec.freeze_level > 0:
+                self._check_cancel_quote(tick)
             o=matches[0]; quote=number(tick.ask if o['side']=='BUY' else tick.bid)
             if spec.freeze_level>0 and abs(number(o['price'])-quote)<=spec.freeze_level*spec.point:
                 raise NotSent('Order inside freeze level')
@@ -495,6 +501,22 @@ class MT5Broker:
         else:
             raise NotSent('Unsupported mutation')
         return req
+
+    def _check_cancel_quote(self, tick):
+        return self._check_quote_time(tick, 'cancel_freeze_check')
+
+    def can_retry_not_sent(self, cid):
+        """A new protective command requires durable non-send proof and fresh preparation."""
+        row = self.rows.get(cid, {})
+        if (row.get('send_started') is not False or
+                not row.get('result', {}).get('retryable_not_sent') or
+                row.get('command', {}).get('kind') not in {'CANCEL', 'MODIFY'}):
+            return False
+        try:
+            self._request(row['command'])
+        except (ValueError, OSError, TimeoutError):
+            return False
+        return True
 
     def submit(self,command):
         if not self.enable_trading or self.store is None:
@@ -528,7 +550,8 @@ class MT5Broker:
             if self._request(cmd)!=request:
                 raise NotSent('Request context changed before send')
         except (ValueError,OSError,TimeoutError) as exc:
-            row['result']=dict(status='REJECTED' if isinstance(exc,ValueError) else 'UNKNOWN',reason=str(exc))
+            row['result']=dict(status='REJECTED',reason=str(exc),never_sent=True,
+                               retryable_not_sent=isinstance(exc, (OSError, TimeoutError)))
             self._save_row(cid,row,'not_sent')
             return
         row.update(request=request,send_started=True,result={'status':'UNKNOWN'})
@@ -538,7 +561,8 @@ class MT5Broker:
                 raise NotSent('Request context changed after durable may-send')
         except (ValueError,OSError,TimeoutError) as exc:
             row.update(send_started=False,result=dict(
-                status='REJECTED' if isinstance(exc,ValueError) else 'UNKNOWN',reason=str(exc)))
+                status='REJECTED',reason=str(exc),never_sent=True,
+                               retryable_not_sent=isinstance(exc, (OSError, TimeoutError))))
             self._save_row(cid,row,'final_guard_not_sent')
             return
         try:

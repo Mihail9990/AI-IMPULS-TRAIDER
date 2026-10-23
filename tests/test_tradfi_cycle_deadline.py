@@ -91,16 +91,16 @@ class CycleDeadlineTest(unittest.TestCase):
         self.assertFalse(self.api.sends); self.assertEqual(self.bot.state['phase'],'MANUAL')
         self.assertEqual(len(self.notices()),1)
 
-    def test_ready_cancel_is_sent_but_modify_is_not_sent_after_limit(self):
+    def test_ready_cancel_and_protection_remain_allowed_after_limit(self):
         self.start_pair(); self.api.fill()
         with patch.object(self.bot,'dispatch'): self.bot.tick()
         # Existing broker SL/TP are deliberately left intact.
         p=self.bot.state['cycle']['position']
         self.bot._intent('MODIFY',position_id=p['id'],sl='4001',tp='4003.2',purpose='ANCHOR')
         self.bot.save('queued_modify'); count=len(self.api.sends)
-        self.advance(86400); self.restart(); self.bot.tick(); self.bot.dispatch()
-        self.assertEqual(len(self.api.sends),count+1); self.assertEqual(len(self.api.orders),0)
-        self.assertTrue(any(c['kind']=='MODIFY' and c['status']=='READY' for c in self.bot.state['commands'].values()))
+        self.advance(86400); self.restart(); self.bot.tick(); self.bot.dispatch(); self.bot.tick()
+        self.assertEqual(len(self.api.sends),count+2); self.assertEqual(len(self.api.orders),0)
+        self.assertTrue(any(c['kind']=='MODIFY' and c['status']=='DONE' for c in self.bot.state['commands'].values()))
 
     def test_restart_uses_original_deadline(self):
         self.start_pair(); deadline=self.bot.state['cycle']['deadline_utc']

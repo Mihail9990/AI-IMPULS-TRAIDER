@@ -267,7 +267,7 @@ class EvidenceControllerTest(unittest.TestCase):
         def slow(fn):
             original(fn); self.api.now+=6
         with patch.object(self.broker,'_transaction',side_effect=slow):
-            with self.assertRaises(QuoteFreshnessError): self.broker.snapshot()
+            with self.assertRaises(QuoteFreshnessError): self.broker.snapshot(require_fresh=True)
         self.assertFalse(self.api.sends)
 
     def test_missing_ledger_fact_rolls_memory_back(self):

@@ -144,6 +144,13 @@ class DurableTimeTest(unittest.TestCase):
         self.broker.connect()
         self.bot = Controller(self.store,self.broker,clock=lambda:self.api.now,monotonic=lambda:self.api.now)
 
+    def finish_time(self):
+        worker = self.broker.time_safety._worker
+        if worker:
+            worker.join(1)
+            self.assertFalse(worker.is_alive())
+        self.bot.poll_time()
+
     def advance(self, seconds):
         self.api.now += seconds
         self.api.tick = self.api.tick._replace(time_msc=self.api.now*1000)
@@ -154,18 +161,20 @@ class DurableTimeTest(unittest.TestCase):
         self.semantics = True; self.restart()
         with self.assertRaisesRegex(ValueError, 'TIME_BLOCK'): self.bot.command('/start')
         self.assertFalse(self.api.sends)
-        self.bot.command('/resume_time',17)
+        self.bot.command('/resume_time',17); self.finish_time()
         self.assertNotIn('time_block',self.store.load())
         self.assertEqual(self.bot.state['telegram_offset'],18)
         self.bot.command('/start')
 
     def test_periodic_success_never_resumes_and_failed_resume_keeps_latch(self):
         self.semantics = False; self.bot.tick()
-        with self.assertRaisesRegex(ValueError, 'MT5_TIMESTAMP'): self.bot.command('/resume_time')
-        self.semantics = True; self.bot.refresh_time()
+        self.bot.command('/resume_time'); self.finish_time()
+        self.assertIn('MT5_TIMESTAMP', self.bot.state['notifications'][-1]['text'])
+        self.semantics = True; self.bot.refresh_time(); self.finish_time()
         self.assertIn('time_block',self.store.load())
         with patch.object(self.broker.time_safety,'get',side_effect=TimeoutError):
-            with self.assertRaisesRegex(ValueError,'EXTERNAL_UTC'): self.bot.command('/resume_time')
+            self.bot.command('/resume_time'); self.finish_time()
+            self.assertIn('EXTERNAL_UTC', self.bot.state['notifications'][-1]['text'])
         self.assertIn('time_block',self.store.load())
 
     def test_stale_check_blocks_final_send(self):
@@ -203,7 +212,7 @@ class DurableTimeTest(unittest.TestCase):
     def test_resume_does_not_clear_manual_or_stop(self):
         self.position(); self.bot._enter_manual(self.bot.state['cycle'],'MANUAL',self.api.now)
         self.bot.command('/stop'); self.semantics=False; self.bot.tick()
-        self.semantics=True; self.bot.command('/resume_time')
+        self.semantics=True; self.bot.command('/resume_time'); self.finish_time()
         self.assertEqual(self.bot.state['phase'],'MANUAL'); self.assertTrue(self.bot.state['stop'])
         with self.assertRaises(ValueError): self.bot.command('/start')
 
@@ -274,7 +283,8 @@ class DurableTimeTest(unittest.TestCase):
         def crash(event):
             if event=='time_resumed_explicitly': raise RuntimeError('power loss')
         self.store.fault=crash
-        with self.assertRaises(DurabilityError): self.bot.command('/resume_time')
+        self.bot.command('/resume_time')
+        with self.assertRaises(DurabilityError): self.finish_time()
         self.assertIn('time_block',self.store.load()); self.restart()
         with self.assertRaisesRegex(ValueError,'TIME_BLOCK'): self.bot.command('/start')
 

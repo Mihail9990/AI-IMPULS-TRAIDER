@@ -13,6 +13,8 @@ from .storage import DurabilityError
 from .observation import Observation
 
 LOG = logging.getLogger(__name__)
+PROTECTIVE_MANUAL = {'CYCLE_24H_LIMIT', 'UTC_CLOCK_MOVED_BACKWARDS', 'INVALID_CYCLE_CLOCK'}
+
 TERMINAL = {'DONE', 'REJECTED', 'CANCELLED', 'FILLED', 'OBSOLETE'}
 
 
@@ -60,30 +62,58 @@ class Controller:
             self.state['time_block'] = {'reason': reason}
             self.notify('TIME_BLOCK: ' + reason + '; new entries blocked; /resume_time required.')
             self.save('time_block_latched')
+        if self.state.get('time_block'):
+            changed = False
+            for cmd in self.state['commands'].values():
+                if cmd['kind'] in {'STOP', 'MARKET'} and cmd['status'] == 'READY':
+                    cmd.update(status='CANCELLED', never_sent=True)
+                    changed = True
+            if changed:
+                self.save('time_block_unsent_entries_cancelled')
         return bool(self.state.get('time_block'))
 
     def refresh_time(self):
         safety = getattr(self.broker, 'time_safety', None)
         if safety is None:
+            return None
+        self.poll_time()
+        self._time_guard()
+        return safety.request_refresh()
+
+    def poll_time(self):
+        safety = getattr(self.broker, 'time_safety', None)
+        if safety is None:
             return
-        self._time_guard()  # persist discontinuity before resetting the measurement anchor
-        safety.refresh()
-        self._time_guard()  # successful periodic checks never release the durable latch
+        self._time_guard()  # latch discontinuity before replacing the anchor
+        completed = safety.poll_refresh()
+        self._time_guard()
+        if completed is not None and completed == getattr(self, '_resume_time_token', None):
+            self._resume_time_token = None
+            reason = safety.check()
+            if reason:
+                self.notify('TIME_BLOCK retained: ' + reason)
+                self.save('time_resume_failed')
+                return
+            self.state.pop('time_block', None)
+            self.state['last_time_resume_utc'] = self.clock()
+            self.save('time_resumed_explicitly')
 
     def _resume_time(self, update_id):
         safety = getattr(self.broker, 'time_safety', None)
         if safety is None:
             raise ValueError('Independent time verification is unavailable')
-        self.refresh_time()
-        reason = safety.check()
-        if reason:
-            raise ValueError(reason)
-        # Only the time latch: never reset manual, reconciliation, stop or branch state.
-        self.state.pop('time_block', None)
-        self.state['last_time_resume_utc'] = self.clock()
+        token = self.refresh_time()
+        if token is None:
+            raise ValueError('Time check in progress; retry /resume_time after completion')
+        self._resume_time_token = token  # never persisted: restart requires a fresh explicit request
         if update_id is not None:
             self.state['telegram_offset'] = update_id + 1
-        self.save('time_resumed_explicitly')
+        self.notify('Fresh time verification requested; time block remains until success.')
+        try:
+            self.save('time_resume_requested')
+        except BaseException:
+            self._resume_time_token = None
+            raise
 
     def _validate_currency(self):
         records = [self.state, *self.state['completed']]
@@ -418,7 +448,8 @@ class Controller:
         if getattr(self.broker,'read_only',False) or self.state['phase']=='SAFE_PAUSE':
             return False
         if expired:
-            return kind == 'CANCEL' and self.state['cycle'].get('manual_reason') == 'CYCLE_24H_LIMIT'
+            return (kind in {None, 'CANCEL', 'MODIFY'} and
+                    self.state['cycle'].get('manual_reason') in PROTECTIVE_MANUAL)
         return not (kind in {'STOP', 'MARKET'} and blocked)
 
     def _manual_reconcile(self, snap):
@@ -552,6 +583,7 @@ class Controller:
         self.save('broker_reconciled')
 
     def tick(self):
+        self.poll_time()
         self._time_guard()
         self._deadline_guard()
         if self.state['phase'] == 'SAFE_PAUSE':
@@ -576,16 +608,26 @@ class Controller:
             return
         self._reconcile_commands(snap)
         if (self.state.get('cycle') or {}).get('manual'):
-            if self.state['cycle'].get('manual_reason')=='CYCLE_24H_LIMIT':
+            if self.state['cycle'].get('manual_reason') in PROTECTIVE_MANUAL:
+                if any(not x.get('owned', True) for x in snap['orders'] + snap['positions']):
+                    self._manual_reconcile(snap); return
                 self._cancel_pending(snap,self.state['cycle']['entries'])
                 self.dispatch({'CANCEL'})
-            self._manual_reconcile(snap); return
+                self._manual_reconcile(snap)
+                self._cycle_tick(snap)
+                self.dispatch({'CANCEL', 'MODIFY'})
+            else:
+                self._manual_reconcile(snap)
+            return
         if any(not x.get('owned', True) for x in snap['orders'] + snap['positions']):
             self.pause('Foreign order/position on XAUUSD.s; ownership conflict')
             return
         phase = self.state['phase']
         c = self.state['cycle']
         if c:
+            if self.state.get('time_block'):
+                self._cancel_pending(snap, c['entries'])
+                self.dispatch({'CANCEL'})
             self._cycle_tick(snap)
         elif phase == 'COOLDOWN':
             if snap['now'] >= self.state['cooldown_until']:
@@ -668,6 +710,8 @@ class Controller:
 
     def _cancel_pending(self, snap, entries):
         for order in snap['orders']:
+            if not order.get('owned', False):
+                continue
             if order.get('command_id') not in entries and not any(
                     self.state['commands'][cid].get('order_id') == order['id'] for cid in entries):
                 continue
@@ -675,7 +719,11 @@ class Controller:
                         if cmd['kind'] == 'CANCEL' and cmd['order_id'] == order['id']]
             if any(cmd['status'] != 'REJECTED' for cmd in attempts):
                 continue  # especially UNKNOWN: never resubmit without a terminal rejection
-            if len(attempts) >= 3:
+            if attempts and attempts[-1].get('result', {}).get('retryable_not_sent'):
+                retry = getattr(self.broker, 'can_retry_not_sent', None)
+                if retry is None or not retry(attempts[-1]['id']):
+                    continue
+            if sum(not cmd.get('result', {}).get('retryable_not_sent') for cmd in attempts) >= 3:
                 self.pause('Opposite cancellation rejected three times; pending remains broker-protected')
                 return
             if not attempts or all(cmd.get('result', {}).get('status') == 'REJECTED' for cmd in attempts):
@@ -685,6 +733,11 @@ class Controller:
     def _cycle_tick(self, snap):
         if not self._mutation_allowed(): return
         c = self.state['cycle']; phase = self.state['phase']
+        if c.get('manual_closure'):
+            return
+        if c.get('manual') and not c['position'] and any(d['entry'] == 'OUT' and d['id'] in self.state['seen_deals']
+                                    and d['position_id'] in c['opened_ids'] for d in snap['deals']):
+            return
         if phase == 'PAUSED_CYCLE':
             return
         if phase == 'NEXT_PAIR':
@@ -735,15 +788,21 @@ class Controller:
             self.save('fill_oco_intents')
             # Cancellation must not wait for an OrderCalcProfit round trip or its timeout.
             self.dispatch({'CANCEL'})
-            if c.get('manual'):
-                self._manual_reconcile(snap); return
+            if c.get('manual_closure'):
+                return
             if not c['position']:
                 self._adopt(opening, snap)
-                if self.state['phase'] == 'SAFE_PAUSE':
+                if self.state['phase'] == 'SAFE_PAUSE' or not c['position']:
                     return
             self._position(snap)
             return
-        if not self.state['stop']:
+        if (self.state.get('time_block') and not c.get('manual') and not snap['orders']
+                and not snap['positions'] and not self._unresolved()
+                and all(self.state['commands'][cid]['status'] in {'CANCELLED', 'REJECTED'} for cid in entries)):
+            self.state['phase'] = 'NEXT_PAIR'
+            self.save('time_block_pair_cancelled')
+            return  # only explicit /resume_time can permit a new pair
+        if not self.state['stop'] and not self.state.get('time_block') and not c.get('manual'):
             for index, cid in enumerate(entries):
                 cmd = self.state['commands'][cid]
                 if (cmd['kind'] == 'STOP' and cmd['status'] == 'REJECTED'
@@ -801,7 +860,7 @@ class Controller:
         self.save('actual_fill_adopted')
 
     def _position(self, snap):
-        if self._deadline_guard():
+        if self._deadline_guard() and self.state['cycle'].get('manual_reason') not in PROTECTIVE_MANUAL:
             self._manual_reconcile(snap); return
         c = self.state['cycle']; p = c['position']; cfg = Settings.load(c['settings'])
         live = next((x for x in snap['positions'] if x['id'] == p['id']), None)
@@ -851,8 +910,19 @@ class Controller:
         entry = D(p['entry']); size = D(p['size'])
         if any(cmd['status'] not in TERMINAL for cmd in modifications):
             return
-        if any(cmd['status'] == 'REJECTED' for cmd in modifications):
+        rejected = [cmd for cmd in modifications if cmd['status'] == 'REJECTED' and not cmd.get('retry_replaced')]
+        if any(not cmd.get('result', {}).get('retryable_not_sent') for cmd in rejected):
             self.pause('Protection modification rejected; original SL/TP retained'); return
+        if self.evidence_contract == 'per_obligation_v1' and snap['quote'].get('utc_time') is None:
+            return  # identity reconciliation is usable; price-sensitive protection must wait
+        if rejected:
+            cmd = rejected[0]
+            if not self.broker.can_retry_not_sent(cmd['id']):
+                return
+            cid = self._intent('MODIFY', **{key: cmd[key] for key in ('position_id', 'sl', 'tp', 'purpose')})
+            cmd['retry_replaced'] = cid
+            self.save('protection_known_not_sent_retry')
+            return
         try:
             if 'desired_tp' not in p:
                 p['desired_tp'] = str(entry + sign * cfg.BASE_TP_DISTANCE if c['first'] else target_price(

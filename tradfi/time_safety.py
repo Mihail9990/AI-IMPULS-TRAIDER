@@ -4,6 +4,8 @@ MT5 ticks are not an independent reference. Production timestamp semantics stay
 unverified until independent evidence can establish them, never by config flag.
 """
 import math
+import copy
+import threading
 import time
 import requests
 
@@ -22,6 +24,63 @@ class TimeSafety:
         self.jump_tolerance = jump_tolerance
         self.result = None
         self.anchor = None
+        self._worker = None
+        self._pending = None
+        self._generation = 0
+
+    def trusted_utc(self):
+        """Short-lived monotonic projection for protective quote validation only."""
+        if not self.anchor or not self.result or not self.result.get('ok'):
+            return None
+        mono = float(self.monotonic())
+        age = mono - self.result['checked_monotonic']
+        if not math.isfinite(age) or not 0 <= age <= self.freshness:
+            return None
+        return self.anchor[0] + mono - self.anchor[1]
+
+    def request_refresh(self):
+        """One daemon at most; a stuck HTTP call cannot queue unbounded workers."""
+        self.poll_refresh()
+        if self._worker is not None and self._worker.is_alive():
+            return None
+        self._generation += 1
+        token = self._generation
+        worker_safety = copy.copy(self)
+        worker_safety.result = None
+        pending = dict(token=token, started=float(self.monotonic()), done=threading.Event(),
+                       value=None, expired=False, finished=None)
+        self._pending = pending
+        def measure():
+            try:
+                worker_safety.refresh()
+                pending['value'] = (worker_safety.result, worker_safety.anchor)
+            finally:
+                pending['finished'] = float(self.monotonic())
+                pending['done'].set()
+        self._worker = threading.Thread(target=measure, name='utc-check', daemon=True)
+        self._worker.start()
+        return token
+
+    def poll_refresh(self):
+        """Only the owner installs measurements. Late results never regain trust."""
+        pending = self._pending
+        if pending is None or pending['expired']:
+            return None
+        end = pending['finished'] if pending['done'].is_set() else float(self.monotonic())
+        age = end - pending['started']
+        if not math.isfinite(age) or age < 0 or age > 15.:
+            pending['expired'] = True
+            self.result = dict(ok=False, reason='EXTERNAL_UTC_TIMEOUT', samples=[])
+            return pending['token']
+        if not pending['done'].is_set():
+            return None
+        self._pending = None
+        value = pending['value']
+        if value is None:
+            self.result = dict(ok=False, reason='EXTERNAL_UTC_UNAVAILABLE', samples=[])
+        else:
+            self.result, self.anchor = value
+        return pending['token']
 
     def _clocks(self):
         wall, mono = float(self.clock()), float(self.monotonic())
