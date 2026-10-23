@@ -1,0 +1,18 @@
+test_active_phase_and_unknown_commands (__main__.DiagnosticTests.test_active_phase_and_unknown_commands) ... ok
+test_bad_pointer_does_not_hide_database (__main__.DiagnosticTests.test_bad_pointer_does_not_hide_database) ... ok
+test_binding_mismatch (__main__.DiagnosticTests.test_binding_mismatch) ... ok
+test_duplicate_deals (__main__.DiagnosticTests.test_duplicate_deals) ... ok
+test_idle_and_repeat_preserve_bytes (__main__.DiagnosticTests.test_idle_and_repeat_preserve_bytes) ... ok
+test_incompatible_contracts (__main__.DiagnosticTests.test_incompatible_contracts) ... ok
+test_invalid_database (__main__.DiagnosticTests.test_invalid_database) ... ok
+test_invalid_snapshot (__main__.DiagnosticTests.test_invalid_snapshot) ... ok
+test_latest_committed_wal_snapshot_is_read (__main__.DiagnosticTests.test_latest_committed_wal_snapshot_is_read) ... ok
+test_missing_database_not_created (__main__.DiagnosticTests.test_missing_database_not_created) ... ok
+test_missing_snapshot (__main__.DiagnosticTests.test_missing_snapshot) ... ok
+test_orphan_journal_and_ledger_difference (__main__.DiagnosticTests.test_orphan_journal_and_ledger_difference) ... ok
+test_readonly_connection_and_no_mutation_statements (__main__.DiagnosticTests.test_readonly_connection_and_no_mutation_statements) ... ok
+
+----------------------------------------------------------------------
+Ran 13 tests in 0.020s
+
+OK
