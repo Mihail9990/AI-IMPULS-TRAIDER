@@ -180,7 +180,7 @@ class EvidenceControllerTest(unittest.TestCase):
         self.assertEqual(D(self.bot.state['completed'][0]['realized']),D('1.8')); self.assertEqual(len(self.ledger()),1)
 
     def test_stale_controller_cannot_overwrite_newer_snapshot(self):
-        self.position(); stale=Controller(self.store,self.broker)
+        self.position(); stale=Controller(self.store,self.broker,clock=lambda:self.api.now,monotonic=lambda:self.api.now)
         self.bot.command('/stop')
         with self.assertRaises(DurabilityError): stale.command('/status')
         self.assertTrue(self.store.load()['stop']); self.assertEqual(stale.state,self.store.load())

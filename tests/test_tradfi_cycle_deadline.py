@@ -32,17 +32,17 @@ class CycleDeadlineTest(unittest.TestCase):
     def notices(self):
         return [n for n in self.bot.state['notifications'] if n['text'].startswith('MANUAL:')]
 
-    def test_pending_orders_remain_and_single_notification_survives_restart(self):
+    def test_expiry_cancels_pending_and_single_notification_survives_restart(self):
         self.start_pair(); orders=deepcopy(self.api.orders); sends=len(self.api.sends)
         start=self.bot.state['cycle']['started_at_utc']; self.advance(86400); self.bot.tick()
-        self.assertEqual(self.bot.state['phase'],'MANUAL'); self.assertEqual(self.api.orders,orders)
-        self.assertEqual(len(self.api.sends),sends); self.assertEqual(len(self.notices()),1)
+        self.assertEqual(self.bot.state['phase'],'MANUAL'); self.assertEqual(self.api.orders,[])
+        self.assertEqual(len(self.api.sends),sends+2); self.assertEqual(len(self.notices()),1)
         self.restart(); self.bot.tick(); self.bot.dispatch(); self.bot.command('/stop')
         with self.assertRaises(ValueError): self.bot.command('/start')
         self.assertEqual(self.bot.state['cycle']['started_at_utc'],start)
         self.assertEqual(self.bot.state['phase'],'MANUAL'); self.assertEqual(len(self.notices()),1)
-        self.assertEqual(self.api.orders,orders); self.assertEqual(len(self.api.sends),sends)
-        self.assertEqual(len(self.bot.state['cycle']['manual_observation']['orders']),2)
+        self.assertEqual(self.api.orders,[]); self.assertEqual(len(self.api.sends),sends+2)
+        self.assertEqual(len(self.bot.state['cycle']['manual_observation']['orders']),0)
 
     def test_limit_with_open_position_preserves_protection_and_recovery(self):
         self.position(); before=deepcopy(self.api.positions); recovery=self.bot.state['cycle']['recovery']
@@ -51,11 +51,13 @@ class CycleDeadlineTest(unittest.TestCase):
         self.assertEqual(self.bot.state['cycle']['recovery'],recovery)
         self.assertEqual(self.bot.state['phase'],'MANUAL')
 
-    def test_broker_fill_in_manual_is_observed_without_oco_cancel_or_modify(self):
-        self.start_pair(); self.advance(86400); self.bot.tick(); count=len(self.api.sends)
-        self.api.fill(); self.bot.tick()
-        self.assertEqual(self.bot.state['phase'],'MANUAL'); self.assertEqual(len(self.api.orders),1)
-        self.assertEqual(len(self.api.sends),count); self.assertIsNotNone(self.bot.state['cycle']['position'])
+    def test_fill_racing_expiry_preserves_position_and_cancels_remaining_pending(self):
+        self.start_pair(); self.advance(86400)
+        with patch.object(self.bot,'dispatch'): self.bot.tick()
+        count=len(self.api.sends); self.api.fill(); before=deepcopy(self.api.positions); self.bot.tick()
+        self.assertEqual(self.bot.state['phase'],'MANUAL'); self.assertEqual(len(self.api.orders),0)
+        self.assertEqual(self.api.positions,before)
+        self.assertEqual(len(self.api.sends),count+1); self.assertIsNotNone(self.bot.state['cycle']['position'])
         self.assertEqual(len(self.bot.state['cycle']['manual_observation']['positions']),1)
 
     def test_natural_tp_after_deadline_books_once_but_does_not_restart(self):
@@ -89,7 +91,7 @@ class CycleDeadlineTest(unittest.TestCase):
         self.assertFalse(self.api.sends); self.assertEqual(self.bot.state['phase'],'MANUAL')
         self.assertEqual(len(self.notices()),1)
 
-    def test_ready_cancel_and_modify_are_not_dispatched_after_limit(self):
+    def test_ready_cancel_is_sent_but_modify_is_not_sent_after_limit(self):
         self.start_pair(); self.api.fill()
         with patch.object(self.bot,'dispatch'): self.bot.tick()
         # Existing broker SL/TP are deliberately left intact.
@@ -97,8 +99,8 @@ class CycleDeadlineTest(unittest.TestCase):
         self.bot._intent('MODIFY',position_id=p['id'],sl='4001',tp='4003.2',purpose='ANCHOR')
         self.bot.save('queued_modify'); count=len(self.api.sends)
         self.advance(86400); self.restart(); self.bot.tick(); self.bot.dispatch()
-        self.assertEqual(len(self.api.sends),count); self.assertEqual(len(self.api.orders),1)
-        self.assertTrue(any(c['kind']=='CANCEL' and c['status']=='READY' for c in self.bot.state['commands'].values()))
+        self.assertEqual(len(self.api.sends),count+1); self.assertEqual(len(self.api.orders),0)
+        self.assertTrue(any(c['kind']=='MODIFY' and c['status']=='READY' for c in self.bot.state['commands'].values()))
 
     def test_restart_uses_original_deadline(self):
         self.start_pair(); deadline=self.bot.state['cycle']['deadline_utc']
@@ -115,7 +117,8 @@ class CycleDeadlineTest(unittest.TestCase):
 
     def test_monotonic_crossing_is_fail_closed_even_if_wall_clock_freezes(self):
         self.start_pair(); self.mono+=86400; self.bot.tick()
-        self.assertEqual(self.bot.state['phase'],'MANUAL'); self.assertEqual(len(self.api.sends),2)
+        self.assertEqual(self.bot.state['phase'],'MANUAL'); self.assertEqual(len(self.api.sends),4)
+        self.assertEqual(self.api.orders,[])
 
     def test_missing_saved_deadline_never_starts_new_24h_window(self):
         self.start_pair(); self.bot.state['cycle'].pop('started_at_utc'); self.bot.save('legacy_time_missing')

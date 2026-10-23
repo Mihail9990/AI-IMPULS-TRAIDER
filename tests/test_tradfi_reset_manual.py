@@ -49,7 +49,7 @@ class ResetManualTest(unittest.TestCase):
         self.assertEqual(len(self.ledger()),1)
 
     def test_unfilled_pair_requires_positive_cancellation_not_empty_snapshot(self):
-        self.start_pair(); self.advance(86400); self.bot.tick()
+        self.start_pair(); self.bot._enter_manual(self.bot.state['cycle'],'MANUAL',self.api.now)
         orders=list(self.api.orders); self.api.orders=[]
         with self.assertRaises(ValueError): self.bot.command('/reset_manual')
         self.assertEqual(self.bot.state['phase'],'MANUAL')
@@ -92,7 +92,7 @@ class ResetManualTest(unittest.TestCase):
         self.assertEqual(len(self.ledger()),2)
 
     def test_two_fills_during_manual_require_both_settled(self):
-        self.start_pair(); self.advance(86400); self.bot.tick()
+        self.start_pair(); self.bot._enter_manual(self.bot.state['cycle'],'MANUAL',self.api.now)
         self.api.fill(); self.api.fill(); self.bot.tick()
         self.manual_exit(-2)
         with self.assertRaises(ValueError): self.bot.command('/reset_manual')
@@ -153,7 +153,7 @@ class ResetManualTest(unittest.TestCase):
 
 
     def prepare_partial_opening(self, state, remainder):
-        self.start_pair(); self.advance(86400); self.bot.tick(); self.api.fill(volume=.04)
+        self.start_pair(); self.bot._enter_manual(self.bot.state['cycle'],'MANUAL',self.api.now); self.api.fill(volume=.04)
         self.api.history[0]=self.api.history[0]._replace(state=state,volume_current=remainder)
         opposite=self.api.orders.pop()
         self.api.history.append(opposite._replace(state=2,time_done_msc=self.api.now*1000))

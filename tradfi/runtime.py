@@ -134,7 +134,12 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
             controller.state['telegram_initialized'] = True
             controller.save('telegram_first_start_discard_backlog')
         telegram.start(controller.state['telegram_offset'])
+        next_time_check = 0.
         while stop_event is None or not stop_event.is_set():
+            safety = getattr(broker, 'time_safety', None)
+            if safety is not None and not broker.read_only and monotonic() >= next_time_check:
+                controller.refresh_time()
+                next_time_check = monotonic() + 30.
             telegram.process(controller)
             try:
                 controller.tick()

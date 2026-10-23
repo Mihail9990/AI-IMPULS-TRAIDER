@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from test_tradfi_evidence_controller import TradingAPI
 from test_tradfi_mt5 import record
+from time_fixtures import verified_time
 from tradfi.engine import Controller
 from tradfi.evidence_broker import MT5EvidenceBroker
 from tradfi.runtime import _run_mt5
@@ -43,6 +44,8 @@ class NativeServiceTest(unittest.TestCase):
             expected_server='Bybit-Live-6',expected_login=111111111,symbol='XAUUSD.s',magic=25101102,
             terminal_path='C:/Program Files/MetaTrader 5/terminal64.exe',enable_trading=False,
             state_file=str(self.root/'state.db'),log_file=str(self.root/'diagnostic.log'))
+        time_patch=patch('tradfi.time_safety.TimeSafety', side_effect=verified_time)
+        time_patch.start(); self.addCleanup(time_patch.stop)
         self.store=None; self.broker=None
         self.addCleanup(self.close)
     def close(self):

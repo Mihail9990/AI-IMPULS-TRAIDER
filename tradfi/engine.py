@@ -5,6 +5,7 @@ import logging
 import json
 import time
 import uuid
+from datetime import datetime, timezone
 
 from .broker import ACCOUNT_CURRENCY, COMPLETION_TOLERANCE, Spec, target_price, stepped_stop
 from .settings import Settings, parse_settings, number
@@ -50,6 +51,39 @@ class Controller:
         # Legacy monetary state must never be silently relabelled or converted.
         self._validate_currency()
         self._deadline_guard()
+        self._time_guard()
+
+    def _time_guard(self):
+        safety = getattr(self.broker, 'time_safety', None)
+        reason = safety.check() if safety is not None else None
+        if reason and not self.state.get('time_block'):
+            self.state['time_block'] = {'reason': reason}
+            self.notify('TIME_BLOCK: ' + reason + '; new entries blocked; /resume_time required.')
+            self.save('time_block_latched')
+        return bool(self.state.get('time_block'))
+
+    def refresh_time(self):
+        safety = getattr(self.broker, 'time_safety', None)
+        if safety is None:
+            return
+        self._time_guard()  # persist discontinuity before resetting the measurement anchor
+        safety.refresh()
+        self._time_guard()  # successful periodic checks never release the durable latch
+
+    def _resume_time(self, update_id):
+        safety = getattr(self.broker, 'time_safety', None)
+        if safety is None:
+            raise ValueError('Independent time verification is unavailable')
+        self.refresh_time()
+        reason = safety.check()
+        if reason:
+            raise ValueError(reason)
+        # Only the time latch: never reset manual, reconciliation, stop or branch state.
+        self.state.pop('time_block', None)
+        self.state['last_time_resume_utc'] = self.clock()
+        if update_id is not None:
+            self.state['telegram_offset'] = update_id + 1
+        self.save('time_resumed_explicitly')
 
     def _validate_currency(self):
         records = [self.state, *self.state['completed']]
@@ -155,6 +189,7 @@ class Controller:
 
     def command(self, text, update_id=None):
         self._deadline_guard()
+        self._time_guard()
         if update_id is not None and update_id < self.state['telegram_offset']:
             return
         raw = text.strip()
@@ -163,8 +198,10 @@ class Controller:
         if raw.upper().startswith('/SETTINGS:'):
             settings = parse_settings(raw)
             Spec.load(self.snapshot()['spec']).validate(settings)
-        elif raw.lower() not in {'/start', '/stop', '/settings', '/status', '/reset_manual'}:
-            raise ValueError('Commands: /settings, complete /SETTINGS: block, /start, /stop, /status, /reset_manual')
+        elif raw.lower() not in {'/start', '/stop', '/settings', '/status', '/reset_manual', '/resume_time'}:
+            raise ValueError('Commands: /settings, complete /SETTINGS: block, /start, /stop, /status, /reset_manual, /resume_time')
+        if raw.lower()=='/resume_time':
+            return self._resume_time(update_id)
         if raw.lower()=='/reset_manual':
             return self._reset_manual(update_id)
         if settings:
@@ -173,6 +210,8 @@ class Controller:
         elif raw.lower() == '/start':
             if getattr(self.broker,'read_only',False):
                 raise ValueError('READ_ONLY service: /start disabled; no trading mutations are permitted')
+            if self._time_guard():
+                raise ValueError('TIME_BLOCK: /start cannot clear it; use /resume_time after fresh verification')
             if (self.state.get('cycle') or {}).get('manual'):
                 raise ValueError('Manual cycle remains unresolved; /start cannot reset it or Recovery')
             snap = self.snapshot()
@@ -310,11 +349,15 @@ class Controller:
 
     def status(self):
         c = self.state['cycle'] or {}
+        safety = getattr(self.broker, 'time_safety', None)
+        time_check = {'reason': safety.check(), 'measurement': safety.result} if safety else {'reason': 'OFFLINE_INJECTED_CLOCK'}
         return (f"TradFi {'READ_ONLY' if getattr(self.broker,'read_only',False) else 'EXECUTION'} {self.state['phase']} stop={self.state['stop']} "
+                f"time_block={self.state.get('time_block', '-')} time_check={json.dumps(time_check, sort_keys=True)} "
+                f"branch_started_at_utc={c.get('branch_started_at_utc', '-')} branch_started_date_utc={c.get('branch_started_date_utc', '-')} "
                 f"cycle={c.get('id', '-')} branch={c.get('branch', '-')} "
                 f"target={c.get('target', '-')} recovery={c.get('recovery', '-')} {self.state['currency']} "
                 f"cycle_position={c.get('position', {})} manual={c.get('manual',False)} "
-                f"manual_reason={c.get('manual_reason','-')} deadline_utc={c.get('deadline_utc','-')} "
+                f"manual_reason={c.get('manual_reason','-')} branch_deadline_utc={c.get('branch_deadline_utc',c.get('deadline_utc','-'))} "
                 f"observation={json.dumps(self.observation.view(), sort_keys=True)}")
 
     def _archived(self, command):
@@ -334,13 +377,14 @@ class Controller:
             return self._enter_manual(c,'INVALID_CYCLE_CLOCK',None)
         reason=None
         try:
-            start=float(number(c['started_at_utc'])); deadline=float(number(c['deadline_utc']))
+            start=float(number(c.get('branch_started_at_utc', c['started_at_utc'])))
+            deadline=float(number(c.get('branch_deadline_utc', c['deadline_utc'])))
             if start<=0 or deadline!=start+86400 or c['max_duration_seconds']!=86400:
                 reason='INVALID_CYCLE_DEADLINE'
             last=float(number(c.get('last_observed_utc',start)))
             if now<last-1: reason='UTC_CLOCK_MOVED_BACKWARDS'
-            if self._cycle_clock is None or self._cycle_clock[0]!=c['id']:
-                self._cycle_clock=(c['id'],now,mono)
+            if self._cycle_clock is None or self._cycle_clock[0]!=(c['id'],start):
+                self._cycle_clock=((c['id'],start),now,mono)
             _,wall0,mono0=self._cycle_clock
             if mono<mono0 or now<wall0+(mono-mono0)-1:
                 reason='UTC_CLOCK_MOVED_BACKWARDS'
@@ -357,16 +401,25 @@ class Controller:
         self.state['phase']='MANUAL'
         pending=sum(cmd['kind'] in {'STOP','MARKET'} and cmd['status'] not in TERMINAL
                     for cmd in self.state['commands'].values() if cmd.get('cycle_id')==c['id'])
+        for cmd in self.state['commands'].values():
+            if cmd['kind'] in {'STOP','MARKET'} and cmd['status']=='READY':
+                cmd.update(status='CANCELLED',never_sent=True)
         last=c.get('last_broker_observation',{'status':'UNAVAILABLE'})
         self.notify(f'MANUAL: {reason}; cycle={c["id"]}; pending/unknown entry intents={pending}; '
                     f'last broker observation={last}; '
-                    'broker orders and SL/TP retained, no automatic cancel/close/modify/new entry. '
-                    'Recovery preserved; read-only reconciliation continues. /start cannot resume.')
+                    'active broker SL/TP retained; expired branch pending orders will be cancelled; no new entries. '
+                    'Recovery preserved; reconciliation continues. /start cannot resume.')
         self.save('cycle_manual_required')
         return True
 
-    def _mutation_allowed(self):
-        return not getattr(self.broker,'read_only',False) and not self._deadline_guard() and self.state['phase']!='SAFE_PAUSE'
+    def _mutation_allowed(self, kind=None):
+        expired = self._deadline_guard()
+        blocked = self._time_guard()
+        if getattr(self.broker,'read_only',False) or self.state['phase']=='SAFE_PAUSE':
+            return False
+        if expired:
+            return kind == 'CANCEL' and self.state['cycle'].get('manual_reason') == 'CYCLE_24H_LIMIT'
+        return not (kind in {'STOP', 'MARKET'} and blocked)
 
     def _manual_reconcile(self, snap):
         c=self.state['cycle']
@@ -382,6 +435,11 @@ class Controller:
         if len(ids)!=1: return
         if c.get('manual_closure'): return  # no new branch/adoption after a manual close
         if not c['position']:
+            # A partial-profit continuation may still reference its completed round.
+            # Expiry must not adopt and account that already-consumed closure again.
+            if any(d['entry']=='OUT' and d['position_id'] in ids and
+                   d['id'] in self.state['seen_deals'] for d in snap['deals']):
+                return
             proof=[r for r in snap.get('obligations',{}).values() if r.get('position_id') in ids]
             if not any(r.get('status') in {'FILLED_OPEN_EVIDENCE','CLOSED_EVIDENCE'} for r in proof): return
             self._adopt(opening,snap)
@@ -401,8 +459,8 @@ class Controller:
     def _intent(self, kind, **params):
         if getattr(self.broker,'read_only',False):
             raise ValueError('READ_ONLY service cannot create trading intents')
-        if self._deadline_guard():
-            raise ValueError('Manual cycle cannot create automatic intents')
+        if not self._mutation_allowed(kind):
+            raise ValueError('Time/manual guard forbids this intent')
         if self.state.get('cycle'):
             params['cycle_id']=self.state['cycle']['id']
         cid = uuid.uuid4().hex[:24]
@@ -410,7 +468,8 @@ class Controller:
         return cid
 
     def dispatch(self, kinds=None):
-        if not self._mutation_allowed(): return
+        self._deadline_guard()
+        self._time_guard()
         for cmd in list(self.state['commands'].values()):
             if cmd['status'] != 'READY' or (kinds is not None and cmd['kind'] not in kinds):
                 continue
@@ -420,7 +479,7 @@ class Controller:
                             and self.broker.result(other['id']).get('status') == 'UNKNOWN'
                             for other in self.state['commands'].values())):
                 continue  # unresolved send cannot justify another entry; cancellation remains allowed
-            if not self._mutation_allowed(): return
+            if not self._mutation_allowed(cmd['kind']): continue
             cmd['status'] = 'UNKNOWN'
             self.save('may_send:' + cmd['id'])
             self.observation.fail('AWAITING_POST_MUTATION_READBACK')
@@ -493,6 +552,7 @@ class Controller:
         self.save('broker_reconciled')
 
     def tick(self):
+        self._time_guard()
         self._deadline_guard()
         if self.state['phase'] == 'SAFE_PAUSE':
             return
@@ -516,6 +576,9 @@ class Controller:
             return
         self._reconcile_commands(snap)
         if (self.state.get('cycle') or {}).get('manual'):
+            if self.state['cycle'].get('manual_reason')=='CYCLE_24H_LIMIT':
+                self._cancel_pending(snap,self.state['cycle']['entries'])
+                self.dispatch({'CANCEL'})
             self._manual_reconcile(snap); return
         if any(not x.get('owned', True) for x in snap['orders'] + snap['positions']):
             self.pause('Foreign order/position on XAUUSD.s; ownership conflict')
@@ -530,6 +593,7 @@ class Controller:
                 self.state['phase'] = 'PAUSED' if self.state['stop'] else 'WAIT_CANDLE'
                 self.save('cooldown_finished_wait_new_close')
         elif phase == 'WAIT_CANDLE' and snap['candle']['id'] > self.state['last_candle']:
+            if self._time_guard(): return
             if self.state.get('require_fresh_candle') and not self._fresh_closed_candle(snap): return
             if snap['orders'] or snap['positions'] or self._unresolved():
                 self.pause('Cannot start fresh cycle without confirmed flat')
@@ -552,6 +616,7 @@ class Controller:
                 'entries': [], 'position': None, 'opened_ids': [],
             }
             self.state['cycle']['deadline_utc']=self.state['cycle']['started_at_utc']+86400
+            self._start_branch_clock(self.state['cycle']['started_at_utc'])
             self.state['cycle']['last_observed_utc']=self.state['cycle']['started_at_utc']
             self._cycle_clock=None
             self.state['last_candle'] = snap['candle']['id']
@@ -561,7 +626,15 @@ class Controller:
         if self.state['phase'] != 'SAFE_PAUSE':
             self.dispatch()
 
+    def _start_branch_clock(self, now):
+        c = self.state['cycle']
+        c['branch_started_at_utc'] = now
+        c['branch_started_date_utc'] = datetime.fromtimestamp(now, timezone.utc).date().isoformat()
+        c['branch_deadline_utc'] = now + 86400
+        self._cycle_clock = None
+
     def _pair(self, snap):
+        if self._time_guard(): return
         c = self.state['cycle']; cfg = Settings.load(c['settings']); spec = Spec.load(snap['spec'])
         branch = c['branch']
         distance = cfg.BRANCH1_RANGE if branch in {'FIRST', 'BRANCH1_RECOVERY'} else (
@@ -863,6 +936,8 @@ class Controller:
         else:
             c['branch'] = 'PARTIAL_TP' if eligible else 'AFTER_SL'
             c['center'] = str(close)
+        if not eligible:
+            self._start_branch_clock(self.clock())
         c['first'] = False
         c['position'] = None
         self.state['phase'] = 'NEXT_PAIR'

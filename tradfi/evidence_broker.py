@@ -10,11 +10,23 @@ from .time_profile import TEST_PROFILE, BYBIT_PROFILE, HistoryTimeUnverified, se
 class MT5EvidenceBroker(MT5Broker):
     evidence_contract='per_obligation_v1'
 
-    def __init__(self, config, store=None, *, api=None, **kwargs):
+    def __init__(self, config, store=None, *, api=None, time_safety=None, **kwargs):
         if config.get('time_profile')==TEST_PROFILE and (api is None or isinstance(api,ModuleType)):
             raise HistoryTimeUnverified()
         super().__init__(config,store=store,api=api,**kwargs)
         self.read_only=not self.enable_trading
+        from .time_safety import TimeSafety
+        self.time_safety = time_safety
+        if self.time_profile == BYBIT_PROFILE and self.time_safety is None:
+            self.time_safety = TimeSafety(clock=self.clock, monotonic=self.monotonic)
+
+    def _timestamp_semantics_verified(self):
+        if self.time_profile == TEST_PROFILE:
+            return True
+        try:
+            return self.time_safety.semantics_verifier() is True
+        except Exception:
+            return False
 
     def _check_quote_time(self, tick, stage):
         try:
@@ -34,10 +46,10 @@ class MT5EvidenceBroker(MT5Broker):
 
     def _request(self, command):
         guard=getattr(self,'before_mutation',None)
-        if guard is None or not guard():
+        if guard is None or not guard(command['kind']):
             raise OSError('Manual/deadline guard forbids automatic mutation')
         request=super()._request(command)
-        if not guard():
+        if not guard(command['kind']):
             raise OSError('Cycle deadline crossed during request preparation')
         return request
 
@@ -69,7 +81,12 @@ class MT5EvidenceBroker(MT5Broker):
             raise OSError('Incomplete current market observation')
         quote_time=self._check_quote_time(tick,'evidence_market_time')
         candle_time=number(rates[0]['time'])
-        if self.time_profile==BYBIT_PROFILE:
+        semantics_verified = self._timestamp_semantics_verified()
+        if not semantics_verified:
+            # Unknown MT5 wall-time is display-only, never a UTC candle identity.
+            quote_time = None
+            candle_time = 0
+        elif self.time_profile==BYBIT_PROFILE:
             candle_time=server_to_utc(float(candle_time))
             if candle_time%60 or candle_time+60>self.clock():
                 raise ValueError('Invalid closed native M1 candle')
@@ -135,6 +152,9 @@ class MT5EvidenceBroker(MT5Broker):
                     reconciliation_contract=self.evidence_contract,history_complete=False,
                     observations_usable=usable,obligations=obligations,ledger_facts=facts['deal'],
                     history_time_status='UNVERIFIED',settlement_basis='cycle_scoped_identity_v1',
+                    mt5_timestamp_semantics='VERIFIED' if semantics_verified else 'UNVERIFIED',
+                    mt5_display_time=dict(tick_time_msc=getattr(tick,'time_msc',None),
+                        candle_time=dec(rates[0]['time'])),
                     now=self.clock(),spec=spec,quote=dict(bid=dec(tick.bid),ask=dec(tick.ask),
                         utc_time=quote_time['utc_time'] if quote_time else None),
                     candle=dict(id=int(candle_time),close=dec(rates[0]['close'])),

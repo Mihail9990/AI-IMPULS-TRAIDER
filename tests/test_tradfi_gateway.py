@@ -321,7 +321,7 @@ class TelegramTest(unittest.TestCase):
         self.assertGreater(len(template), 256)
         self.assertEqual(payload['text'], '<pre>' + template + '</pre>')
         self.assertEqual(payload['parse_mode'], 'HTML')
-        self.assertEqual({x['command'] for x in Telegram.COMMANDS}, {'start', 'stop', 'settings', 'status', 'sendlog', 'reset_manual'})
+        self.assertEqual({x['command'] for x in Telegram.COMMANDS}, {'start', 'stop', 'settings', 'status', 'sendlog', 'reset_manual', 'resume_time'})
 
     def test_allowed_chat_durable_offset_and_invalid_block(self):
         with tempfile.TemporaryDirectory() as tmp:
