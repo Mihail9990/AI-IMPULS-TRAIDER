@@ -36,12 +36,13 @@ class Telegram:
         self._owns_document_http = document_session is None
 
     @staticmethod
-    def payload(chat_id, text):
+    def payload(chat_id, text, reply_markup=None):
         result = {'chat_id': str(chat_id), 'text': text}
         if text.startswith('/SETTINGS:'):
             # Telegram CopyTextButton supports at most 256 characters. The full settings
             # block is larger: send a selectable code block so the ENTIRE block is copied.
             result.update(parse_mode='HTML', text='<pre>' + text + '</pre>')
+        if reply_markup is not None:result['reply_markup']=reply_markup
         return result
 
     def updates(self, offset):
@@ -78,7 +79,7 @@ class Telegram:
                     continue
                 try:
                     response = self.http.post(self.base + '/sendMessage',
-                        json=self.payload(self.chat_id, item['text']), timeout=5)
+                        json=self.payload(self.chat_id, item['text'],item.get('reply_markup')), timeout=5)
                     response.raise_for_status()
                     if response.json().get('ok'):
                         self.acks.put(item['id'])
@@ -98,6 +99,11 @@ class Telegram:
             if uid < controller.state['telegram_offset']:
                 continue
             message = update.get('message', {})
+            callback=update.get('callback_query')
+            if callback and hasattr(controller,'action') and callback.get('data') in {'/start auto','/start semi'}:
+                message=dict(callback.get('message') or {})
+                message['from']=callback.get('from') or {}
+                message['text']=callback['data']
             if self._authorized(message) and isinstance(message.get('text'), str):
                 try:
                     if message['text'].strip().lower()=='/sendlog':

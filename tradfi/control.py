@@ -126,6 +126,10 @@ class OwnerMailbox:
         while len(self.outcomes) > 256:
             self.outcomes.pop(next(iter(self.outcomes)))
         view = deepcopy(view_factory())
-        view['action_results'] = deepcopy(self.outcomes)
+        durable = deepcopy(view.get('action_results', {}))
+        # A conflicting reuse must not erase an existing UNKNOWN receipt.
+        published = deepcopy(self.outcomes)
+        published.update(durable)
+        view['action_results'] = published
         with self.lock:
             self._view = view
