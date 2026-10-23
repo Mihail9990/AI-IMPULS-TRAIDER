@@ -35,7 +35,7 @@ class DiagnosticTests(unittest.TestCase):
         self.save();r=self.run_diag();self.assertEqual(r['nonterminal_commands'],0);self.assertFalse(r['cycle_present']);self.assertEqual(self.run_diag(),r)
     def test_active_phase_and_unknown_commands(self):
         self.state.update(cycle={'private':SECRET},phase=SECRET,commands={SECRET:{'status':'UNKNOWN'}})
-        self.save();r=self.run_diag();self.assertTrue(r['cycle_present']);self.assertEqual(r['phase'],'OTHER_OR_MISSING');self.assertEqual(r['nonterminal_commands'],1)
+        self.save();r=self.run_diag();self.assertTrue(r['cycle_present']);self.assertEqual(r['phase'],'UNKNOWN_STRING');self.assertEqual(r['nonterminal_commands'],1)
     def test_incompatible_contracts(self):
         self.state.update(schema=2,backend=SECRET,ledger_contract=SECRET,scope_contract=SECRET,commands={SECRET:{'status':'DONE'}})
         self.save();r=self.run_diag()
@@ -64,14 +64,64 @@ class DiagnosticTests(unittest.TestCase):
         with patch.object(diag.sqlite3,'connect',side_effect=connect):self.run_diag()
         self.assertTrue(statements)
         for sql in statements:self.assertTrue(sql.startswith(('SELECT ','BEGIN','PRAGMA query_only=ON')),sql)
+    def test_all_known_phases_and_installer_allowlist(self):
+        for phase in sorted(diag.KNOWN_PHASES):
+            with self.subTest(phase=phase):
+                self.state['phase'] = phase
+                self.save()
+                r = self.run_diag()
+                self.assertEqual(r['phase'], phase)
+                self.assertEqual(r['phase_allowed_by_installer'], phase in {'IDLE', 'PAUSED', 'WAIT_START'})
+                self.path.unlink()
+
+    def test_phase_missing_null_unknown_and_invalid_types(self):
+        cases = [('MISSING', None), ('NULL', None), ('UNKNOWN_STRING', SECRET),
+                 ('INVALID_TYPE', {SECRET: SECRET}), ('INVALID_TYPE', [SECRET]),
+                 ('INVALID_TYPE', True), ('INVALID_TYPE', 1)]
+        for expected, value in cases:
+            with self.subTest(expected=expected, value_type=type(value).__name__):
+                self.state['phase'] = value
+                if expected == 'MISSING': self.state.pop('phase')
+                self.save()
+                r = self.run_diag()
+                self.assertEqual(r['phase'], expected)
+                self.assertFalse(r['phase_allowed_by_installer'])
+                self.assertEqual(r['result'], 'READ_COMPLETE_NOT_TRADING_APPROVAL')
+                self.path.unlink()
+
+    def test_cycle_and_time_block_categories(self):
+        for key in ('cycle', 'time_block'):
+            for expected, value in [('MISSING', None), ('NULL', None), ('EMPTY_OBJECT', {}),
+                                    ('OBJECT', {SECRET: SECRET}), ('INVALID_TYPE', [SECRET]),
+                                    ('INVALID_TYPE', SECRET), ('INVALID_TYPE', False)]:
+                with self.subTest(key=key, expected=expected):
+                    self.state[key] = value
+                    if expected == 'MISSING': self.state.pop(key)
+                    self.save()
+                    self.assertEqual(self.run_diag()[key + '_kind'], expected)
+                    self.path.unlink()
+
+    def test_stop_categories_do_not_coerce_values(self):
+        for expected, value in [('MISSING', None), ('TRUE', True), ('FALSE', False),
+                                ('INVALID_TYPE', None), ('INVALID_TYPE', 0),
+                                ('INVALID_TYPE', 1), ('INVALID_TYPE', SECRET),
+                                ('INVALID_TYPE', {SECRET: SECRET})]:
+            with self.subTest(expected=expected):
+                self.state['stop'] = value
+                if expected == 'MISSING': self.state.pop('stop')
+                self.save()
+                self.assertEqual(self.run_diag()['stop'], expected)
+                self.path.unlink()
+
     def test_latest_committed_wal_snapshot_is_read(self):
         self.save();db=sqlite3.connect(self.path)
         try:
             db.execute('PRAGMA journal_mode=WAL');db.execute('PRAGMA wal_autocheckpoint=0')
-            state=copy.deepcopy(self.state);state['cycle']={'private':SECRET}
+            state=copy.deepcopy(self.state);state['cycle']={'private':SECRET};state.update(phase='SAFE_PAUSE',stop=True,time_block={'reason':SECRET})
             db.execute('UPDATE snapshot SET payload=?',(json.dumps(state),));db.commit()
             before=self.path.read_bytes();wal=Path(str(self.path)+'-wal').read_bytes()
             r=diag.diagnose(self.root);self.assertTrue(r['cycle_present']);self.assertNotIn(SECRET,json.dumps(r))
+            self.assertEqual(r['phase'],'SAFE_PAUSE');self.assertEqual(r['cycle_kind'],'OBJECT');self.assertEqual(r['stop'],'TRUE');self.assertEqual(r['time_block_kind'],'OBJECT')
             self.assertEqual(before,self.path.read_bytes());self.assertEqual(wal,Path(str(self.path)+'-wal').read_bytes())
         finally:db.close()
 

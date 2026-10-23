@@ -7,7 +7,42 @@ import sqlite3
 import time
 
 BASE = 'AI_IMPULS_TRADFI_Manager'
+KNOWN_PHASES = frozenset({'IDLE', 'WAIT_CANDLE', 'NEXT_PAIR', 'PAIR', 'POSITION',
+                          'COOLDOWN', 'PAUSED', 'PAUSED_CYCLE', 'SAFE_PAUSE',
+                          'MANUAL', 'WAIT_START', 'WAIT_TRIGGER'})
+UPDATE_PHASES = frozenset({'IDLE', 'PAUSED', 'WAIT_START'})
 TERMINAL = {'DONE', 'REJECTED', 'CANCELLED', 'FILLED', 'OBSOLETE'}
+
+def phase_category(state):
+    if 'phase' not in state:
+        return 'MISSING'
+    value = state['phase']
+    if value is None:
+        return 'NULL'
+    if not isinstance(value, str):
+        return 'INVALID_TYPE'
+    return value if value in KNOWN_PHASES else 'UNKNOWN_STRING'
+
+
+def object_category(state, key):
+    if key not in state:
+        return 'MISSING'
+    value = state[key]
+    if value is None:
+        return 'NULL'
+    if not isinstance(value, dict):
+        return 'INVALID_TYPE'
+    return 'OBJECT' if value else 'EMPTY_OBJECT'
+
+
+def stop_category(state):
+    if 'stop' not in state:
+        return 'MISSING'
+    value = state['stop']
+    if type(value) is not bool:
+        return 'INVALID_TYPE'
+    return 'TRUE' if value else 'FALSE'
+
 
 def read_json(path):
     with path.open(encoding='utf-8-sig') as stream:
@@ -17,7 +52,7 @@ def read_json(path):
     return json.loads(text)
 
 def diagnose(root):
-    result = {'diagnostic': 'STATE_READ_ONLY_V1', 'live_state_checked': False}
+    result = {'diagnostic': 'STATE_READ_ONLY_V2', 'live_state_checked': False}
     stage = 'current_pointer'
     db = None
     try:
@@ -63,8 +98,11 @@ def diagnose(root):
         result['ledger_ok'] = s.get('ledger_contract') == 'deal_ledger_v1'
         result['scope_ok'] = not commands or s.get('scope_contract') == 'cycle_scope_v1'
         result['cycle_present'] = bool(s.get('cycle'))
-        phase = s.get('phase')
-        result['phase'] = phase if phase in ('IDLE', 'PAUSED', 'WAIT_START') else 'OTHER_OR_MISSING'
+        result['cycle_kind'] = object_category(s, 'cycle')
+        result['phase'] = phase_category(s)
+        result['phase_allowed_by_installer'] = result['phase'] in UPDATE_PHASES
+        result['stop'] = stop_category(s)
+        result['time_block_kind'] = object_category(s, 'time_block')
         result['nonterminal_commands'] = sum(v.get('status') not in TERMINAL for v in commands.values())
         stage = 'command_journal'
         ids = [r[0] for r in db.execute('SELECT id FROM mt5_commands')]
