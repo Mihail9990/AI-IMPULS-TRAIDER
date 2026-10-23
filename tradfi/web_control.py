@@ -85,7 +85,7 @@ class NativePanel:
         feed=self.feed.view()
         return dict(source=feed['source'],scope=self.scope,revision=s.get('control_revision',0),
             symbol=self.controller.broker.symbol,phase=s['phase'],mode=s['operation_mode'],
-            modules=deepcopy(s['modules']),cycle_id=c.get('id'),recovery=deepcopy(c.get('fixed_recovery')),
+            modules=deepcopy(s['modules']),cycle_id=c.get('id'),recovery=deepcopy(c.get('fixed_recovery') or (s.get('fixed_recovery_carry') or {}).get('fixed_recovery')),
             time_block=deepcopy(s.get('time_block')),feed=feed,quote=feed.get('quote'),timestamp=feed.get('timestamp'),
             orders=deepcopy(snap.get('orders',[])),positions=deepcopy(snap.get('positions',[])),
             journal=[n['text'] for n in s['notifications'][-30:]],

@@ -47,3 +47,14 @@ time latch cancel/restart/protection, fixed reset guard); полный осно�
 отдельные реальные MT5/VPS проверки, которые запрещены текущим заданием.
 
 Финальная дополнительная auth regression: не-ASCII неверный пароль возвращает AUTH_FAILED, а не исключение транспорта; полный основной run 489 OK, network 0.
+
+## Fixed /reset_manual: подтверждённая семантика реализована
+
+Новый review снял прежний blocker reset. Выявлены и исправлены два сценария:
+1. Crash после auto new_cycle_snapshot мог оставить carry вне legacy-цикла: metadata теперь входит в первый атомарный snapshot.
+2. Двойной OCO fill и +10/-10 net давали ложный долг из-за промежуточного clamp: reset считает общий net batch один раз, сохраняет все individual deal/round identities.
+
+Независимый полный runner: 495 tests OK, network0; основной полный runner — то же.
+Полный Chromium набор: 21 tests OK. Confirmed flat proofs, UNKNOWN refusal, debt>0/0,
+costs, commit rollback, restart/duplicate, time latch и отсутствие автоматического входа проверены.
+Подтверждённых неисправленных дефектов review не обнаружил. Реальные сервисы не запускались.

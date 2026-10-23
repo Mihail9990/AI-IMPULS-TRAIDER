@@ -28,14 +28,54 @@ class InteractiveController(Controller):
         c=self.state.get('cycle')
         if c and 'engine' not in c:
             # Existing base-controller cycles always retain their legacy engine.
-            c.update(engine='legacy',operation_mode='auto',module_config=RecoveryConfig().dump())
+            if self.state.get('fixed_recovery_carry'):self._initialize_cycle(c)
+            else:c.update(engine='legacy',operation_mode='auto',module_config=RecoveryConfig().dump())
             self.save('bind_existing_legacy_cycle')
         self.panel_url=None if native else 'http://127.0.0.1:8765/?controller=mock'
 
     def _reset_manual(self,update_id):
-        if (self.state.get('cycle') or {}).get('engine')=='fixed':
-            raise ActionRejected('Fixed recovery emergency reset is disabled: debt write-off is not authorized; debt is retained and reset was not performed')
-        return super()._reset_manual(update_id)
+        c=self.state.get('cycle')
+        if not c or c.get('engine')!='fixed':return super()._reset_manual(update_id)
+        if self.state['phase']!='MANUAL' or not c.get('manual'):
+            raise ActionRejected('/reset_manual requires the unfinished MANUAL cycle')
+        if self.evidence_contract!='per_obligation_v1':
+            raise ActionRejected('Fixed reset requires per-obligation broker evidence')
+        snap,positions,fresh=self._manual_reset_facts(c)
+        recovery=deepcopy(c['fixed_recovery']);records=[];total_net=D(0)
+        prior_debt=number(recovery['debt'])
+        for pid in sorted({d['position_id'] for d in fresh}):
+            exits=[d for d in fresh if d['position_id']==pid]
+            opening=[d for d in snap['deals'] if d['entry']=='IN' and d['position_id']==pid and d.get('cycle_id')==c['id']]
+            if (not opening or sum((number(d['volume']) for d in opening),D(0))!=sum((number(d['volume']) for d in exits),D(0))):
+                raise ActionRejected('Complete opening and closing volume evidence required')
+            opening_net=net_money(opening);net=opening_net+net_money(exits)
+            recovery=settle(recovery,round_id=pid,reason='MANUAL',net=net);total_net+=net
+            for i,d in enumerate(exits):
+                records.append(dict(backend=self.state['backend'],account=self.state['account'],currency=self.state['currency'],
+                    cycle_id=c['id'],position_id=pid,ticket=d['id'],raw=snap['ledger_facts'][d['id']],
+                    net_accounting=dict(contract='full_position_costs_v1',opening_facts=[snap['ledger_facts'][o['id']] for o in opening] if i==0 else [],
+                        closing_net=str(net_money([d])),opening_net=str(opening_net) if i==0 else '0')))
+        debt=max(D(0),prior_debt-total_net)
+        recovery.update(debt=str(debt),active=bool(debt>0))
+        c['reset_position_ids']=sorted(positions);self.save('fixed_manual_reset_evidence')
+        expected=deepcopy(self._durable_state)
+        try:
+            self.state['fixed_recovery_carry']=dict(source_cycle_id=c['id'],engine='fixed',operation_mode=c['operation_mode'],
+                module_config=deepcopy(c['module_config']),fixed_recovery=recovery) if number(recovery['debt'])>0 else None
+            self.state['completed'].append(dict(id=c['id'],currency=c['currency'],target=c['target'],
+                realized=recovery['realized_net'],completion='MANUAL_RESET_RETAINED',profitable_completion=False,
+                recovery_retained=recovery['debt'],written_off_recovery='0',started_at_utc=c['started_at_utc'],reset_at_utc=snap['now']))
+            self.state['seen_deals'].extend(d['id'] for d in fresh)
+            for cmd in self.state['commands'].values():
+                if cmd.get('cycle_id')==c['id'] and cmd['status'] not in TERMINAL:cmd['status']='OBSOLETE'
+            self.state.update(cycle=None,phase='WAIT_START',stop=True,stop_mode='',last_manual_reset=c['id'],require_fresh_candle=True)
+            self.state.pop('cooldown_until',None)
+            if update_id is not None:self.state['telegram_offset']=update_id+1
+            self.notify('Fixed reset confirmed flat. RECOVERY retained='+recovery['debt']+'; no write-off. Waiting for explicit command; independent safety guards retained.')
+            self.store.commit_deals(expected,self.state,records,'fixed_manual_reset',manual_reset=True)
+            self._durable_state=deepcopy(self.state)
+        except BaseException:
+            self.state=self.store.load() or expected;self._durable_state=deepcopy(self.state);raise
 
     def action(self, action):
         """Common authenticated transport boundary; caller uses ActionGateway."""
@@ -45,6 +85,8 @@ class InteractiveController(Controller):
         if kind=='start' and set(action)=={'type','mode'} and action['mode'] in ('auto','semi'): return self.command('/start '+action['mode'])
         if kind=='settings' and set(action)=={'type','mode','engine','recovery'}:
             mode=action['mode'];c=self.state.get('cycle')
+            carry=self.state.get('fixed_recovery_carry')
+            if carry and mode!=carry['operation_mode']:raise ActionRejected('Mode change waits for repayment of retained recovery')
             if mode not in ('auto','semi') or (c and c.get('operation_mode')!=mode):raise ActionRejected('Mode change requires completed cycle')
             if mode==self.state['operation_mode']:return self.configure(action['engine'],action['recovery'])
             snap=self._interactive_guard(entry=True)
@@ -102,6 +144,8 @@ class InteractiveController(Controller):
             self._finish_command(update_id,'mode_selection');return
         if raw in {'/start auto','/start semi'}:
             mode=raw.split()[1];c=self.state.get('cycle')
+            carry=self.state.get('fixed_recovery_carry')
+            if carry and mode!=carry['operation_mode']:raise ActionRejected('Mode change waits for repayment of retained recovery')
             if c and c.get('operation_mode','auto')!=mode: raise ActionRejected('Mode change waits for completed cycle')
             snap=self._interactive_guard(entry=True)
             if self.state.get('time_block') or (c or {}).get('manual'):raise ActionRejected('Time/manual block requires reconciliation')
@@ -143,7 +187,7 @@ class InteractiveController(Controller):
     def configure(self,engine,recovery):
         snap=self._interactive_guard()
         config=self._module_config(engine,recovery,snap)
-        c=self.state.get('cycle')
+        c=self.state.get('cycle') or self.state.get('fixed_recovery_carry')
         self.state['modules']=dict(engine=engine,recovery=config.dump())
         if c and c.get('engine')=='fixed':
             changed=c['module_config']['parts']!=config.parts
@@ -199,7 +243,16 @@ class InteractiveController(Controller):
         c['last_observed_utc']=c['started_at_utc'];self._initialize_cycle(c)
         self.state['phase']='NEXT_PAIR';self.save('semi_cycle_received_quote')
 
+    def _prepare_new_cycle(self,c):
+        self._initialize_cycle(c)
+
     def _initialize_cycle(self,c):
+        carry=self.state.get('fixed_recovery_carry')
+        if 'engine' not in c and carry:
+            c.update(engine='fixed',module_config=deepcopy(carry['module_config']),operation_mode=carry['operation_mode'],
+                fixed_recovery=deepcopy(carry['fixed_recovery']),first=False,recovery=carry['fixed_recovery']['debt'],
+                realized=carry['fixed_recovery']['realized_net'],recovery_source_cycle_id=carry['source_cycle_id'])
+            self.state['fixed_recovery_carry']=None
         if 'engine' not in c:
             c['engine']=self.state['modules']['engine'];c['module_config']=deepcopy(self.state['modules']['recovery'])
             c['operation_mode']=self.state['operation_mode']

@@ -21,11 +21,11 @@ Time-safety ZIP не заменяется. Реальные MT5, Telegram, се�
 | Native chart feed | copy_rates_from_pos XAUUSD.s M1, 120 OHLC; snapshot Bid/Ask; feed version/instance/sequence, raw time и отдельное verified UTC. Future candles отклоняются, старые явно STALE, missing feed DISCONNECTED | Fake MT5 bindings с явно INJECTED_MT5. UI получает native candles, не synthetic fallback. Static/mock режимы по-прежнему явно MOCK |
 | Секундное обновление | Owner capture не чаще 1 секунды, UI poll 1 секунда. Timestamp котировки не продвигается heartbeat; возраст растёт по monotonic, stale/disconnected видны | Fake clock/feed tests. Реальная задержка native terminal API не измерялась; синхронный вызов MT5 выполняет owner, HTTP клиент его не блокирует |
 | График/управление | Отдельная вкладка, цветные BUY/SELL/TP/SL/entry, Bid/Ask, zoom/pan/pinch, tap/drag preview и явный Apply, delete/close confirm; entry read-only. Native зоны связаны с текущими pending | 21 Chromium test, включая native auth/Apply/session/scope. Скриншот INJECTED_MT5 в архиве; данные тестовые |
-| Emergency /reset_manual | Legacy reset понимает положительно подтверждённый CLOSE. Fixed reset явно запрещён до решения по сохранению долга после аварийного MANUAL | Нельзя наследовать старое списание долга. Вопрос передан пользователю: flat сверка позиций и pending, сохранение actual debt, ожидание команды. Обычный confirmed manual close реализован; expiry safety по-прежнему может запрещать CLOSE |
+| Emergency /reset_manual | Fixed reset требует положительных flat/obligation proofs; actual net всех закрытий учитывается атомарно, debt сохраняется в durable carry, прежняя аварийная ветка завершается без списания. WAIT_START/stop ждут явной команды; time_block не снимается. После команды carry атомарно переходит в новый fixed цикл | Native regressions: debt>0/0, costs, двойной OCO fill, restart/duplicate, commit fault, auto snapshot crash, position/pending/UNKNOWN/unavailable отказ. Независимый review пройден |
 
 ## Проверки и воспроизведение
 
-- `python tools/run_offline_tests.py`: **489 tests OK**, `Blocked real network attempts: 0`.
+- `python tools/run_offline_tests.py`: **495 tests OK**, `Blocked real network attempts: 0`.
 - `python tools/test_local_panel.py`: **21 Chromium tests OK**, все HTTP routes перехвачены из файлов/handlers, сервер не запускался.
 - В данной среде backend Python: `/workspace/.venvs/ai-impuls-traider/bin/python`.
   Для системного Python с Playwright использован уже установленный requests через
@@ -43,3 +43,13 @@ Native web config: `web.enabled` boolean (default false), `host` только `1
 
 В ZIP: исходники, patch от time-safety базы, git bundle с дельтой, этот README,
 review, оба testlog и явно тестовые screenshots. Никаких новых реальных credentials.
+
+## Завершение fixed reset
+
+Подтверждённое правило реализовано: никакого списания debt, automatic entry или снятия
+независимых защит. Если остаток положителен, предыдущий mode и fixed engine сохраняются
+до погашения; новая явная команда создаёт новую ветку с сохранённым recovery. При нулевом
+остатке carry отсутствует, но reset по-прежнему не считается прибыльным TP-завершением.
+Архивный diagnostic log удалён из tracked tree (локальная копия сохранена вне репозитория).
+Проверка известных форматов private keys/API tokens не нашла кандидатов в исходниках.
+Публикация разрешена только обычным push кода в GitHub origin/work, не запуск сервисов.
