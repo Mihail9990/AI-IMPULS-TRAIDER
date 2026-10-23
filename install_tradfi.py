@@ -1,5 +1,5 @@
 """Standalone Windows Python 3.13 GUI installer. Only the standard library is needed."""
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 import hashlib
 import io
 import json
@@ -187,6 +187,11 @@ def account_lock(root, config):
     return lock(base/'AI IMPULS TradFi'/'locks'/(digest+'.lock'))
 
 
+def state_lock(root,config):
+    p=state_path(root,config)
+    return lock(str(p)+'.lock') if p.exists() else nullcontext()
+
+
 class Manager:
     def __init__(self,root,fetch=download,runner=subprocess.run,report=print):
         self.root=Path(root).resolve(); self.fetch=fetch; self.runner=runner; self.report=report
@@ -221,7 +226,7 @@ class Manager:
     def prepare_python(self,release):
         env=dict(os.environ)
         for k in list(env):
-            if k.startswith(('PIP_','PYTHON','TRADFI_TELEGRAM_')): env.pop(k)
+            if k.startswith(('PIP_','PYTHON','TRADFI_')): env.pop(k)
         env['PIP_CONFIG_FILE']=os.devnull
         flags={'creationflags':getattr(subprocess,'CREATE_NO_WINDOW',0)} if os.name=='nt' else {}
         def run(args):
@@ -233,10 +238,11 @@ class Manager:
              '--disable-pip-version-check','--no-input','-r',str(release/'code'/'requirements-tradfi-mt5.txt')])
         run([str(python),'-I','-c','import MetaTrader5, requests'])
     def install(self):
-        with lock(self.root/'operation.lock'),account_lock(self.root,self.config()):
+        with lock(self.root/'operation.lock'),account_lock(self.root,self.config()),state_lock(self.root,self.config()):
             old=self.pointer()
             if old['current'] and not self.config_path.is_file(): raise SetupError('Конфигурация потеряна.')
             inspect_state(self.root,self.config())
+            self.backup()
             sha=latest_sha(self.fetch); self.report(f'{REPO}\nwork → {sha}')
             if sha==old['current']:
                 self.current_release(); self.report('Уже установлена актуальная версия.'); return
@@ -245,6 +251,7 @@ class Manager:
                 validate_release(release/'code')
                 if read_json(release/'ready.json')!={'sha':sha,'contract':CONTRACT}:
                     raise SetupError('Папка версии неполная. Проверьте её вручную; ничего не удалено.')
+                self.verify_prepared(release)
                 self.initialize(release/'code')
                 atomic_json(self.root/'current.json',{'current':sha,'previous':old['current']})
                 self.report('Переключено на уже установленную проверенную версию.')
@@ -258,14 +265,46 @@ class Manager:
                 # venv scripts embed absolute paths: build only at final immutable location.
                 stage.rename(release); created=True
                 self.prepare_python(release)
+                self.verify_prepared(release)
                 self.initialize(release/'code')
                 atomic_json(release/'ready.json',{'sha':sha,'contract':CONTRACT})
                 atomic_json(self.root/'current.json',{'current':sha,'previous':old['current']})
             except BaseException:
-                if created: shutil.rmtree(release,ignore_errors=True)
+                if created:
+                    try:referenced=sha in self.pointer().values()
+                    except Exception:referenced=True  # ambiguous pointer outcome: preserve code in place
+                    if not referenced:
+                        failed=self.root/'failed';failed.mkdir(exist_ok=True)
+                        release.rename(failed/(sha+'-'+uuid.uuid4().hex))
                 raise
             finally: shutil.rmtree(stage,ignore_errors=True)
             self.report('Установка завершена. Настройки и база — в папке data. Торговля не включалась.')
+    def verify_prepared(self,release):
+        pass
+
+    def backup(self):
+        """Local consistent SQLite copy; secrets/configs stay in place, never imported."""
+        old=self.pointer()
+        if not old['current']:return None
+        target=self.root/'backups'/('before-update-'+time.strftime('%Y%m%d-%H%M%S')+'-'+uuid.uuid4().hex)
+        target.mkdir(parents=True)
+        p=state_path(self.root,self.config())
+        if p.exists():
+            src=sqlite3.connect(p.as_uri()+'?mode=ro',uri=True)
+            try:
+                with closing(sqlite3.connect(target/'state.sqlite3')) as dst:
+                    deadline=time.monotonic()+45
+                    def progress(*_):
+                        if time.monotonic()>deadline:raise SetupError('Резервное копирование превысило время; версия не переключена.')
+                    src.backup(dst,pages=256,progress=progress,sleep=.05)
+                    if dst.execute('PRAGMA integrity_check').fetchone()[0]!='ok':raise SetupError('Проверка резервной SQLite не пройдена.')
+            finally:src.close()
+        atomic_json(target/'manifest.json',dict(format=1,current=old['current'],previous=old['previous'],
+            code_retained=str(self.version(old['current'])),state_copied=p.exists(),
+            credentials_copied=False,configuration_copied=False))
+        self.report('Резервная SQLite: '+str(target)+'. Прежний код сохранён. Конфигурация и секреты остаются на месте.')
+        return target
+
     def current_release(self):
         sha=self.pointer()['current']
         if not sha: raise SetupError('Сначала установите код.')
@@ -274,18 +313,19 @@ class Manager:
         validate_release(release/'code')
         return release
     def rollback(self):
-        with lock(self.root/'operation.lock'),account_lock(self.root,self.config()):
+        with lock(self.root/'operation.lock'),account_lock(self.root,self.config()),state_lock(self.root,self.config()):
             if not self.config_path.is_file(): raise SetupError('Конфигурация потеряна; rollback заблокирован.')
             pointer=self.pointer(); sha=pointer['previous']
             if not sha: raise SetupError('Предыдущей версии нет.')
             inspect_state(self.root,self.config())
+            self.backup()
             release=self.version(sha); validate_release(release/'code')
             if read_json(release/'ready.json')!={'sha':sha,'contract':CONTRACT}: raise SetupError('Предыдущая версия неполная.')
             atomic_json(self.root/'current.json',{'current':sha,'previous':pointer['current']})
             self.report('Переключён только код. SQLite, конфигурация и логи не откатывались.')
     def launch(self,execute=False):
         # Runtime acquires the same lock for its whole lifetime, including direct launches.
-        with lock(self.root/'operation.lock'),account_lock(self.root,self.config()):
+        with lock(self.root/'operation.lock'),account_lock(self.root,self.config()),state_lock(self.root,self.config()):
             release=self.current_release()
             if not self.config_path.is_file(): raise SetupError('Конфигурация отсутствует.')
             session=uuid.uuid4().hex
