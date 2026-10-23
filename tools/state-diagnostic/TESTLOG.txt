@@ -1,0 +1,23 @@
+Linux / Python 3.12.14; temporary fixtures only; no VPS/MT5.
+test_active_phase_and_unknown_commands (test_diagnostic.DiagnosticTests.test_active_phase_and_unknown_commands) ... ok
+test_all_known_phases_and_installer_allowlist (test_diagnostic.DiagnosticTests.test_all_known_phases_and_installer_allowlist) ... ok
+test_bad_pointer_does_not_hide_database (test_diagnostic.DiagnosticTests.test_bad_pointer_does_not_hide_database) ... ok
+test_binding_mismatch (test_diagnostic.DiagnosticTests.test_binding_mismatch) ... ok
+test_cycle_and_time_block_categories (test_diagnostic.DiagnosticTests.test_cycle_and_time_block_categories) ... ok
+test_duplicate_deals (test_diagnostic.DiagnosticTests.test_duplicate_deals) ... ok
+test_idle_and_repeat_preserve_bytes (test_diagnostic.DiagnosticTests.test_idle_and_repeat_preserve_bytes) ... ok
+test_incompatible_contracts (test_diagnostic.DiagnosticTests.test_incompatible_contracts) ... ok
+test_invalid_database (test_diagnostic.DiagnosticTests.test_invalid_database) ... ok
+test_invalid_snapshot (test_diagnostic.DiagnosticTests.test_invalid_snapshot) ... ok
+test_latest_committed_wal_snapshot_is_read (test_diagnostic.DiagnosticTests.test_latest_committed_wal_snapshot_is_read) ... ok
+test_missing_database_not_created (test_diagnostic.DiagnosticTests.test_missing_database_not_created) ... ok
+test_missing_snapshot (test_diagnostic.DiagnosticTests.test_missing_snapshot) ... ok
+test_orphan_journal_and_ledger_difference (test_diagnostic.DiagnosticTests.test_orphan_journal_and_ledger_difference) ... ok
+test_phase_missing_null_unknown_and_invalid_types (test_diagnostic.DiagnosticTests.test_phase_missing_null_unknown_and_invalid_types) ... ok
+test_readonly_connection_and_no_mutation_statements (test_diagnostic.DiagnosticTests.test_readonly_connection_and_no_mutation_statements) ... ok
+test_stop_categories_do_not_coerce_values (test_diagnostic.DiagnosticTests.test_stop_categories_do_not_coerce_values) ... ok
+
+----------------------------------------------------------------------
+Ran 17 tests in 0.055s
+
+OK
