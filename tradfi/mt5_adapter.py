@@ -387,7 +387,7 @@ class MT5Broker:
         snap=dict(protocol=1,backend=self.backend_id,account=self.account,connected=True,hedging=True,
                   history_complete=True,now=self.clock(),spec=spec,
                   quote=dict(bid=dec(tick.bid),ask=dec(tick.ask),utc_time=tick.time_msc/1000),
-                  candle=dict(id=int(rates[0]['time']),close=dec(rates[0]['close'])),
+                  candle=dict(id=int(rates[0]['time']),open=dec(rates[0]['open']),close=dec(rates[0]['close'])),
                   orders=[order_json(plain(o)) for o in orders],positions=converted_positions,
                   order_history=[order_json(o) for o in self.facts['order'].values()],deals=converted_deals)
         self._check_quote_time(tick, 'snapshot_complete')

@@ -23,7 +23,7 @@ class NativeAPI(TradingAPI):
     def __init__(self):
         super().__init__()
         self.now=int(self.now//60)*60+10
-        self.rates=[dict(time=int(self.now//60)*60-60,close=4000.)]
+        self.rates=[dict(time=int(self.now//60)*60-60,open=3999.,close=4000.)]
     def symbol_info_tick(self,symbol):
         raw=self.now+offset_at(self.now)
         return record(bid=self.tick.bid,ask=self.tick.ask,time=int(raw),time_msc=int(raw*1000))
@@ -118,15 +118,14 @@ class NativeServiceTest(unittest.TestCase):
         self.open(); self.api.rates[0]['time']-=60
         with self.assertRaisesRegex(OSError,'Latest closed'): self.bot.snapshot()
         self.assertFalse(self.api.sends)
-    def test_native_command_exception_never_enters_telegram_or_state(self):
-        from tradfi.telegram import Telegram
-        from test_tradfi_sendlog import HTTP
+    def test_native_command_exception_never_enters_web_or_state(self):
+        from tradfi.control import ActionGateway
         self.position(); self.bot._enter_manual(self.bot.state['cycle'],'MANUAL',self.api.now)
         self.api.close_position(reason=0,profit=-7); self.open(False)
         secret='private-account-token-DO-NOT-EXPORT'
-        tg=Telegram('fake','123',HTTP(),document_session=HTTP()); self.addCleanup(tg.close)
-        tg.incoming.put(dict(update_id=100,message={'chat':{'id':123},'from':{'id':123},'text':'/reset_manual'}))
-        with patch.object(self.broker.api,'history_orders_get',side_effect=OSError(secret)): tg.process(self.bot)
+        gateway=ActionGateway(self.bot)
+        with patch.object(self.broker.api,'history_orders_get',side_effect=OSError(secret)):
+            gateway.apply(dict(id='web-test-100',revision=0,action=dict(type='command',text='/reset_manual')))
         self.assertNotIn(secret,json.dumps(self.store.load()))
         self.assertEqual(self.bot.state['phase'],'MANUAL')
     def test_native_tick_exception_never_enters_notification_or_state(self):
@@ -150,22 +149,23 @@ class NativeServiceTest(unittest.TestCase):
     def test_native_runtime_execute_wires_same_controller_after_all_optins(self):
         stopped=threading.Event()
         api=self.api
-        class TelegramDouble:
-            def __init__(self,*args,**kwargs): self.http=self
+        class PanelDouble:
+            def __init__(self,controller,**kwargs): self.controller=controller
             def updates(self,*args): return []
             def start(self,*args): pass
             def close(self): pass
-            def process(self,controller):
-                controller.command('/start auto'); api.now+=60; api.rates[0]['time']+=60; stopped.set()
+            def step(self):
+                controller=self.controller
+                controller.command('/start auto'); api.now+=60; api.rates[0]['time']+=60; controller.tick(); stopped.set()
         config=dict(self.config,enable_trading=True,execution_contract='cycle_scoped_identity_v1',
                     legacy_ea_removed=True,legacy_state_reconciled=True)
         real_import=importlib.import_module
-        with patch.dict('os.environ',{'TRADFI_TELEGRAM_TOKEN':'fake','TRADFI_TELEGRAM_CHAT_ID':'123','LOCALAPPDATA':str(self.root)}), \
+        with patch.dict('os.environ',{'LOCALAPPDATA':str(self.root)}), \
              patch('tradfi.mt5_adapter.importlib.import_module',side_effect=lambda name,*a,**kw: self.api.module() if name=='MetaTrader5' else real_import(name,*a,**kw)):
-            _run_mt5(config,False,service=True,execute=True,telegram_factory=TelegramDouble,
+            _run_mt5(config,False,service=True,execute=True,panel_factory=PanelDouble,
                 stop_event=stopped,clock=lambda:self.api.now,monotonic=lambda:self.api.now)
-        self.assertEqual(len(self.api.sends),2)  # in-memory API double only
-    def test_runtime_stalled_utc_does_not_delay_telegram_or_tick(self):
+        self.assertEqual(len(self.api.sends),1)  # in-memory API double only
+    def test_runtime_stalled_utc_does_not_delay_web_or_tick(self):
         import time
         stopped, entered, release = threading.Event(), threading.Event(), threading.Event()
         instances=[]; ticks=[]
@@ -176,22 +176,23 @@ class NativeServiceTest(unittest.TestCase):
                 entered.set(); release.wait(2); return original(*a, **kw)
             safety.get=blocked; instances.append(safety)
             return safety
-        class TelegramDouble:
-            def __init__(self,*args,**kwargs): self.http=self
+        class PanelDouble:
+            def __init__(self,controller,**kwargs): self.controller=controller
             def updates(self,*args): return []
             def start(self,*args): pass
             def close(self): pass
-            def process(self,controller):
+            def step(self):
+                controller=self.controller
                 ticks.append(controller); stopped.set()
         config=dict(self.config,enable_trading=True,execution_contract='cycle_scoped_identity_v1',
                     legacy_ea_removed=True,legacy_state_reconciled=True)
         real_import=importlib.import_module
         try:
-            with patch.dict('os.environ',{'TRADFI_TELEGRAM_TOKEN':'fake','TRADFI_TELEGRAM_CHAT_ID':'123','LOCALAPPDATA':str(self.root)}), \
+            with patch.dict('os.environ',{'LOCALAPPDATA':str(self.root)}), \
                  patch('tradfi.time_safety.TimeSafety',side_effect=safety_factory), \
                  patch('tradfi.mt5_adapter.importlib.import_module',side_effect=lambda name,*a,**kw: self.api.module() if name=='MetaTrader5' else real_import(name,*a,**kw)):
                 start=time.monotonic()
-                _run_mt5(config,False,service=True,execute=True,telegram_factory=TelegramDouble,
+                _run_mt5(config,False,service=True,execute=True,panel_factory=PanelDouble,
                     stop_event=stopped,clock=lambda:self.api.now,monotonic=lambda:self.api.now)
                 self.assertLess(time.monotonic()-start,1.)
                 self.assertTrue(ticks); self.assertTrue(entered.wait(1))
@@ -245,25 +246,26 @@ class NativeServiceTest(unittest.TestCase):
         self.assertNotIn(self.config['terminal_path'],text)
         self.assertEqual(sum(d['volume'] for d in result['deals'] if d['entry']==0),.01)
         self.assertEqual({d['position_id'] for d in result['deals']},{5001})
-    def test_runtime_readonly_wiring_telegram_and_native_import(self):
+    def test_runtime_readonly_wiring_web_and_native_import(self):
         stopped=threading.Event(); observed=[]
-        class TelegramDouble:
-            def __init__(self,*args,**kwargs): self.http=self; observed.append(kwargs)
+        class PanelDouble:
+            def __init__(self,controller,**kwargs): self.controller=controller; observed.append(kwargs)
             def updates(self,*args): return []
             def start(self,*args): pass
             def close(self): pass
-            def process(self,controller):
+            def step(self):
+                controller=self.controller
                 self.controller=controller
                 controller.command('/status'); controller.command('/settings')
-                with self_test.assertRaisesRegex(ValueError,'READ_ONLY'): controller.command('/start')
+                with self_test.assertRaisesRegex(ValueError,'Execution unavailable'): controller.command('/start')
                 observed.append(controller.status()); stopped.set()
         self_test=self
         # A stale enable_trading=true config cannot activate without --execute.
         real_import=importlib.import_module
-        with patch.dict('os.environ',{'TRADFI_TELEGRAM_TOKEN':'fake','TRADFI_TELEGRAM_CHAT_ID':'123','LOCALAPPDATA':str(self.root)}), \
+        with patch.dict('os.environ',{'LOCALAPPDATA':str(self.root)}), \
              patch('tradfi.mt5_adapter.importlib.import_module',side_effect=lambda name,*a,**kw: self.api.module() if name=='MetaTrader5' else real_import(name,*a,**kw)):
             _run_mt5(dict(self.config,enable_trading=True),False,service=True,
-                telegram_factory=TelegramDouble,stop_event=stopped,clock=lambda:self.api.now,monotonic=lambda:self.api.now)
+                panel_factory=PanelDouble,stop_event=stopped,clock=lambda:self.api.now,monotonic=lambda:self.api.now)
         self.assertIn('READ_ONLY',observed[1]); self.assertEqual(self.api.initialized,1)
         self.assertFalse(self.api.sends); self.assertFalse(self.api.checks)
         with StoreContext(self.config['state_file']) as store:

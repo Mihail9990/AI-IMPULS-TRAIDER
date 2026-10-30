@@ -3,10 +3,10 @@
  const $ = id => document.getElementById(id);
  const colors={buy:'#5ba8ff',sell:'#eaaa5c',entry:'#c3abff',tp:'#5cdbb4',sl:'#ff758d'};
  const labels={buy:'BUY pending',sell:'SELL pending',entry:'Entry · только чтение',tp:'Take profit',sl:'Stop loss'};
- const initialSettings={mode:'semi',engine:'fixed',parts:3,range:3,'sl-distance':3,continuation:1};
+ const initialSettings={mode:'semi',engine:'fixed',parts:3,range:3,'sl-distance':3,continuation:1,opposite:3};
  const state={scenario:'position',levels:{entry:4139,tp:4140,sl:4136},settings:{...initialSettings},revision:0,preview:null,settingsPreview:null,bid:4139.45,ask:4139.55,lastTick:Date.now(),connected:true,stream:true,ticks:0,zoom:1,panX:0,panY:0};
  let candles=Array.from({length:70},(_,i)=>{const c=4137.7+i*.022+Math.sin(i*.4)*.35;return {open:c-.08*Math.cos(i),close:c,high:c+.13,low:c-.17};});
- const connectionMode=new URLSearchParams(location.search).get('controller'),native=connectionMode==='native',controlled=native||connectionMode==='mock';
+ const connectionMode=document.body.dataset.controller||new URLSearchParams(location.search).get('controller'),native=connectionMode==='native',controlled=native||connectionMode==='mock';
  const pendingStorageKey=native?'tradfi-native-pending-request':'mock-pending-request';
  if(native){candles=[];Object.assign(state,{scenario:'waiting',levels:{},bid:null,ask:null,lastTick:0,connected:false});}
 let backendView=null,inflight=false,pendingRequest=null,pendingScope=null,settingsLoadedScope=null;
@@ -57,7 +57,7 @@ let backendView=null,inflight=false,pendingRequest=null,pendingScope=null,settin
  svg.addEventListener('pointermove',e=>{if(!pointers.has(e.pointerId)||!gesture)return;pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});if(gesture.kind==='pinch'){if(pointers.size===2){const a=[...pointers.values()],dist=Math.hypot(a[0].x-a[1].x,a[0].y-a[1].y);state.zoom=Math.max(.5,Math.min(4,gesture.zoom*dist/Math.max(1,gesture.distance)));render();}return;}const dx=e.clientX-gesture.x,dy=e.clientY-gesture.y;if(Math.hypot(dx,dy)>7)gesture.moved=true;if(!gesture.moved)return;if(gesture.kind==='pan'){state.panX=gesture.panX+dx/svg.getBoundingClientRect().width*1000;state.panY=gesture.panY+dy/svg.getBoundingClientRect().height*gesture.span;render();}else if(gesture.key!=='entry'){state.preview={kind:'move',key:gesture.key,value:priceAt(e.clientY),old:state.levels[gesture.key],revision:state.revision,backend:backendView?JSON.parse(JSON.stringify(backendView)):null};render();}});
  const end=e=>{if(!pointers.has(e.pointerId))return;pointers.delete(e.pointerId);if(!gesture)return;if(gesture.kind==='pinch'){if(!pointers.size)gesture=null;return;}if(e.type==='pointercancel'){state.preview=null;gesture=null;showPreview();return;}if(gesture.kind==='level'&&gesture.key!=='entry'){if(state.preview&&gesture.moved)showPreview();else previewLevel(gesture.key,state.levels[gesture.key]);}else if(gesture.kind==='pan'&&!gesture.moved)createAt(priceAt(e.clientY));gesture=null;};svg.addEventListener('pointerup',end);svg.addEventListener('pointercancel',end);
  svg.addEventListener('wheel',e=>{e.preventDefault();state.zoom=Math.max(.5,Math.min(4,state.zoom*(e.deltaY<0?1.1:.9)));render();},{passive:false});
- $('preview-settings').onclick=()=>{const next={};for(const key of Object.keys(initialSettings)){const val=$(key).value;next[key]=['mode','engine'].includes(key)?val:Number(val);}if(!Number.isInteger(next.parts)||next.parts<1||next.parts>100||['range','sl-distance','continuation'].some(k=>!Number.isFinite(next[k])||next[k]<=0)){$('settings-error').textContent='Проверьте положительные расстояния и целое N от 1 до 100.';return;}$('settings-error').textContent='';state.settingsPreview=next;$('settings-diff').textContent=Object.keys(next).map(k=>`${k}: ${state.settings[k]} → ${next[k]}`).join('\n')+'\nТолько интерфейс MOCK. Перерасчёт стратегии не выполняется.';$('settings-preview').hidden=false;};
+ $('preview-settings').onclick=()=>{const next={};for(const key of Object.keys(initialSettings)){const val=$(key).value;next[key]=['mode','engine'].includes(key)?val:Number(val);}if(!Number.isInteger(next.parts)||next.parts<1||next.parts>100||['range','sl-distance','continuation','opposite'].some(k=>!Number.isFinite(next[k])||next[k]<=0)){$('settings-error').textContent='Проверьте положительные расстояния и целое N от 1 до 100.';return;}$('settings-error').textContent='';state.settingsPreview=next;$('settings-diff').textContent=Object.keys(next).map(k=>`${k}: ${state.settings[k]} → ${next[k]}`).join('\n')+'\nТолько интерфейс MOCK. Перерасчёт стратегии не выполняется.';$('settings-preview').hidden=false;};
  $('cancel-settings').onclick=()=>{state.settingsPreview=null;$('settings-preview').hidden=true;};$('apply-settings').onclick=async()=>{if(!state.settingsPreview||inflight)return;if(controlled){await applyBackendSettings();return;}state.settings=state.settingsPreview;state.settingsPreview=null;$('settings-preview').hidden=true;$('mode-value').textContent=state.settings.mode==='semi'?'Полуавтоматический':'Автоматический';log('MOCK настройки подтверждены. Конфигурация бота не изменена.');};$('clear-log').onclick=()=>$('log').replaceChildren();
  document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{const chart=button.dataset.tab==='chart';$('market').hidden=!chart;$('overview').hidden=chart;document.querySelectorAll('[data-tab]').forEach(b=>b.setAttribute('aria-selected',String(b===button)));});
  const stream=document.createElement('button');stream.id='toggle-stream';stream.textContent='Пауза mock потока';stream.onclick=()=>{state.stream=!state.stream;stream.textContent=state.stream?'Пауза mock потока':'Продолжить mock поток';updateFreshness();};document.querySelector('.chart-toolbar').append(stream);
@@ -100,7 +100,7 @@ let backendView=null,inflight=false,pendingRequest=null,pendingScope=null,settin
  async function applyBackendSettings(){
   try{const next=state.settingsPreview;
    if(native&&state.settingsScope!==backendView?.scope)throw Error('Контекст счёта изменился; создайте новый preview.');
-   const recovery={...backendView.modules.recovery,parts:next.parts,after_sl:String(next.range),fixed_sl:String(next['sl-distance']),continuation:String(next.continuation)};
+   const recovery={...backendView.modules.recovery,parts:next.parts,after_sl:String(next.range),fixed_sl:String(next['sl-distance']),continuation:String(next.continuation),opposite:String(next.opposite)};
    await postAction({type:'settings',mode:next.mode,engine:next.engine,recovery},state.settingsRevision);
    state.settingsPreview=null;$('settings-preview').hidden=true;await pollBackend();
   }catch(error){$('settings-error').textContent=error.message;}
@@ -124,15 +124,47 @@ let backendView=null,inflight=false,pendingRequest=null,pendingScope=null,settin
    state.levels=Object.fromEntries(v.orders.map(o=>[o.side.toLowerCase(),Number(o.price)]));
    const pos=v.positions[0];state.scenario=pos?'position':v.orders.length?'pending':'waiting';
    if(pos)Object.assign(state.levels,{entry:Number(pos.entry),tp:Number(pos.tp),sl:Number(pos.sl)});
-   state.settings={mode:v.mode,engine:v.modules.engine,parts:v.modules.recovery.parts,range:Number(v.modules.recovery.after_sl),'sl-distance':Number(v.modules.recovery.fixed_sl),continuation:Number(v.modules.recovery.continuation)};
+   state.settings={mode:v.mode,engine:v.modules.engine,parts:v.modules.recovery.parts,range:Number(v.modules.recovery.after_sl),'sl-distance':Number(v.modules.recovery.fixed_sl),continuation:Number(v.modules.recovery.continuation),opposite:Number(v.modules.recovery.opposite)};
    if(settingsLoadedScope!==(v.scope??'mock')){for(const key of Object.keys(initialSettings))$(key).value=state.settings[key];settingsLoadedScope=v.scope??'mock';}
+   if(native)updateOperations(v);
    render();$('phase-value').textContent=(v.cycle_id?v.cycle_id.slice(0,8):'—')+' / '+v.phase;
-   $('debt-value').textContent=(v.recovery?v.recovery.debt:'0')+(native?' · валюта счёта':' MOCK');
+   $('debt-value').textContent=(v.recovery?v.recovery.debt:(v.legacy_recovery??'0'))+(native?' · валюта счёта':' MOCK');
    $('parts-value').textContent=(v.recovery?v.recovery.parts_remaining:'—')+' оставшихся частей';
    $('mode-value').textContent=v.mode==='semi'?'Полуавтоматический':'Автоматический';
    document.querySelector('.summary .amber').textContent=v.time_block?'TIME BLOCK':native?'NATIVE GUARDS':'FAKE ADAPTER ONLY';
    document.querySelector('.summary .amber').nextElementSibling.textContent=v.time_block?v.time_block.reason:native?v.feed.status:'Нет MT5 · только искусственный брокер';
   }catch(error){state.connected=false;}finally{state.polling=false;updateFreshness();}
+ }
+ let operationsScope=null;
+ function updateOperations(v){
+  if(!document.getElementById('operations'))return;
+  $('service-mode').textContent=v.read_only?'READ_ONLY · торговля отключена':(v.stopped?'Новые входы остановлены':'EXECUTION · стратегия активна');
+  if(operationsScope!==v.scope){
+   const fields=$('strategy-fields');fields.replaceChildren();
+   const names={INITIAL_ENTRY_DISTANCE:'Начальный STOP: расстояние от Close',INITIAL_SL_DISTANCE:'Начальный SL',INITIAL_TP_DISTANCE:'Начальный TP',INITIAL_SIZE:'Объём',CYCLE_COOLDOWN_SECONDS:'Пауза после цикла, секунд',BRANCH1_RANGE:'Legacy: диапазон первой recovery',BRANCH1_SL_DISTANCE:'Legacy: SL первой recovery',BASE_TP_DISTANCE:'TP для semi',STEPPED_TP_ACTIVATION:'Legacy: активация ступенчатого SL',STEPPED_TP_STEP:'Legacy: шаг SL',RANGE_AFTER_PARTIAL_TP:'Legacy: диапазон после частичного TP',SL_DISTANCE_AFTER_PARTIAL_TP:'Legacy: SL после частичного TP',RANGE_AFTER_SL:'Legacy: диапазон после SL',SL_DISTANCE_AFTER_SL:'Legacy: SL после SL'};
+   for(const [key,value] of Object.entries(v.settings)){const label=document.createElement('label');label.className='field';label.textContent=names[key]??key;const input=document.createElement('input');input.id='strategy-'+key;input.value=value;input.inputMode='decimal';label.append(input);fields.append(label);}
+   operationsScope=v.scope;
+  }
+  $('server-journal').textContent=v.journal.join('\n');
+ }
+ function createOperations(){
+  const section=document.createElement('section');section.id='operations';section.className='card';
+  section.innerHTML=`<h2>Управление ботом</h2><p id="service-mode">Авторизуйтесь для управления</p>
+   <div class="operation-buttons"><button id="start-auto">Старт AUTO</button><button id="start-semi">Старт SEMI</button><button id="stop-bot">Стоп новых входов</button><button id="resume-time">Проверить время и продолжить…</button><button id="reset-manual">Подтвердить ручную сверку…</button><button id="logout">Выйти</button></div>
+   <p>Стоп отменяет ожидающий вход; открытая позиция завершает цикл. Бот на VPS работает и при закрытом браузере.</p>
+   <details><summary>Настройки стратегии</summary><div id="strategy-fields" class="settings-grid"></div><button id="save-strategy">Проверить и сохранить настройки…</button><p>Расстояния в единицах цены инструмента. Новые настройки действуют со следующего цикла; текущий снимок и долг сохраняются.</p></details>
+   <details><summary>Ручные уровни SEMI</summary><label class="field">Представление<select id="trigger-format"><option value="prices">Цена</option><option value="ranges">Расстояние от Ask / Bid</option></select></label><label class="field">BUY (пусто — не создавать)<input id="trigger-buy" inputmode="decimal"></label><label class="field">SELL (пусто — не создавать)<input id="trigger-sell" inputmode="decimal"></label><button id="send-triggers">Проверить уровни…</button></details>
+   <p id="operation-error" role="alert"></p><details><summary>События и ошибки бота</summary><pre id="server-journal"></pre></details>`;
+  document.querySelector('header').after(section);
+  const send=async(action,message)=>{if(!backendView){$('operation-error').textContent='Нет авторизованного снимка';return;}const revision=backendView.revision;if(!confirm(message))return;try{await postAction(action,revision);$('operation-error').textContent='Команда отправлена; результат появится после сверки.';await pollBackend();}catch(e){$('operation-error').textContent=e.message;}};
+  $('start-auto').onclick=()=>send({type:'start',mode:'auto'},'Начать AUTO? Ожидаем закрытие текущей M1, затем один STOP по её направлению.');
+  $('start-semi').onclick=()=>send({type:'start',mode:'semi'},'Начать SEMI и ожидать ручных уровней?');
+  $('stop-bot').onclick=()=>send({type:'command',text:'/stop'},'Остановить новые входы? Ожидающий STOP будет отменён; открытая позиция завершает цикл.');
+  $('resume-time').onclick=()=>send({type:'command',text:'/resume_time'},'Продолжить после свежей проверки времени? Другие блокировки сохраняются.');
+  $('reset-manual').onclick=()=>send({type:'command',text:'/reset_manual'},'Подтвердить ручную сверку? Требуется доказанное отсутствие позиций и ордеров. '+(backendView?.cycle_engine==='legacy'?'LEGACY: остаток цели recovery будет списан по существующим правилам ручного сброса. Это не прибыль. ':'FIXED: долг восстановления сохраняется. ')+'Торговля сама не запускается.');
+  $('save-strategy').onclick=()=>{if(!backendView)return;const values=Object.keys(backendView.settings).map(k=>k+'='+$('strategy-'+k).value.trim());send({type:'command',text:'/SETTINGS:\n'+values.join('\n')},'Сохранить со следующего цикла?\n'+values.join('\n'));};
+  $('send-triggers').onclick=()=>{const levels={};for(const side of ['BUY','SELL']){const value=$('trigger-'+side.toLowerCase()).value.trim();if(value)levels[side]=value;}send({type:'triggers',representation:$('trigger-format').value,levels},'Установить/заменить ручные уровни?\n'+JSON.stringify(levels));};
+  $('logout').onclick=async()=>{await fetch('/api/logout',{method:'POST',headers:{'Content-Type':'application/json',...apiHeaders()},body:'{}'});location.reload();};
  }
  if(controlled){
   pendingRequest=localStorage.getItem(pendingStorageKey);if(native)pendingScope=localStorage.getItem(pendingStorageKey+'-scope');
@@ -145,6 +177,7 @@ let backendView=null,inflight=false,pendingRequest=null,pendingScope=null,settin
   $('journal').querySelector('.card-head p').textContent='Журнал локальных команд; состояние хранится backend процесса.';
   document.querySelector('footer').textContent='Локальный MOCK контроллер без credentials и MT5. Не предназначен для публичного размещения.';
   if(native){
+   createOperations();
    document.querySelector('.demo-banner').textContent='NATIVE MT5 · ожидание авторизации и данных';
    document.querySelector('.aside-note').textContent='Контроллер работает независимо от страницы. Все изменения требуют Apply и проверки брокерского состояния.';
    document.querySelector('h1 span').textContent='NATIVE';document.querySelector('.fixture-label').textContent='MT5 / M1';

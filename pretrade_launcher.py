@@ -88,7 +88,7 @@ def gui():
         messagebox.showerror('Среда','Нужен Windows, Python 3.13 x64 с Tcl/Tk. Ничего не запущено.');app.destroy();return
     root=Path(os.environ['LOCALAPPDATA'])/'AI_IMPULS_TRADFI_Manager'
     events=queue.Queue();manager=PretradeManager(root,Path(__file__).resolve().parent,report=lambda s:events.put(s))
-    ttk.Label(app,text='Только проверки. Реальный запуск и Telegram-сервис недоступны.',wraplength=730).pack(pady=8)
+    ttk.Label(app,text='Только проверки. Реальный запуск и торговый сервис недоступны.',wraplength=730).pack(pady=8)
     ttk.Label(app,text='Существующие данные: '+str(root/'data'),wraplength=730).pack(pady=4)
     output=tk.Text(app,height=16,wrap='word',state='disabled');output.pack(fill='both',expand=True,padx=10,pady=8)
     busy=False;buttons=[]

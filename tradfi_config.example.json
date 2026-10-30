@@ -10,5 +10,10 @@
   "legacy_ea_removed": false,
   "legacy_state_reconciled": false,
   "state_file": "tradfi_mt5_state.sqlite3",
-  "log_file": "tradfi_mt5.log"
+  "log_file": "tradfi_mt5.log",
+  "web": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 8765
+  }
 }

@@ -49,7 +49,7 @@ class Spec:
             if key not in {'INITIAL_SIZE', 'CYCLE_COOLDOWN_SECONDS'} and D(value) % self.tick_size:
                 raise ValueError(key + ' violates tick size; no rounding')
         minimum = self.stops_level * self.point
-        for key in ('BRANCH1_RANGE', 'BRANCH1_SL_DISTANCE', 'BASE_TP_DISTANCE',
+        for key in ('INITIAL_ENTRY_DISTANCE', 'INITIAL_SL_DISTANCE', 'INITIAL_TP_DISTANCE', 'BRANCH1_RANGE', 'BRANCH1_SL_DISTANCE', 'BASE_TP_DISTANCE',
                     'RANGE_AFTER_PARTIAL_TP', 'SL_DISTANCE_AFTER_PARTIAL_TP',
                     'RANGE_AFTER_SL', 'SL_DISTANCE_AFTER_SL'):
             if getattr(settings, key) < minimum:

@@ -52,7 +52,7 @@ class BybitInspectTest(unittest.TestCase):
                            enable_trading=False)
         self.raw = 1791820347.418
         self.set_tick(self.raw)
-        self.api.rates = [dict(time=t, close=4000.) for t in (1791820200,1791820260,1791820320)]
+        self.api.rates = [dict(time=t, open=3999.,close=4000.) for t in (1791820200,1791820260,1791820320)]
         self.broker = MT5Broker(self.config, api=self.api, clock=lambda:self.api.now,
                                monotonic=lambda:self.mono)
         self.broker.connect(); self.addCleanup(self.broker.close)
@@ -119,7 +119,7 @@ class BybitInspectTest(unittest.TestCase):
         for stamps in ((1791809400,1791809460,1791809520),
                        (1791820200,1791820260,1791820320.5),
                        (1791820260,1791820320,1791820380)):
-            self.api.rates=[dict(time=t,close=4000.) for t in stamps]
+            self.api.rates=[dict(time=t,open=3999.,close=4000.) for t in stamps]
             with self.assertRaises(TimeProfileError): self.broker.preflight()
 
     def test_slow_reads_preserve_original_tick_freshness_guard(self):

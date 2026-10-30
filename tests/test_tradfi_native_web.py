@@ -77,7 +77,7 @@ class FeedTest(unittest.TestCase):
 class RuntimeAPI(NativeAPI):
     def __init__(self):
         super().__init__();self.now=int(self.now//60)*60+10
-        self.rates=[dict(time=int(self.now//60)*60-60,close=4000.)]
+        self.rates=[dict(time=int(self.now//60)*60-60,open=3999.,close=4000.)]
     def symbol_info_tick(self,symbol):
         stamp=self.now+offset_at(self.now)
         return record(bid=self.tick.bid,ask=self.tick.ask,time=int(stamp),time_msc=int(stamp*1000))
@@ -85,7 +85,7 @@ class RuntimeAPI(NativeAPI):
         return [dict(r,time=r['time']+offset_at(r['time'])) for r in super().copy_rates_from_pos(*args)]
 
 class RuntimePipelineTest(unittest.TestCase):
-    def test_runtime_telegram_controller_adapter_fill_modify_close_and_feed(self):
+    def test_runtime_web_controller_adapter_fill_modify_close_and_feed(self):
         api=RuntimeAPI();panels=[];bots=[];stages=[]
         class Stop:
             done=False
@@ -93,17 +93,14 @@ class RuntimePipelineTest(unittest.TestCase):
             def wait(self,*args):pass
         stop=Stop()
         class Panel(NativePanel):
+            n=0
             def start(self):panels.append(self) # no real sockets
-        class Telegram:
-            def __init__(self,*args,**kwargs):self.http=self;self.n=0
-            def updates(self,*args):return []
-            def start(self,*args):pass
-            def close(self):pass
-            def process(self,bot):
+            def step(self):
+                super().step()
+                bot=self.controller
                 bots.append(bot);self.n+=1
                 if self.n>20:raise AssertionError('runtime failed to settle')
                 if self.n==1:
-                    bot.command('/start');assert bot.state['notifications'][-1]['reply_markup']['inline_keyboard']
                     bot.command('/start semi');bot.triggers('ranges',{'BUY':'3','SELL':'3'});stages.append('semi')
                 elif self.n==3:api.fill();stages.append('fill')
                 elif self.n==6:
@@ -119,11 +116,35 @@ class RuntimePipelineTest(unittest.TestCase):
                 symbol='XAUUSD.s',magic=25101102,terminal_path='C:/Program Files/MetaTrader 5/terminal64.exe',enable_trading=True,
                 execution_contract='cycle_scoped_identity_v1',legacy_ea_removed=True,legacy_state_reconciled=True,
                 state_file=str(Path(tmp)/'state.db'),log_file=str(Path(tmp)/'log'),web={'enabled':True})
-            with patch.dict('os.environ',{'TRADFI_TELEGRAM_TOKEN':'fake','TRADFI_TELEGRAM_CHAT_ID':'123','LOCALAPPDATA':tmp}),patch('tradfi.time_safety.TimeSafety',side_effect=verified_time):
-                _run_mt5(config,False,service=True,execute=True,api=api,telegram_factory=Telegram,panel_factory=Panel,
+            with patch.dict('os.environ',{'LOCALAPPDATA':tmp}),patch('tradfi.time_safety.TimeSafety',side_effect=verified_time):
+                _run_mt5(config,False,service=True,execute=True,api=api,panel_factory=Panel,
                     stop_event=stop,clock=lambda:api.now,monotonic=lambda:api.now)
             self.assertEqual(stages,['semi','fill','modify','close']);self.assertFalse(api.positions)
             self.assertEqual(panels[0].mailbox.view()['source'],'INJECTED_MT5')
             self.assertEqual(panels[0].mailbox.view()['feed']['status'],'FRESH')
             self.assertEqual(len([s for s in api.sends if s['action']==api.TRADE_ACTION_DEAL]),1)
             self.assertTrue(any(s['action']==api.TRADE_ACTION_SLTP for s in api.sends))
+
+class WebServiceSecurityTest(unittest.TestCase):
+    def test_public_https_origin_secure_cookie_and_reject_cross_origin(self):
+        box=OwnerMailbox();t=WebTransport(box,password='offline-test-credential-not-real-123',public_origin='https://bot.example.org')
+        headers={'Host':'127.0.0.1:8765','Origin':'https://bot.example.org','X-Local-Control':'1','Content-Type':'application/json'}
+        code,_,extra=t.request('POST','/api/login',headers,json.dumps({'password':'offline-test-credential-not-real-123'}).encode())
+        self.assertEqual(code,200);self.assertIn('; Secure',extra['Set-Cookie']);self.assertIn('HttpOnly',extra['Set-Cookie'])
+        headers['Cookie']=extra['Set-Cookie'].split(';')[0];headers['Origin']='https://attacker.example.org'
+        self.assertEqual(t.request('GET','/api/state',headers)[0],403)
+    def test_public_origin_rejects_paths_credentials_http_and_remote_bind(self):
+        for origin in ['http://example.org','https://example.org/','https://user:pass@example.org','https://example.org?x=1']:
+            with self.subTest(origin=origin),self.assertRaises(ValueError):WebTransport(OwnerMailbox(),public_origin=origin)
+        with self.assertRaises(ValueError):WebTransport(OwnerMailbox(),authority='0.0.0.0:8765')
+    def test_missing_password_stops_service_before_mt5_or_store(self):
+        config=dict(expected_login=111111111,expected_server='Bybit-Live-6',symbol='XAUUSD.s')
+        with patch.dict('os.environ',{},clear=True),patch('tradfi.runtime.Store') as store,patch('tradfi.mt5_adapter.MT5Broker.connect') as connect:
+            with self.assertRaisesRegex(ValueError,'TRADFI_WEB_PASSWORD'):_run_mt5(config,False,service=True)
+            store.assert_not_called();connect.assert_not_called()
+    def test_no_cookie_or_csrf_header_cannot_submit(self):
+        t=WebTransport(OwnerMailbox(),password='offline-test-credential-not-real-123')
+        headers={'Host':'127.0.0.1:8765','Content-Type':'application/json'}
+        self.assertEqual(t.request('POST','/api/action',headers,b'{}')[0],403)
+        headers['X-Local-Control']='1'
+        self.assertEqual(t.request('POST','/api/action',headers,b'{}')[0],401)

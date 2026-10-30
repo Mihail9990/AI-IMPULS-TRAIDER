@@ -41,13 +41,13 @@ def account_lock_path(config):
 
 
 def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=False, execute=False,
-             api=None, telegram_factory=None, stop_event=None, clock=time.time, monotonic=time.monotonic,
+             api=None, stop_event=None, clock=time.time, monotonic=time.monotonic,
              config_path=None, panel_factory=None):
     from .mt5_adapter import MT5Broker
     config = dict(config)
-    credentials_file = config.pop('telegram_credentials_file', None)
+    config.pop('telegram_credentials_file', None)  # obsolete local credential reference is ignored
     if inspect:
-        # No SQLite, account owner lock, Telegram imports or credentials. Never inherit execution opt-in.
+        # No SQLite, account owner lock, web listener or credentials. Never inherit execution opt-in.
         config = dict(config, enable_trading=False)
         broker = MT5Broker(config,api=api,clock=clock,monotonic=monotonic)
         try:
@@ -90,8 +90,9 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
         raise ValueError('Explicit positive expected_login is required for a persistent service')
     if not config.get('expected_server') or not config.get('symbol'):
         raise ValueError('Explicit expected_server and symbol are required for execution')
-    from .credentials import load_telegram_credentials
-    token, chat, user = load_telegram_credentials(credentials_file, config_path=config_path)
+    if config.get('web',{}).get('enabled',True) and panel_factory is None:
+        password=os.environ.get('TRADFI_WEB_PASSWORD','')
+        if len(password)<32:raise ValueError('Set a strong TRADFI_WEB_PASSWORD of at least 32 characters before service startup')
     state_file = Path(config.get('state_file', 'tradfi_mt5_state.sqlite3')).resolve()
     # Both locks precede Store construction and ANY MT5 initialize/connect call.
     with ExitStack() as resources:
@@ -114,14 +115,14 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
         panel=None
         web_config=config.get('web',{})
         if not isinstance(web_config,dict):raise ValueError('web must be a configuration object')
-        if not isinstance(web_config.get('enabled',False),bool):raise ValueError('web.enabled must be boolean')
-        if web_config.get('enabled',False):
+        if not isinstance(web_config.get('enabled',True),bool):raise ValueError('web.enabled must be boolean')
+        if web_config.get('enabled',True):
             if web_config.get('host','127.0.0.1')!='127.0.0.1':raise ValueError('Web server requires loopback')
             port=web_config.get('port',8765)
             if isinstance(port,bool) or not isinstance(port,int) or not 1024<=port<=65535:raise ValueError('Invalid loopback port')
             from .web_control import NativePanel
             authority='127.0.0.1:'+str(port)
-            panel=(panel_factory or NativePanel)(controller,authority=authority,password=os.environ.get('TRADFI_WEB_PASSWORD'),clock=clock,monotonic=monotonic)
+            panel=(panel_factory or NativePanel)(controller,authority=authority,password=os.environ.get('TRADFI_WEB_PASSWORD'),clock=clock,monotonic=monotonic,public_origin=web_config.get('public_origin'))
             resources.callback(panel.close)
             panel.start()
             controller.panel_url='http://'+authority+'/?controller=native'
@@ -134,28 +135,15 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
         logging.getLogger().addHandler(handler)
         logging.getLogger().setLevel(logging.INFO)
         resources.callback(logging.getLogger().removeHandler, handler)
-        from .telegram import Telegram
-        telegram = (telegram_factory or Telegram)(token, chat, user_id=user,
-                            log_path=log_path)
-        resources.callback(telegram.http.close)
-        resources.callback(telegram.close)
-        controller.notify('TradFi READ_ONLY service: native observations; /start and trading mutations disabled.'
-                          if broker.read_only else 'TradFi EXECUTION service: explicit trading activation enabled.')
+        controller.notify('TradFi READ_ONLY: наблюдения; торговые действия отключены.'
+                          if broker.read_only else 'TradFi EXECUTION: торговые действия разрешены конфигурацией.')
         controller.save('service_started')
-        if not controller.state.get('telegram_initialized'):
-            backlog = telegram.updates(-1)
-            if backlog:
-                controller.state['telegram_offset'] = max(int(u['update_id']) for u in backlog) + 1
-            controller.state['telegram_initialized'] = True
-            controller.save('telegram_first_start_discard_backlog')
-        telegram.start(controller.state['telegram_offset'])
         next_time_check = 0.
         while stop_event is None or not stop_event.is_set():
             safety = getattr(broker, 'time_safety', None)
             if safety is not None and not broker.read_only and monotonic() >= next_time_check:
                 controller.refresh_time()
                 next_time_check = monotonic() + 30.
-            telegram.process(controller)
             try:
                 controller.tick()
                 if panel is not None:panel.step()
@@ -170,10 +158,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description='TradFi MT5 runner')
     parser.add_argument('--mode', choices=('simulate', 'mt5', 'gateway'), default='simulate')
     parser.add_argument('--config', default='tradfi_config.json')
-    parser.add_argument('--inspect', action='store_true', help='Read-only MT5 preflight; no SQLite/Telegram/trading')
+    parser.add_argument('--inspect', action='store_true', help='Read-only MT5 preflight; no SQLite/web/trading')
     parser.add_argument('--inspect-evidence', action='store_true', help='Read-only obligation evidence summary; never execute')
     parser.add_argument('--journal-snapshot', help='Existing compatible offline rollback-journal SQLite snapshot for evidence audit')
-    parser.add_argument('--service',action='store_true',help='Native MT5 + Telegram service; trading disabled by default')
+    parser.add_argument('--service',action='store_true',help='Native MT5 + web service; trading disabled by default')
     parser.add_argument('--execute',action='store_true',help='Explicit execution activation; requires --service and config opt-ins')
     args = parser.parse_args(argv)
     if (args.service and (args.mode!='mt5' or args.inspect or args.inspect_evidence)
@@ -221,7 +209,7 @@ def main(argv=None):
                         '\nCheck incoming ticks and Windows clock synchronization; '
                         'do not compensate broker timestamps or relax freshness without evidence. '
                         'Trading permissions were not changed.\n')
-        # Never echo raw MT5 errors, config paths, account identity or Telegram credentials.
+        # Never echo raw MT5 errors, config paths, account identity or web credentials.
         parser.exit(2, 'MT5 check/runner stopped (' + type(exc).__name__ + '). '
                     'Verify config, terminal connection, UST hedging account and fresh quotes; '
                     'preserve existing state. Trading permissions were not changed.\n')

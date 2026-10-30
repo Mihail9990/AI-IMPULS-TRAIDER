@@ -1,4 +1,4 @@
-"""Read-only MT5 diagnostic launcher. No installs, config writes, Telegram or ownership state."""
+"""Read-only MT5 diagnostic launcher. No installs, config writes, web service or ownership state."""
 from datetime import datetime, timezone
 import json
 import math

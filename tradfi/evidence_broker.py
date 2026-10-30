@@ -193,7 +193,7 @@ class MT5EvidenceBroker(MT5Broker):
                         candle_time=rates[0]['time']),
                     now=self.clock(),spec=spec,quote=dict(bid=dec(tick.bid),ask=dec(tick.ask),
                         utc_time=quote_time['utc_time'] if quote_time else None),
-                    candle=dict(id=int(candle_time),close=dec(rates[0]['close'])),
+                    candle=dict(id=int(candle_time),open=dec(rates[0]['open']),close=dec(rates[0]['close'])),
                     orders=[order_json(plain(o)) for o in orders],order_history=[order_json(r) for r in facts['order'].values()],
                     positions=[dict(id=str(p.identifier),ticket=str(p.ticket),owned=str(p.identifier) in owned_positions,
                                     side='BUY' if p.type==self.api.POSITION_TYPE_BUY else 'SELL',entry=dec(p.price_open),

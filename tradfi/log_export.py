@@ -14,15 +14,16 @@ INPUT_TAIL_BYTES = 512 * 1024  # per existing segment; at most four segments
 DOCUMENT_BYTES = 1024 * 1024
 MAX_LINE_BYTES = 4096
 PHASES = {'IDLE','WAIT_CANDLE','NEXT_PAIR','PAIR','POSITION','COOLDOWN','PAUSED',
-          'PAUSED_CYCLE','SAFE_PAUSE','MANUAL','WAIT_START'}
-EVENTS = set('''service_started service_observation manual_reconciliation_error safe_pause telegram_command cycle_manual_required
+          'PAUSED_CYCLE','SAFE_PAUSE','MANUAL','WAIT_START','WAIT_SIGNAL','WAIT_TRIGGER'}
+EVENTS = set('''service_started service_observation manual_reconciliation_error safe_pause control_command cycle_manual_required
 manual_observation may_send obligations_reconciled broker_reconciled
 cooldown_finished_wait_new_close new_cycle_snapshot pair_intents_atomic cancel_intent
 stop_between_branches fill_oco_intents crossed_stop_explicit_rejection_market_intent
 pending_pair_cancelled actual_fill_adopted anchor_readback anchor_intent step_intent
 manual_closure_accounted cycle_complete closure_accounted_and_next_branch
-telegram_first_start_discard_backlog telegram_command_rejected telegram_foreign_update_ignored
-telegram_outbox_delivered telegram_sendlog_requested telegram_sendlog_result manual_reset_evidence manual_reset_duplicate manual_reset
+manual_reset_evidence manual_reset_duplicate manual_reset
+candle_doji_wait candle_observed candle_cancel_confirmed candle_entry_rejected candle_level_rejected candle_stop_intent
+control_action_reserved control_action_completed mode_selected interactive_confirmed_closure
 unknown_gateway_outcome protection_unchanged mt5_unavailable'''.split())
 ERROR_TYPES = {'OSError','TimeoutError','ValueError','QuoteFreshnessError','ConnectionError',
                'ReadTimeout','ConnectTimeout','HTTPError','Error'}

@@ -14,7 +14,6 @@ from tradfi.gateway import FileGateway
 from tradfi.runtime import owner_lock
 from tradfi.settings import Settings
 from tradfi.storage import Store, DurabilityError
-from tradfi.telegram import Telegram
 from tradfi.simulator import Simulator
 import test_tradfi as fixture
 
@@ -312,26 +311,3 @@ class MailboxTest(unittest.TestCase):
         report = json.loads((self.root/'report.json').read_text())
         self.assertEqual(report['state']['account'], '<redacted>')
         self.assertTrue(report['audit'])
-
-
-class TelegramTest(unittest.TestCase):
-    def test_full_settings_copyable_block_without_truncation(self):
-        template = Settings().template()
-        payload = Telegram.payload('123', template)
-        self.assertGreater(len(template), 256)
-        self.assertEqual(payload['text'], '<pre>' + template + '</pre>')
-        self.assertEqual(payload['parse_mode'], 'HTML')
-        self.assertEqual({x['command'] for x in Telegram.COMMANDS}, {'start', 'stop', 'settings', 'status', 'sendlog', 'reset_manual', 'resume_time'})
-
-    def test_allowed_chat_durable_offset_and_invalid_block(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            store = Store(Path(tmp)/'s.sqlite3'); self.addCleanup(store.close)
-            bot = Controller(store, Simulator()); tg = Telegram('fake', '123', Mock())
-            def event(i, chat, text): return dict(update_id=i, message={'chat': {'id': chat}, 'from': {'id': chat}, 'text': text})
-            tg.incoming.put(event(1, 999, '/start')); tg.incoming.put(event(2, 123, '/start'))
-            tg.incoming.put(event(2, 123, '/stop')); tg.incoming.put(event(3, 123, '/SETTINGS:\nINITIAL_SIZE=NaN'))
-            tg.process(bot)
-            self.assertEqual(bot.state['phase'], 'WAIT_CANDLE'); self.assertFalse(bot.state['stop'])
-            self.assertEqual(Controller(store, Simulator()).state['telegram_offset'], 4)
-            self.assertEqual(bot.state['settings'], Settings().dump())
-            tg.http.assert_not_called()

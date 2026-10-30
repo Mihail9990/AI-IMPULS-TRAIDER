@@ -163,7 +163,7 @@ class DurableTimeTest(unittest.TestCase):
         self.assertFalse(self.api.sends)
         self.bot.command('/resume_time',17); self.finish_time()
         self.assertNotIn('time_block',self.store.load())
-        self.assertEqual(self.bot.state['telegram_offset'],18)
+        self.assertEqual(self.bot.state['command_offset'],18)
         self.bot.command('/start')
 
     def test_periodic_success_never_resumes_and_failed_resume_keeps_latch(self):

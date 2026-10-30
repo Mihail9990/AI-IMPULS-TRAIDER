@@ -29,10 +29,13 @@ class Controller:
         self.state = store.load() or {
             'schema': 1, 'phase': 'IDLE', 'settings': Settings().dump(), 'cycle': None,
             'stop': False, 'stop_mode': '', 'commands': {}, 'seen_deals': [],
-            'notifications': [], 'telegram_offset': 0, 'last_candle': 0,
+            'notifications': [], 'command_offset': 0, 'last_candle': 0,
             'completed': [], 'account': None, 'currency': ACCOUNT_CURRENCY,
             'backend': getattr(broker, 'backend_id', 'file_gateway_v1'),
         }
+
+        self.state.setdefault('command_offset',self.state.pop('telegram_offset',0))
+        self.state.pop('telegram_initialized',None)
 
         backend = getattr(broker, 'backend_id', 'file_gateway_v1')
         if self.state.get('backend', 'file_gateway_v1') != backend:
@@ -107,7 +110,7 @@ class Controller:
             raise ValueError('Time check in progress; retry /resume_time after completion')
         self._resume_time_token = token  # never persisted: restart requires a fresh explicit request
         if update_id is not None:
-            self.state['telegram_offset'] = update_id + 1
+            self.state['command_offset'] = update_id + 1
         self.notify('Fresh time verification requested; time block remains until success.')
         try:
             self.save('time_resume_requested')
@@ -139,6 +142,7 @@ class Controller:
 
     def notify(self, message):
         self.state['notifications'].append({'id': uuid.uuid4().hex, 'text': message})
+        self.state['notifications']=self.state['notifications'][-200:]
 
     def pause(self, reason):
         if (self.state.get('cycle') or {}).get('manual'):
@@ -220,7 +224,7 @@ class Controller:
     def command(self, text, update_id=None):
         self._deadline_guard()
         self._time_guard()
-        if update_id is not None and update_id < self.state['telegram_offset']:
+        if update_id is not None and update_id < self.state['command_offset']:
             return
         raw = text.strip()
         # Parse and validate everything before committing settings or offset.
@@ -279,14 +283,14 @@ class Controller:
         else:
             self.notify(self.status())
         if update_id is not None:
-            self.state['telegram_offset'] = update_id + 1
-        self.save('telegram_command')
+            self.state['command_offset'] = update_id + 1
+        self.save('control_command')
 
     def _reset_manual(self, update_id):
         c=self.state.get('cycle')
         if not c and self.state['phase']=='WAIT_START' and self.state.get('last_manual_reset'):
             if update_id is not None:
-                self.state['telegram_offset']=update_id+1
+                self.state['command_offset']=update_id+1
                 self.save('manual_reset_duplicate')
             return
         if not c or self.state['phase']!='MANUAL' or not c.get('manual'):
@@ -314,7 +318,7 @@ class Controller:
                     cmd['status']='OBSOLETE'  # terminal cycle proof; never a false send acknowledgement
             self.state.update(cycle=None,phase='WAIT_START',stop=True,stop_mode='',last_manual_reset=c['id'],require_fresh_candle=True)
             self.state.pop('cooldown_until',None)
-            if update_id is not None: self.state['telegram_offset']=update_id+1
+            if update_id is not None: self.state['command_offset']=update_id+1
             residual=summary['written_off_recovery'] if remaining is not None else 'not initialized'
             self.notify(f'Manual cycle finalized: deal profit={actual} UST (commission/swap/fee excluded); Recovery written off={residual}. '
                         'This is not profitable strategy completion or recovery of account losses. Waiting for /start.')
@@ -645,6 +649,7 @@ class Controller:
             if snap['orders'] or snap['positions'] or self._unresolved():
                 self.pause('Cannot start fresh cycle without confirmed flat')
                 return
+            if not self._accept_new_candle(snap): return
             cfg = Settings.load(self.state['settings'])
             spec = Spec.load(snap['spec'])
             try:
@@ -668,13 +673,16 @@ class Controller:
             self._cycle_clock=None
             self.state['last_candle'] = snap['candle']['id']
             self.state['phase'] = 'NEXT_PAIR'
-            self._prepare_new_cycle(self.state['cycle'])
+            self._prepare_new_cycle(self.state['cycle'],snap)
             self.save('new_cycle_snapshot')
             self._cycle_tick(snap)
         if self.state['phase'] != 'SAFE_PAUSE':
             self.dispatch()
 
-    def _prepare_new_cycle(self,cycle):
+    def _accept_new_candle(self, snap):
+        return True
+
+    def _prepare_new_cycle(self,cycle,snap):
         pass  # Subclass metadata must join the first durable cycle snapshot.
 
     def _start_branch_clock(self, now):

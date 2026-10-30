@@ -77,7 +77,7 @@ class NativeStatusTest(unittest.TestCase):
     def test_execution_idle_and_paused_heartbeat(self):
         self.open(True)
         for phase in ['IDLE','PAUSED']:
-            self.bot.state['phase']=phase;self.bot.save('telegram_command')
+            self.bot.state['phase']=phase;self.bot.save('control_command')
             self.api.now+=1;self.bot.tick()
             self.assertEqual(self.view()['status'],'FRESH')
             self.assertEqual(self.view()['current']['positions'],0)
@@ -151,7 +151,7 @@ class NativeStatusTest(unittest.TestCase):
         self.position();self.bot.tick()
         self.bot.state['service_observation']={'utc':self.api.now,'positions':99}
         self.bot.state['cycle']['manual_observation']={'positions':['PRIVATE_OLD_CACHE']}
-        self.bot.save('telegram_command');self.open(True)
+        self.bot.save('control_command');self.open(True)
         v=self.view();self.assertEqual(v['status'],'UNAVAILABLE');self.assertIsNone(v['current'])
         self.assertNotIn('PRIVATE_OLD_CACHE',self.bot.status())
         self.bot.tick();self.assertEqual(self.view()['current']['positions'],1)

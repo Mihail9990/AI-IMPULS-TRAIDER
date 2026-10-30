@@ -52,7 +52,7 @@ class FakeMT5:
             trade_exemode=2, filling_mode=1)
         self.tick = record(bid=4000., ask=4000.1, time_msc=self.now*1000)
         self.orders, self.positions, self.history, self.deals = [], [], [], []
-        self.rates = [{'time': self.now-60, 'close': 4000.}]
+        self.rates = [{'time': self.now-60, 'open': 3999., 'close': 4000.}]
         self.check = record(retcode=0, comment='ok')
         self.response = record(retcode=self.TRADE_RETCODE_PLACED, order=101, deal=0, comment='ok')
         self.on_send = None

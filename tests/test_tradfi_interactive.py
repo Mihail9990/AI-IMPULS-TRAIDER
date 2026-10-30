@@ -227,35 +227,19 @@ class InteractiveTest(unittest.TestCase):
         self.tick(3)
         self.assertFalse(self.broker.data['orders'])
 
-    def test_telegram_action_crash_after_execution_does_not_replay(self):
-        import json
+    def test_web_action_crash_after_execution_does_not_replay(self):
         from tradfi.storage import DurabilityError
+        from tradfi.control import ActionGateway
         self.recovery();p=self.broker.data['positions'][0]
-        text='/action '+json.dumps(dict(type='close_position',position_id=p['id'],expected_size=p['size'],confirmed=True))
+        request=dict(id='close-test-44',revision=0,action=dict(type='close_position',position_id=p['id'],expected_size=p['size'],confirmed=True))
         def crash(event):
-            if event=='interactive_action':raise RuntimeError('power loss')
+            if event=='control_action_completed':raise RuntimeError('power loss')
         self.store.fault=crash
-        with self.assertRaises(DurabilityError):self.bot.command(text,44)
+        with self.assertRaises(DurabilityError):ActionGateway(self.bot,execute=self.bot.action).apply(request)
         self.store.fault=None;self.bot=InteractiveController(self.store,self.broker)
-        self.bot.command(text,44);self.tick(3)
+        result=ActionGateway(self.bot,execute=self.bot.action).apply(request);self.tick(3)
+        self.assertEqual(result['status'],'UNKNOWN')
         self.assertEqual(len([c for c in self.broker.commands if c['kind']=='CLOSE']),1)
-        self.assertEqual(self.bot.state['telegram_offset'],45)
-
-    def test_telegram_mode_button_requires_owner_and_keeps_open_panel_button(self):
-        from tradfi.telegram import Telegram
-        telegram=Telegram('FAKE_OFFLINE_FIXTURE','123',user_id='456')
-        self.bot.command('/start')
-        markup=self.bot.state['notifications'][-1]['reply_markup']
-        self.assertIn('127.0.0.1',markup['inline_keyboard'][1][0]['url'])
-        payload=telegram.payload('123','Mode',markup)
-        self.assertEqual(payload['reply_markup'],markup)
-        def callback(uid,user):
-            return dict(update_id=uid,callback_query=dict(data='/start semi',
-                message=dict(chat=dict(id=123)),**{'from':dict(id=user)}))
-        telegram.incoming.put(callback(1,999));telegram.process(self.bot)
-        self.assertEqual(self.bot.state['phase'],'IDLE')
-        telegram.incoming.put(callback(2,456));telegram.process(self.bot)
-        self.assertEqual(self.bot.state['phase'],'WAIT_TRIGGER')
 
     def test_three_actual_full_tp_closures_complete_and_semi_waits(self):
         self.recovery()
@@ -291,9 +275,9 @@ class InteractiveTest(unittest.TestCase):
     def test_auto_uses_closed_candle_while_semi_uses_received_quote(self):
         self.bot.command('/start auto');self.tick(2)
         self.assertFalse(self.broker.data['orders'])
-        self.broker.candle(60,'4001');self.tick(2)
-        self.assertEqual({D(o['price']) for o in self.broker.data['orders']},{D(4004),D(3998)})
-        self.assertEqual(D(self.broker.data['orders'][0]['tp']),D('4004.25'))
+        self.broker.candle(60,'4001');self.broker.data['candle']['open']='4000';self.broker.data['now']=120;self.tick(2)
+        self.assertEqual({D(o['price']) for o in self.broker.data['orders']},{D(4002)})
+        self.assertEqual(D(self.broker.data['orders'][0]['tp']),D('4002.25'))
 
     def test_time_latch_retained_across_active_protection_and_restart(self):
         self.recovery();self.bot.state['time_block']={'reason':'EXTERNAL_UTC_UNVERIFIED'};self.bot.save('test_latch')

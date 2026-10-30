@@ -23,7 +23,7 @@ class NativeAPI(TradingAPI):
         if count==120:
             end=int(self.now//60)*60
             return [dict(time=end-60*i,open=4000.,high=4001.,low=3999.,close=4000.) for i in range(119,-1,-1)]
-        return [dict(r,open=r['close'],high=r['close']+1,low=r['close']-1) for r in self.rates]
+        return [dict(r,open=r.get('open',r['close']),high=r['close']+1,low=r['close']-1) for r in self.rates]
     def fill(self,*args,**kwargs):
         result=super().fill(*args,**kwargs)
         self.deals[-1]=record(**dict(self.deals[-1]._asdict(),commission=0.,swap=0.,fee=0.))
@@ -197,7 +197,7 @@ class NativeInteractiveTest(unittest.TestCase):
         with self.assertRaises(ValueError):self.bot.command('/start semi')
         # Simulate separately authorized independent clock recovery, not reset behavior.
         self.bot.state.pop('time_block');self.bot.save('clock_restored_fixture')
-        self.api.now+=60;self.api.tick=self.api.tick._replace(time_msc=self.api.now*1000);self.api.rates=[dict(time=int(self.api.now//60)*60-60,close=4000.)]
+        self.api.now+=60;self.api.tick=self.api.tick._replace(time_msc=self.api.now*1000);self.api.rates=[dict(time=int(self.api.now//60)*60-60,open=3999.,close=4000.)]
         self.bot.command('/start semi');self.bot.triggers('ranges',{'BUY':'3','SELL':'3'});self.tick(3)
         self.assertEqual(self.bot.state['cycle']['fixed_recovery']['debt'],debt)
         self.assertFalse(self.bot.state['cycle']['first']);self.assertIsNone(self.bot.state['fixed_recovery_carry'])
@@ -271,7 +271,7 @@ class NativeInteractiveTest(unittest.TestCase):
         carry=self.bot.state['fixed_recovery_carry'];carry['operation_mode']='auto'
         self.bot.state['operation_mode']='auto';self.bot.save('auto_origin_fixture')
         self.api.now+=60;self.api.tick=self.api.tick._replace(time_msc=self.api.now*1000)
-        self.api.rates=[dict(time=int(self.api.now//60)*60-60,close=4000.)]
+        self.api.rates=[dict(time=int(self.api.now//60)*60-60,open=3999.,close=4000.)]
         self.bot.command('/start auto')
         self.api.now+=60;self.api.tick=self.api.tick._replace(time_msc=self.api.now*1000);self.api.rates[0]['time']+=60
         original=self.bot.save

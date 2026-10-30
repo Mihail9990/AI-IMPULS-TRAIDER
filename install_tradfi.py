@@ -216,13 +216,8 @@ class Manager:
             if self.pointer()['current']: raise SetupError('Конфигурация потеряна; не создаём замену.')
             config=read_json(code/'tradfi_config.example.json')
             config.update(enable_trading=False,legacy_ea_removed=False,legacy_state_reconciled=False,
-                state_file=str(self.root/'data'/'state.sqlite3'),log_file=str(self.root/'data'/'tradfi.log'),
-                telegram_credentials_file='telegram.json')
+                state_file=str(self.root/'data'/'state.sqlite3'),log_file=str(self.root/'data'/'tradfi.log'))
             atomic_json(self.config_path,config)
-        token=self.root/'data'/'telegram.json'
-        if not token.exists():
-            if self.pointer()['current']: raise SetupError('Telegram-файл потерян; не создаём замену.')
-            atomic_json(token,{k:'' for k in ('TRADFI_TELEGRAM_TOKEN','TRADFI_TELEGRAM_CHAT_ID','TRADFI_TELEGRAM_USER_ID')})
     def prepare_python(self,release):
         env=dict(os.environ)
         for k in list(env):
@@ -387,7 +382,7 @@ def gui():
         if live and not messagebox.askyesno('Реальное исполнение',
             'Это разрешит реальное исполнение, если ваши флаги и MT5 это допускают.\n'
             'Сохранённый цикл или отложенный /start могут исполниться сразу.\n'
-            'Никакие флаги программа не меняет. Вы проверили состояние и очередь Telegram?'):
+            'Никакие флаги программа не меняет. Вы проверили состояние в веб-панели?'):
             return
         work(lambda:manager.launch(live))
     def edit_config():
@@ -397,41 +392,19 @@ def gui():
                 if not manager.config_path.is_file(): raise SetupError('Конфигурация отсутствует.')
             os.startfile(str(manager.config_path),'edit')
         except Exception: messagebox.showerror('Настройки','Не удалось открыть редактор. Откройте service.json в папке data через Блокнот.')
-    def telegram():
-        if not manager.config_path.exists(): messagebox.showinfo('Telegram','Сначала установите код.'); return
-        dialog=tk.Toplevel(app); dialog.title('Telegram — только локальный ввод'); dialog.transient(app); dialog.grab_set()
-        entries=[]
-        for label,secret in [('Токен',True),('Chat ID',False),('User ID',False)]:
-            ttk.Label(dialog,text=label).pack(anchor='w',padx=12,pady=3)
-            e=ttk.Entry(dialog,width=55,show='*' if secret else ''); e.pack(padx=12); entries.append(e)
-        ttk.Label(dialog,text='Файл не зашифрован. ACL настраиваются вручную.\nПоля не показывают ранее сохранённые значения.').pack(padx=12,pady=8)
-        def save():
-            values=[e.get() for e in entries]
-            if not values[0] or any(c.isspace() for c in values[0]) or not re.fullmatch(r'-?[0-9]+',values[1]) or int(values[1])==0 or not re.fullmatch(r'[0-9]+',values[2]) or int(values[2])<=0:
-                messagebox.showerror('Telegram','Заполните токен и числовые ID; User ID положительный.',parent=dialog); return
-            try:
-                with lock(root/'operation.lock'),account_lock(root,manager.config()):
-                    config=manager.config()
-                    if config.get('telegram_credentials_file')!='telegram.json':
-                        raise SetupError('Конфигурация использует другой файл credentials. Измените его вручную.')
-                    atomic_json(root/'data'/'telegram.json',dict(zip(('TRADFI_TELEGRAM_TOKEN','TRADFI_TELEGRAM_CHAT_ID','TRADFI_TELEGRAM_USER_ID'),values)))
-                for e in entries: e.delete(0,'end')
-                dialog.destroy(); log('Telegram-файл сохранён локально. Значения не выводятся.')
-            except Exception: messagebox.showerror('Telegram','Не удалось сохранить; проверьте блокировки и путь.',parent=dialog)
-        ttk.Button(dialog,text='Сохранить',command=save).pack(pady=10)
     def stop_service():
         if child and messagebox.askyesno('Остановить процесс?',
             'Это остановит обслуживание сервиса, а не закроет позиции и не выполнит /stop.\n'
-            'Для завершения цикла используйте /stop в Telegram. Остановить процесс?'):
+            'Для завершения цикла используйте Стоп в веб-панели. Остановить процесс?'):
             try: (root/'data'/('stop-'+session+'.request')).touch(exist_ok=True)
             except OSError: messagebox.showerror('Остановка','Не удалось передать запрос остановки.')
     panel=ttk.Frame(app); panel.pack(fill='x',padx=12,pady=4)
     for label,fn in [('Установить / обновить',lambda:work(manager.install)),('Настройки (Блокнот)',edit_config),
-                     ('Telegram',telegram),('READ_ONLY',lambda:launch(False)),('Реальный запуск…',lambda:launch(True)),
+                     ('READ_ONLY',lambda:launch(False)),('Реальный запуск…',lambda:launch(True)),
                      ('Rollback кода',lambda:work(manager.rollback))]:
         b=ttk.Button(panel,text=label,command=fn); b.pack(side='left',padx=2); buttons.append(b)
     stop=ttk.Button(app,text='Остановить процесс…',command=stop_service,state='disabled'); stop.pack(pady=5)
-    ttk.Label(app,text='Первый запуск: установить → заполнить service.json и Telegram → READ_ONLY.\n'
+    ttk.Label(app,text='Первый запуск: установить → заполнить service.json и пароль веб-панели → READ_ONLY.\n'
               'Старые папки, базы и credentials не удаляются и автоматически не переносятся.',wraplength=740).pack(padx=12,pady=8)
     def poll():
         nonlocal busy,child,session
@@ -440,7 +413,7 @@ def gui():
                 kind,value=events.get_nowait()
                 if kind=='log': log(value)
                 elif kind=='error': log(value); messagebox.showerror('TradFi',value)
-                elif kind=='started': child,session=value; log('Процесс запущен. Проверьте сообщение режима и /status в Telegram.')
+                elif kind=='started': child,session=value; log('Процесс запущен. Проверьте режим и состояние в веб-панели.')
                 elif kind=='done': busy=False
         except queue.Empty: pass
         if child and child.poll() is not None:

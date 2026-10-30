@@ -60,7 +60,7 @@ class InstallerTest(unittest.TestCase):
         self.assertIn('/git/ref/heads/work',self.urls[0]);self.assertIn('/'+A+'.zip',self.urls[1])
         self.assertFalse(self.manager.config()['enable_trading'])
         self.assertFalse(self.manager.config()['legacy_state_reconciled'])
-        self.assertEqual(tool.read_json(self.root/'data'/'telegram.json')['TRADFI_TELEGRAM_TOKEN'],'')
+        self.assertFalse((self.root/'data'/'telegram.json').exists())
     def test_update_preserves_data_and_rollback_only_code(self):
         self.install(); db=self.state(); creds=self.root/'data'/'telegram.json'
         creds.write_text('local-secret'); log=self.root/'data'/'tradfi.log';log.write_text('log')

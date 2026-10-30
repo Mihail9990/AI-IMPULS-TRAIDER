@@ -1,4 +1,4 @@
-"""Owner-thread command gateway shared by local UI and Telegram.
+"""Owner-thread command gateway for the authenticated web UI.
 
 A durable receipt precedes execution. A crash between execution and completion
 leaves UNKNOWN, never permission to replay. No worker accesses Controller/SQLite.

@@ -15,13 +15,18 @@ from .chart_feed import ChartFeed
 
 
 class WebTransport:
-    def __init__(self,mailbox,*,authority='127.0.0.1:8765',password=None,clock=time.monotonic):
+    def __init__(self,mailbox,*,authority='127.0.0.1:8765',password=None,clock=time.monotonic,public_origin=None):
         if authority.split(':')[0]!='127.0.0.1':raise ValueError('Web server must bind loopback')
         self.mailbox=mailbox;self.authority=authority;self.password=password;self.clock=clock
+        self.origin=public_origin or 'http://'+authority
+        parsed=urlsplit(self.origin)
+        if public_origin and (parsed.scheme!='https' or not parsed.hostname or parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment):
+            raise ValueError('public_origin must be an explicit HTTPS origin without path or credentials')
+        self.secure=bool(public_origin)
         self.sessions={};self.attempts=[];self.lock=threading.Lock()
         if password is not None and (not isinstance(password,str) or len(password)<32):raise ValueError('Explicit web credential must have at least 32 characters')
     def request(self,method,path,headers,body=b''):
-        headers={k.lower():v for k,v in headers.items()};origin='http://'+self.authority
+        headers={k.lower():v for k,v in headers.items()};origin=self.origin
         def reply(code,value,cookie=None):return code,value,({'Set-Cookie':cookie} if cookie else {})
         if headers.get('host')!=self.authority or headers.get('origin',origin)!=origin:return reply(403,{'error':'ORIGIN_DENIED'})
         if headers.get('sec-fetch-site','same-origin') not in {'same-origin','none'}:return reply(403,{'error':'ORIGIN_DENIED'})
@@ -43,7 +48,7 @@ class WebTransport:
                 self.sessions={k:v for k,v in self.sessions.items() if v>now}
                 if len(self.sessions)>=32:return reply(429,{'error':'SESSION_LIMIT'})
                 sid=secrets.token_urlsafe(32);self.sessions[sid]=now+3600
-            return reply(200,{'status':'AUTHENTICATED'},'tradfi_session='+sid+'; HttpOnly; SameSite=Strict; Path=/; Max-Age=3600')
+            return reply(200,{'status':'AUTHENTICATED'},'tradfi_session='+sid+'; HttpOnly; SameSite=Strict; Path=/; Max-Age=3600'+('; Secure' if self.secure else ''))
         cookie=SimpleCookie()
         try:cookie.load(headers.get('cookie',''));sid=cookie['tradfi_session'].value
         except (KeyError,ValueError,CookieError):return reply(401,{'error':'AUTH_REQUIRED'})
@@ -63,11 +68,11 @@ class WebTransport:
 
 
 class NativePanel:
-    def __init__(self,controller,*,authority='127.0.0.1:8765',password=None,clock=time.time,monotonic=time.monotonic):
+    def __init__(self,controller,*,authority='127.0.0.1:8765',password=None,clock=time.time,monotonic=time.monotonic,public_origin=None):
         self.controller=controller;self.clock=clock;self.monotonic=monotonic
         self.mailbox=OwnerMailbox();self.gateway=ActionGateway(controller,execute=controller.action)
         self.feed=ChartFeed(controller.broker,clock=clock,monotonic=monotonic)
-        self.transport=WebTransport(self.mailbox,authority=authority,password=password,clock=monotonic)
+        self.transport=WebTransport(self.mailbox,authority=authority,password=password,clock=monotonic,public_origin=public_origin)
         self.authority=authority;self.next_feed=0;self.snapshot=None;self.server=None
         if 'web_store_id' not in controller.state:
             controller.state['web_store_id']=uuid.uuid4().hex
@@ -85,6 +90,8 @@ class NativePanel:
         feed=self.feed.view()
         return dict(source=feed['source'],scope=self.scope,revision=s.get('control_revision',0),
             symbol=self.controller.broker.symbol,phase=s['phase'],mode=s['operation_mode'],
+            settings=deepcopy(s['settings']),read_only=bool(getattr(self.controller.broker,'read_only',False)),
+            legacy_recovery=c.get('recovery'),cycle_engine=c.get('engine'),stopped=s['stop'],
             modules=deepcopy(s['modules']),cycle_id=c.get('id'),recovery=deepcopy(c.get('fixed_recovery') or (s.get('fixed_recovery_carry') or {}).get('fixed_recovery')),
             time_block=deepcopy(s.get('time_block')),feed=feed,quote=feed.get('quote'),timestamp=feed.get('timestamp'),
             orders=deepcopy(snap.get('orders',[])),positions=deepcopy(snap.get('positions',[])),
@@ -102,7 +109,9 @@ class NativePanel:
                 route=urlsplit(self.path).path
                 static={'/':('index.html','text/html'),'/panel.js':('panel.js','text/javascript'),'/panel.css':('panel.css','text/css')}
                 if self.command=='GET' and route in static and self.headers.get('Host')==authority:
-                    filename,mime=static[route];self.reply(200,(ROOT/filename).read_bytes(),mime,{});return
+                    filename,mime=static[route];body=(ROOT/filename).read_bytes()
+                    if filename=='index.html':body=body.replace(b'<body>',b'<body data-controller="native">')
+                    self.reply(200,body,mime,{});return
                 try:size=int(self.headers.get('Content-Length','0'))
                 except ValueError:size=-1
                 if not 0<=size<=8192:self.reply(413,b'{}','application/json',{});return

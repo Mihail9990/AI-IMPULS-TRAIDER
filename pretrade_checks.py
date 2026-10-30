@@ -1,4 +1,4 @@
-"""Pre-trade checks: no Controller, SQLite mutation, Telegram, or execution route."""
+"""Pre-trade checks: no Controller, SQLite mutation, web service, or execution route."""
 import argparse
 import importlib
 import importlib.metadata

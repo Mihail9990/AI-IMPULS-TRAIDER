@@ -1,7 +1,7 @@
-"""Loopback-only offline demonstration. No MT5, Telegram worker or credentials.
+"""Loopback-only offline demonstration. No MT5 or credentials.
 
 The owner loop runs independently of browser requests. All API actions use the
-same InteractiveController.action entry point as /action Telegram messages.
+same InteractiveController.action entry point as the native web panel.
 """
 from copy import deepcopy
 import json

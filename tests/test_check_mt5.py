@@ -88,7 +88,7 @@ class LauncherTest(unittest.TestCase):
         from test_tradfi_native_service import NativeAPI
         from tradfi.runtime import _run_mt5
         api=NativeAPI(); current=int(api.now//60)*60
-        api.rates=[dict(time=t,close=4000.) for t in (current-120,current-60,current)]
+        api.rates=[dict(time=t,open=3999.,close=4000.) for t in (current-120,current-60,current)]
         config=dict(self.config,enable_trading=True)
         output=io.StringIO()
         with patch('tradfi.runtime.Store',side_effect=AssertionError('SQLite forbidden')),redirect_stdout(output):

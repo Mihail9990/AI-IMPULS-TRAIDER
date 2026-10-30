@@ -1,11 +1,10 @@
 """Interactive owner controller over simulator or native per-obligation evidence."""
 from copy import deepcopy
 from decimal import Decimal as D
-import json
 import uuid
 
 from .engine import Controller, TERMINAL
-from .control import ActionRejected, ActionGateway
+from .control import ActionRejected
 from .broker import Spec, target_price
 from .settings import Settings, number
 from .strategies.levels import user_triggers, recovery_triggers
@@ -22,6 +21,8 @@ class InteractiveController(Controller):
         super().__init__(store,broker,**kwargs)
         if fresh:
             self.state['settings']['BASE_TP_DISTANCE']='0.25'
+            self.state['settings']['CYCLE_COOLDOWN_SECONDS']='0'
+        self.state['settings']=Settings.load(self.state['settings']).dump()
         self.state.setdefault('interactive_contract','interactive_v1')
         self.state.setdefault('operation_mode','auto')
         self.state.setdefault('modules',dict(engine='legacy',recovery=RecoveryConfig().dump()))
@@ -70,7 +71,7 @@ class InteractiveController(Controller):
                 if cmd.get('cycle_id')==c['id'] and cmd['status'] not in TERMINAL:cmd['status']='OBSOLETE'
             self.state.update(cycle=None,phase='WAIT_START',stop=True,stop_mode='',last_manual_reset=c['id'],require_fresh_candle=True)
             self.state.pop('cooldown_until',None)
-            if update_id is not None:self.state['telegram_offset']=update_id+1
+            if update_id is not None:self.state['command_offset']=update_id+1
             self.notify('Fixed reset confirmed flat. RECOVERY retained='+recovery['debt']+'; no write-off. Waiting for explicit command; independent safety guards retained.')
             self.store.commit_deals(expected,self.state,records,'fixed_manual_reset',manual_reset=True)
             self._durable_state=deepcopy(self.state)
@@ -97,7 +98,7 @@ class InteractiveController(Controller):
             # Mode, phase and modules share one durable write after all validation.
             self.state['modules']=dict(engine=action['engine'],recovery=config.dump())
             self.state['operation_mode']=mode;self.state['account']=snap['account']
-            self.state['last_candle']=snap['candle']['id']
+            self.state['last_candle']=max(snap['candle']['id'],int(number(snap['now'])//60)*60-60)
             self.state['phase']='WAIT_TRIGGER' if mode=='semi' else ('COOLDOWN' if snap['now']<self.state.get('cooldown_until',0) else 'WAIT_CANDLE')
             self.state['stop']=False;self.state['stop_mode']=''
             self.save('interactive_settings_mode');return
@@ -131,17 +132,9 @@ class InteractiveController(Controller):
             raise ActionRejected('Fresh verified quote required')
 
     def command(self,text,update_id=None):
-        if update_id is not None and update_id<self.state['telegram_offset']:return
+        if update_id is not None and update_id<self.state['command_offset']:return
         raw=text.strip()
-        if raw=='/start':
-            if getattr(self.broker,'read_only',False):raise ActionRejected('READ_ONLY: trading controls disabled')
-            self.notify('Выберите режим: /start auto — прежняя стратегия; /start semi — ждать уровни. Панель открывается кнопкой, не автоматически.')
-            self.state['notifications'][-1]['reply_markup']={'inline_keyboard':[
-                [{'text':'Авто','callback_data':'/start auto'},{'text':'Полуавто','callback_data':'/start semi'}],
-                ]}
-            panel_url=getattr(self,'panel_url',None)
-            if panel_url:self.state['notifications'][-1]['reply_markup']['inline_keyboard'].append([{'text':'Открыть панель','url':panel_url}])
-            self._finish_command(update_id,'mode_selection');return
+        if raw=='/start':return self.command('/start '+self.state['operation_mode'],update_id)
         if raw in {'/start auto','/start semi'}:
             mode=raw.split()[1];c=self.state.get('cycle')
             carry=self.state.get('fixed_recovery_carry')
@@ -154,25 +147,21 @@ class InteractiveController(Controller):
             if self.state['phase']=='PAUSED_CYCLE' or not c:
                 if snap['positions'] or snap['orders'] or self._unresolved():raise ActionRejected('Start requires confirmed flat')
                 if mode=='semi':self.state['phase']='WAIT_TRIGGER'
-                elif c:self.state['phase']='NEXT_PAIR'
+                elif c:
+                    self.state['phase']='WAIT_SIGNAL' if c.get('candle_initial') and c['first'] else 'NEXT_PAIR'
+                    if self.state['phase']=='WAIT_SIGNAL':
+                        self.state['last_candle']=max(snap['candle']['id'],int(number(snap['now'])//60)*60-60)
+                        c.pop('candle_replacement',None)
                 else:
-                    self.state['last_candle']=snap['candle']['id']
+                    self.state['last_candle']=max(snap['candle']['id'],int(number(snap['now'])//60)*60-60)
                     self.state['phase']='COOLDOWN' if snap['now']<self.state.get('cooldown_until',0) else 'WAIT_CANDLE'
             self.state['account']=snap['account'];self.state['operation_mode']=mode
             self.state['stop']=False;self.state['stop_mode']=''
             self._finish_command(update_id,'mode_selected');return
-        if raw.startswith('/action '):
-            try:action=json.loads(raw[8:])
-            except ValueError:raise ActionRejected('Invalid action JSON')
-            if update_id is None:self.action(action)
-            else:
-                ActionGateway(self,execute=self.action).apply(dict(id='telegram-update-'+str(update_id),
-                    revision=self.state.get('control_receipts',{}).get('telegram-update-'+str(update_id),{}).get('revision',self.state.get('control_revision',0)+1)-1,action=action))
-            self._finish_command(update_id,'interactive_action');return
         return super().command(text,update_id)
 
     def _finish_command(self,uid,event):
-        if uid is not None:self.state['telegram_offset']=uid+1
+        if uid is not None:self.state['command_offset']=uid+1
         self.save(event)
 
     def _module_config(self,engine,recovery,snap):
@@ -217,6 +206,8 @@ class InteractiveController(Controller):
             prices=self._valid_levels(snap,plan.prices())
         except (ValueError,TypeError):raise ActionRejected('Invalid or crossed trigger levels')
         c=self.state.get('cycle')
+        if c and c.get('candle_initial') and c['first']:
+            raise ActionRejected('AUTO initial levels follow candles; manual levels require SEMI')
         if not c:
             if self.state['operation_mode']!='semi' or self.state['phase']!='WAIT_TRIGGER':raise ActionRejected('Select semi mode before supplying triggers')
             if snap['orders'] or snap['positions'] or self._unresolved():raise ActionRejected('Confirmed flat required')
@@ -243,8 +234,13 @@ class InteractiveController(Controller):
         c['last_observed_utc']=c['started_at_utc'];self._initialize_cycle(c)
         self.state['phase']='NEXT_PAIR';self.save('semi_cycle_received_quote')
 
-    def _prepare_new_cycle(self,c):
+    def _prepare_new_cycle(self,c,snap):
         self._initialize_cycle(c)
+        if c['first'] and c['operation_mode']=='auto':
+            bar=snap['candle']
+            c['candle_signal']=dict(side='BUY' if number(bar['close'])>number(bar['open']) else 'SELL',close=bar['close'],candle_id=bar['id'])
+            c['candle_initial']=True
+            c['settings']['BASE_TP_DISTANCE']=c['settings']['INITIAL_TP_DISTANCE']
 
     def _initialize_cycle(self,c):
         carry=self.state.get('fixed_recovery_carry')
@@ -263,8 +259,57 @@ class InteractiveController(Controller):
             self.state['phase']='WAIT_TRIGGER';self.save('semi_wait_next_command')
         super().tick()
 
+    def _accept_new_candle(self, snap):
+        # Native timestamps are verified UTC; never enter from a stale/backfilled bar.
+        candle=snap['candle']
+        if not self._fresh_closed_candle(snap) or 'open' not in candle:return False
+        if self.state.get('fixed_recovery_carry'):return True
+        if number(candle['open'])==number(candle['close']):
+            self.state['last_candle']=candle['id'];self.save('candle_doji_wait')
+            return False
+        return True
+
+    def _candle_entry_tick(self, snap):
+        c=self.state['cycle']
+        # Deal/position evidence always wins over a pending direction change.
+        entries=c['entries']
+        if c.get('position') or snap['positions'] or c['opened_ids'] or any(
+            d['entry']=='IN' and (d.get('command_id') in entries or any(
+                self.state['commands'][cid].get('order_id')==d.get('order_id') for cid in entries))
+            for d in snap['deals']):
+            c.pop('candle_replacement',None)
+            return False
+        if self.state['stop'] or self.state.get('time_block') or c.get('manual'):return False
+        candle=snap['candle']
+        if candle['id']>self.state['last_candle'] and self._fresh_closed_candle(snap) and 'open' in candle:
+            self.state['last_candle']=candle['id']
+            direction='BUY' if number(candle['close'])>number(candle['open']) else 'SELL' if number(candle['close'])<number(candle['open']) else None
+            signal=c.get('candle_replacement') or c.get('candle_signal')
+            if direction and (not signal or direction!=signal['side'] or self.state['phase']=='WAIT_SIGNAL'):
+                c['candle_replacement']=dict(side=direction,close=candle['close'],candle_id=candle['id'])
+                for cid in entries:
+                    cmd=self.state['commands'][cid]
+                    if cmd['status']=='READY':cmd.update(status='CANCELLED',never_sent=True)
+            self.save('candle_observed')
+        replacement=c.get('candle_replacement')
+        if replacement:
+            # Do not reuse this snapshot after dispatch: fills during cancel are read next tick.
+            if snap['orders']:
+                self._cancel_pending(snap,entries);self.dispatch({'CANCEL'});return True
+            if snap['positions'] or self._unresolved():return True
+            if any(self.state['commands'][cid]['status'] not in {'CANCELLED','REJECTED'} for cid in entries):return True
+            c['candle_signal']=c.pop('candle_replacement')
+            c['entries']=[];entries=[]
+            self.state['phase']='NEXT_PAIR';self.save('candle_cancel_confirmed')
+        if self.state['phase']=='WAIT_SIGNAL':return True
+        # A definitive rejected entry can only be retried on a new directional close.
+        if entries and all(self.state['commands'][cid]['status']=='REJECTED' for cid in entries) and not snap['orders'] and not self._unresolved():
+            self.state['phase']='WAIT_SIGNAL';self.notify('Начальный STOP отклонён; ждём новую закрытую M1. MARKET не создаётся.');self.save('candle_entry_rejected');return True
+        return False
+
     def _cycle_tick(self,snap):
         c=self.state['cycle'];self._initialize_cycle(c)
+        if c.get('candle_initial') and c['first'] and self._candle_entry_tick(snap):return
         replacement=c.get('replacement')
         if replacement:
             self._cancel_pending(snap,c['entries']);self.dispatch({'CANCEL'})
@@ -282,6 +327,8 @@ class InteractiveController(Controller):
     def _pair(self,snap):
         c=self.state['cycle'];self._initialize_cycle(c)
         if self._time_guard() or c.get('manual'):return
+        if c.get('candle_initial') and c['first']:
+            return self._candle_pair(snap)
         explicit=c.get('level_plan')
         if c['engine']=='legacy' and not explicit:return super()._pair(snap)
         cfg=Settings.load(c['settings']);spec=Spec.load(snap['spec']);spec.validate(cfg)
@@ -299,6 +346,35 @@ class InteractiveController(Controller):
         c.update(round=c['round']+1,entries=[],position=None,opened_ids=[],sl_distance=str(distance));c.pop('level_plan',None)
         for plan in plans:c['entries'].append(self._intent(**plan))
         self.state['phase']='PAIR';self.save('interactive_pair_intents')
+
+    def _candle_pair(self, snap):
+        c=self.state['cycle'];cfg=Settings.load(c['settings']);spec=Spec.load(snap['spec'])
+        signal=c.get('candle_signal')
+        if signal is None:
+            bar=snap['candle']
+            signal=dict(side='BUY' if number(bar['close'])>number(bar['open']) else 'SELL',close=bar['close'],candle_id=bar['id'])
+            c['candle_signal']=signal
+        side=signal['side'];sign=1 if side=='BUY' else -1
+        try:
+            spec.validate(cfg)
+            entry=spec.price(number(signal['close'])+sign*cfg.INITIAL_ENTRY_DISTANCE)
+            quote=number(snap['quote']['ask' if side=='BUY' else 'bid'])
+            if sign*(entry-quote)<=0 or sign*(entry-quote)<spec.point*spec.stops_level:
+                raise ValueError('Crossed/too close initial STOP')
+            sl=entry-sign*cfg.INITIAL_SL_DISTANCE;tp=entry+sign*cfg.INITIAL_TP_DISTANCE
+            spec.protection(side,entry,sl,tp)
+        except ValueError:
+            self.state['phase']='WAIT_SIGNAL'
+            self.notify('Уровень начального STOP пересечён или недопустим: ждём новую закрытую M1 без MARKET.')
+            self.save('candle_level_rejected');return
+        # Legacy first-SL recovery reuses a symmetric center: retain the executed
+        # side's original level, with unchanged legacy recovery range and math.
+        c['original_center']=str(entry-sign*cfg.BRANCH1_RANGE)
+        c['center']=c['original_center']
+        c.update(round=c['round']+1,entries=[],position=None,opened_ids=[],sl_distance=str(cfg.INITIAL_SL_DISTANCE))
+        c['entries'].append(self._intent('STOP',side=side,trigger=str(entry),price=str(entry),
+            sl=str(sl),tp=str(tp),size=str(cfg.INITIAL_SIZE),sl_distance=str(cfg.INITIAL_SL_DISTANCE),crossed_policy='reject'))
+        self.state['phase']='PAIR';self.save('candle_stop_intent')
 
     def _adopt(self,opening,snap):
         c=self.state['cycle']
@@ -372,6 +448,9 @@ class InteractiveController(Controller):
         snap=self._interactive_guard();c=self.state.get('cycle')
         order=next((o for o in snap['orders'] if o['id']==oid and o['owned']),None)
         if not c or not order or number(order['price'])!=number(old_price):raise ActionRejected('Trigger changed; refresh preview')
+        if c.get('candle_initial') and c['first']:
+            self.state['stop']=True;self.state['stop_mode']='CANCEL'
+            self.save('user_deleted_initial_trigger')
         self._cancel_pending(dict(snap,orders=[order]),c['entries']);self.dispatch({'CANCEL'})
 
     def close_position(self,pid,expected_size):
