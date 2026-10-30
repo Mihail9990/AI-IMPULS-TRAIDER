@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from .broker import ACCOUNT_CURRENCY, COMPLETION_TOLERANCE, Spec, target_price, stepped_stop
 from .settings import Settings, parse_settings, number
 from .storage import DurabilityError
+from .control import ActionRejected
 from .observation import Observation
 
 LOG = logging.getLogger(__name__)
@@ -104,10 +105,10 @@ class Controller:
     def _resume_time(self, update_id):
         safety = getattr(self.broker, 'time_safety', None)
         if safety is None:
-            raise ValueError('Independent time verification is unavailable')
+            raise ActionRejected('Independent time verification is unavailable')
         token = self.refresh_time()
         if token is None:
-            raise ValueError('Time check in progress; retry /resume_time after completion')
+            raise ActionRejected('Time check in progress; retry /resume_time after completion')
         self._resume_time_token = token  # never persisted: restart requires a fresh explicit request
         if update_id is not None:
             self.state['command_offset'] = update_id + 1
@@ -230,10 +231,17 @@ class Controller:
         # Parse and validate everything before committing settings or offset.
         settings = None
         if raw.upper().startswith('/SETTINGS:'):
-            settings = parse_settings(raw)
-            Spec.load(self.snapshot()['spec']).validate(settings)
+            try:
+                settings = parse_settings(raw)
+            except (ValueError, TypeError, ArithmeticError) as exc:
+                raise ActionRejected('Invalid settings block; no settings changed') from exc
+            snap = self.snapshot()  # unknown observation failures stay distinct from input refusal
+            try:
+                Spec.load(snap['spec']).validate(settings)
+            except (ValueError, TypeError, ArithmeticError) as exc:
+                raise ActionRejected('Settings violate broker constraints; no settings changed') from exc
         elif raw.lower() not in {'/start', '/stop', '/settings', '/status', '/reset_manual', '/resume_time'}:
-            raise ValueError('Commands: /settings, complete /SETTINGS: block, /start, /stop, /status, /reset_manual, /resume_time')
+            raise ActionRejected('Commands: /settings, complete /SETTINGS: block, /start, /stop, /status, /reset_manual, /resume_time')
         if raw.lower()=='/resume_time':
             return self._resume_time(update_id)
         if raw.lower()=='/reset_manual':
@@ -243,28 +251,28 @@ class Controller:
             self.notify('Settings saved atomically; active cycle snapshot is unchanged.')
         elif raw.lower() == '/start':
             if getattr(self.broker,'read_only',False):
-                raise ValueError('READ_ONLY service: /start disabled; no trading mutations are permitted')
+                raise ActionRejected('READ_ONLY service: /start disabled; no trading mutations are permitted')
             if self._time_guard():
-                raise ValueError('TIME_BLOCK: /start cannot clear it; use /resume_time after fresh verification')
+                raise ActionRejected('TIME_BLOCK: /start cannot clear it; use /resume_time after fresh verification')
             if (self.state.get('cycle') or {}).get('manual'):
-                raise ValueError('Manual cycle remains unresolved; /start cannot reset it or Recovery')
+                raise ActionRejected('Manual cycle remains unresolved; /start cannot reset it or Recovery')
             snap = self.snapshot()
             if self.state['phase']=='WAIT_START' and not self._fresh_closed_candle(snap):
-                raise ValueError('A fresh closed UTC M1 candle is required after manual reset')
+                raise ActionRejected('A fresh closed UTC M1 candle is required after manual reset')
             Spec.load(snap['spec']).validate(Settings.load(self.state['settings']))
             if self.state['phase'] == 'SAFE_PAUSE':
-                raise ValueError('SAFE_PAUSE requires broker reconciliation; /start cannot clear it')
-            self.state['account'] = snap['account']
+                raise ActionRejected('SAFE_PAUSE requires broker reconciliation; /start cannot clear it')
             if self.state['phase'] == 'PAUSED_CYCLE':
                 if snap['positions'] or snap['orders'] or self._unresolved():
-                    raise ValueError('Previous commands/positions/orders remain unresolved')
+                    raise ActionRejected('Previous commands/positions/orders remain unresolved')
                 self.state['phase'] = 'NEXT_PAIR'
             elif not self.state['cycle']:
                 if snap['positions'] or snap['orders'] or self._unresolved():
-                    raise ValueError('Start requires reconciled broker-flat state')
+                    raise ActionRejected('Start requires reconciled broker-flat state')
                 self.state['last_candle'] = snap['candle']['id']
                 self.state['phase'] = ('COOLDOWN' if snap['now'] < self.state.get('cooldown_until', 0)
                                        else 'WAIT_CANDLE')
+            self.state['account'] = snap['account']
             self.state['stop'], self.state['stop_mode'] = False, ''
         elif raw.lower() == '/stop':
             self.state['stop'] = True
@@ -294,9 +302,9 @@ class Controller:
                 self.save('manual_reset_duplicate')
             return
         if not c or self.state['phase']!='MANUAL' or not c.get('manual'):
-            raise ValueError('/reset_manual requires the unfinished MANUAL cycle')
+            raise ActionRejected('/reset_manual requires the unfinished MANUAL cycle')
         if self.evidence_contract!='per_obligation_v1':
-            raise ValueError('/reset_manual requires per-obligation broker evidence')
+            raise ActionRejected('/reset_manual requires per-obligation broker evidence')
         snap,positions,fresh=self._manual_reset_facts(c)
         c['reset_position_ids']=sorted(positions)
         self.save('manual_reset_evidence')
@@ -337,7 +345,7 @@ class Controller:
         """Positive flat/obligation proof shared by legacy and fixed reset."""
         snap=self.snapshot(for_reset=True)
         if snap['orders'] or snap['positions']:
-            raise ValueError('Close positions and cancel pending orders manually first; bot sends no trading actions')
+            raise ActionRejected('Close positions and cancel pending orders manually first; bot sends no trading actions')
         self._reconcile_evidence_commands(snap)
         positions=set(); closing=set()
         for cid,cmd in self.state['commands'].items():

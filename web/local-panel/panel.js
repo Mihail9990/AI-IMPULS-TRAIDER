@@ -118,7 +118,7 @@ let backendView=null,inflight=false,pendingRequest=null,pendingScope=null,settin
     document.querySelector('.fixture-label').textContent=v.source+' / M1';$('native-login').hidden=true;
    }
    const outcome=pendingRequest&&(!native||pendingScope===v.scope)?(v.action_results[pendingRequest]?.status??v.action_results[pendingRequest]):null;
-   if(pendingRequest&&['APPLIED','REJECTED','CONFLICT'].includes(outcome)){log('Сверка команды '+pendingRequest+': '+outcome);pendingRequest=null;localStorage.removeItem(pendingStorageKey);}
+   if(pendingRequest&&['APPLIED','REJECTED','CONFLICT'].includes(outcome)){log('Сверка команды '+pendingRequest+': '+outcome);if(native&&outcome==='REJECTED')$('operation-error').textContent='Команда отклонена до исполнения. Проверьте параметры и состояние; можно исправить ввод или остановить новые входы.';pendingRequest=null;localStorage.removeItem(pendingStorageKey);}
    $('apply-preview').disabled=!!pendingRequest;$('apply-settings').disabled=!!pendingRequest;state.lastTick=v.timestamp===null?0:v.timestamp*1000;
    state.bid=v.quote?Number(v.quote.bid):null;state.ask=v.quote?Number(v.quote.ask):null;state.revision=v.revision;
    state.levels=Object.fromEntries(v.orders.map(o=>[o.side.toLowerCase(),Number(o.price)]));
@@ -145,6 +145,8 @@ let backendView=null,inflight=false,pendingRequest=null,pendingScope=null,settin
    for(const [key,value] of Object.entries(v.settings)){const label=document.createElement('label');label.className='field';label.textContent=names[key]??key;const input=document.createElement('input');input.id='strategy-'+key;input.value=value;input.inputMode='decimal';label.append(input);fields.append(label);}
    operationsScope=v.scope;
   }
+  const pendingStatus=pendingRequest?v.action_results[pendingRequest]?.status:null;
+  $('pending-action-status').textContent=pendingRequest?'Запрос '+pendingRequest+': '+(pendingStatus??'ожидание сверки')+'. Новые команды заблокированы до подтверждения исхода. При UNKNOWN сохраните ID и сверьте журнал и состояние брокера на VPS. Не повторяйте торговое действие и не очищайте локальное ожидание; перезагрузка не подтверждает исполнение.':'';
   $('server-journal').textContent=v.journal.join('\n');
  }
  function createOperations(){
@@ -154,7 +156,7 @@ let backendView=null,inflight=false,pendingRequest=null,pendingScope=null,settin
    <p>Стоп отменяет ожидающий вход; открытая позиция завершает цикл. Бот на VPS работает и при закрытом браузере.</p>
    <details><summary>Настройки стратегии</summary><div id="strategy-fields" class="settings-grid"></div><button id="save-strategy">Проверить и сохранить настройки…</button><p>Расстояния в единицах цены инструмента. Новые настройки действуют со следующего цикла; текущий снимок и долг сохраняются.</p></details>
    <details><summary>Ручные уровни SEMI</summary><label class="field">Представление<select id="trigger-format"><option value="prices">Цена</option><option value="ranges">Расстояние от Ask / Bid</option></select></label><label class="field">BUY (пусто — не создавать)<input id="trigger-buy" inputmode="decimal"></label><label class="field">SELL (пусто — не создавать)<input id="trigger-sell" inputmode="decimal"></label><button id="send-triggers">Проверить уровни…</button></details>
-   <p id="operation-error" role="alert"></p><details><summary>События и ошибки бота</summary><pre id="server-journal"></pre></details>`;
+   <p id="operation-error" role="alert"></p><p id="pending-action-status" role="status"></p><details><summary>События и ошибки бота</summary><pre id="server-journal"></pre></details>`;
   document.querySelector('header').after(section);
   const send=async(action,message)=>{if(!backendView){$('operation-error').textContent='Нет авторизованного снимка';return;}const revision=backendView.revision;if(!confirm(message))return;try{await postAction(action,revision);$('operation-error').textContent='Команда отправлена; результат появится после сверки.';await pollBackend();}catch(e){$('operation-error').textContent=e.message;}};
   $('start-auto').onclick=()=>send({type:'start',mode:'auto'},'Начать AUTO? Ожидаем закрытие текущей M1, затем один STOP по её направлению.');

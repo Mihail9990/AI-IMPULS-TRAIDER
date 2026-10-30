@@ -47,12 +47,9 @@ class ActionGateway:
     def _execute(self, action):
         if set(action) != {'type', 'text'} or action['type'] != 'command' or not isinstance(action['text'], str):
             raise ActionRejected('Unsupported action')
-        try:
-            # Controller.command reports validation refusal with ValueError and
-            # never dispatches trading requests synchronously.
-            self.controller.command(action['text'])
-        except ValueError as exc:
-            raise ActionRejected('Controller refused command') from exc
+        # Only the controller's typed, pre-effect refusals are safe to classify.
+        # Generic ValueError can follow a durable effect and must remain UNKNOWN.
+        self.controller.command(action['text'])
 
     def apply(self, request):
         if threading.get_ident() != self.owner:

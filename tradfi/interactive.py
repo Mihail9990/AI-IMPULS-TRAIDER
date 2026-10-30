@@ -6,7 +6,7 @@ import uuid
 from .engine import Controller, TERMINAL
 from .control import ActionRejected
 from .broker import Spec, target_price
-from .settings import Settings, number
+from .settings import Settings, number, parse_settings
 from .strategies.levels import user_triggers, recovery_triggers
 from .strategies.fixed_recovery import RecoveryConfig, initial, installment, resize, settle, net_money
 
@@ -81,6 +81,7 @@ class InteractiveController(Controller):
     def action(self, action):
         """Common authenticated transport boundary; caller uses ActionGateway."""
         if not isinstance(action,dict) or 'type' not in action: raise ActionRejected('Action type required')
+        self._validate_action_inputs(action)
         kind=action['type']
         if kind=='command' and set(action)=={'type','text'} and isinstance(action['text'],str): return self.command(action['text'])
         if kind=='start' and set(action)=={'type','mode'} and action['mode'] in ('auto','semi'): return self.command('/start '+action['mode'])
@@ -112,6 +113,51 @@ class InteractiveController(Controller):
         if kind=='close_position' and set(action)=={'type','position_id','expected_size','confirmed'} and action['confirmed'] is True:
             return self.close_position(action['position_id'],action['expected_size'])
         raise ActionRejected('Unsupported action or fields')
+
+    @staticmethod
+    def _validate_action_inputs(action):
+        """Pure validation only: no state writes, observations or broker calls.
+
+        Do not extend this exception boundary around execution: late errors may
+        follow an intent/send and must remain UNKNOWN in ActionGateway.
+        """
+        shapes={
+            'command':{'type','text'},'start':{'type','mode'},
+            'settings':{'type','mode','engine','recovery'},'modules':{'type','engine','recovery'},
+            'triggers':{'type','representation','levels'},
+            'protection':{'type','position_id','old','new'},
+            'delete_trigger':{'type','order_id','old_price'},
+            'close_position':{'type','position_id','expected_size','confirmed'},
+        }
+        try:
+            kind=action['type']
+            if not isinstance(kind,str) or kind not in shapes or set(action)!=shapes[kind]:raise ValueError()
+            if kind=='command':
+                if not isinstance(action['text'],str):raise ValueError()
+                raw=action['text'].strip()
+                if raw.upper().startswith('/SETTINGS:'):parse_settings(raw)
+                elif raw.lower() not in {'/start','/stop','/settings','/status','/reset_manual','/resume_time','/start auto','/start semi'}:raise ValueError()
+            if kind in ('start','settings') and action['mode'] not in ('auto','semi'):raise ValueError()
+            if kind in ('settings','modules'):
+                if action['engine'] not in ('legacy','fixed') or not isinstance(action['recovery'],dict):raise ValueError()
+                RecoveryConfig.load(action['recovery'])
+            if kind=='triggers':
+                levels=action['levels'];representation=action['representation']
+                if representation not in ('prices','ranges') or not isinstance(levels,dict) or not levels or not set(levels)<={'BUY','SELL'}:raise ValueError()
+                if representation=='ranges' and set(levels)!={'BUY','SELL'}:raise ValueError()
+                if any(number(v)<=0 for v in levels.values()):raise ValueError()
+            for key in ('position_id','order_id'):
+                if key in action and (not isinstance(action[key],str) or not action[key]):raise ValueError()
+            for key in ('old_price','expected_size'):
+                if key in action and number(action[key])<=0:raise ValueError()
+            if kind=='close_position' and action['confirmed'] is not True:raise ValueError()
+            if kind=='protection':
+                for key in ('old','new'):
+                    levels=action[key]
+                    if not isinstance(levels,dict) or set(levels)!={'sl','tp'}:raise ValueError()
+                    if any(number(v)<=0 for v in levels.values()):raise ValueError()
+        except (ValueError,TypeError,ArithmeticError) as exc:
+            raise ActionRejected('Invalid action fields; no action executed') from exc
 
     def _interactive_guard(self, *, entry=False):
         self._deadline_guard(); self._time_guard()
