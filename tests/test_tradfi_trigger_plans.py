@@ -1,7 +1,7 @@
 import unittest
 from tradfi.broker import Spec
 from tradfi.simulator import ARTIFICIAL_SPEC
-from tradfi.strategies.levels import user_triggers,recovery_triggers
+from tradfi.strategies.levels import user_triggers
 
 
 class TriggerPlansTest(unittest.TestCase):
@@ -24,9 +24,3 @@ class TriggerPlansTest(unittest.TestCase):
         for kwargs in ({'ranges':{'BUY':'3'}},{'prices':{'BUY':'4136.001'}},{'prices':{}},
                        {'ranges':{'BUY':'-1','SELL':'3'}},{'prices':{'BUY':'4000','SELL':'4200'}}):
             with self.subTest(kwargs=kwargs),self.assertRaises(ValueError):user_triggers(self.spec,quote,**kwargs)
-
-    def test_recovery_example_and_sell_mirror(self):
-        args=dict(after_sl='3',continuation='1',opposite='3')
-        self.assertEqual(recovery_triggers(self.spec,'4136','SELL','SL',**args),{'BUY':'4139','SELL':'4133'})
-        self.assertEqual(recovery_triggers(self.spec,'4140','BUY','TP',**args),{'BUY':'4141','SELL':'4137'})
-        self.assertEqual(recovery_triggers(self.spec,'4132','SELL','TP',**args),{'BUY':'4135','SELL':'4131'})

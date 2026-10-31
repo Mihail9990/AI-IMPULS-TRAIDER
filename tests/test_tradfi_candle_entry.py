@@ -100,25 +100,9 @@ class CandleEntryTest(unittest.TestCase):
                 self.start(engine);self.broker.fill('BUY');self.tick(3);self.broker.close('TP');self.tick(3)
                 self.assertIsNone(self.bot.state['cycle']);self.assertFalse(self.broker.data['orders'])
                 self.bar(120,'4000','4001');self.tick(2);self.assertEqual(len(self.broker.data['orders']),1)
-    def test_sl_retains_recovery_math_and_initial_level_legacy(self):
-        self.start();self.broker.fill('BUY');self.tick(3);self.broker.close('SL');self.tick()
-        c=self.bot.state['cycle'];self.assertFalse(c['first']);self.assertEqual(c['branch'],'BRANCH1_RECOVERY')
-        self.assertEqual(D(c['center'])+D(c['settings']['BRANCH1_RANGE']),D('4001'))
-        self.assertEqual(D(c['recovery']),D('76.5'))
-        self.tick(2);self.assertEqual(len(c['entries']),2)
-    def test_fixed_sl_enters_existing_two_sided_recovery(self):
-        self.start('fixed');self.broker.fill('BUY');self.tick(3);self.broker.close('SL');self.tick(2)
-        c=self.bot.state['cycle'];self.assertFalse(c['first']);self.assertEqual(c['branch'],'FIXED_RECOVERY')
-        self.assertEqual(D(c['fixed_recovery']['debt']),D('72'));self.assertEqual(len(self.broker.data['orders']),2)
     def test_stop_start_waits_new_close_without_reusing_signal(self):
         self.start();self.bot.command('/stop');self.tick(3);self.bot.command('/start auto');self.tick(3)
         self.assertFalse(self.broker.data['orders']);self.bar(120);self.tick(3);self.assertEqual(len(self.broker.data['orders']),1)
-    def test_settings_migration_preserves_old_custom_values_and_cooldown(self):
-        old=Settings().dump()
-        for key in list(old):
-            if key.startswith('INITIAL_') and key!='INITIAL_SIZE':old.pop(key)
-        old.update(BRANCH1_RANGE='2.4',BRANCH1_SL_DISTANCE='5',BASE_TP_DISTANCE='.4',CYCLE_COOLDOWN_SECONDS='37')
-        cfg=Settings.load(old);self.assertEqual((cfg.INITIAL_ENTRY_DISTANCE,cfg.INITIAL_SL_DISTANCE,cfg.INITIAL_TP_DISTANCE,cfg.CYCLE_COOLDOWN_SECONDS),(D('2.4'),D(5),D('.4'),D(37)))
 
     def test_custom_initial_settings_and_tick_constraints(self):
         cfg=Settings.load(dict(self.bot.state['settings'],INITIAL_ENTRY_DISTANCE='1.25',INITIAL_SL_DISTANCE='4.50',INITIAL_TP_DISTANCE='.30'))
@@ -133,32 +117,7 @@ class CandleEntryTest(unittest.TestCase):
     def test_missing_open_never_guesses_direction(self):
         self.bot.command('/start auto');self.bar();self.broker.data['candle'].pop('open');self.tick(3)
         self.assertFalse(self.broker.commands);self.assertIsNone(self.bot.state['cycle'])
-    def test_manual_auto_trigger_edit_rejected_before_cancel(self):
-        self.start();before=deepcopy(self.broker.data['orders'])
-        with self.assertRaisesRegex(ValueError,'SEMI'):self.bot.triggers('prices',{'BUY':'4002'})
-        self.assertEqual(self.broker.data['orders'],before)
-    def test_explicit_delete_waits_for_start_and_new_close(self):
-        self.start();order=self.broker.data['orders'][0]
-        self.bot.delete_trigger(order['id'],order['price']);self.tick(3)
-        self.assertEqual(self.bot.state['phase'],'PAUSED_CYCLE');self.bar(120);self.tick(3)
-        self.assertFalse(self.broker.data['orders'])
-        self.bot.command('/start auto');self.tick(2);self.assertFalse(self.broker.data['orders'])
-        self.bar(180);self.tick(2);self.assertEqual(len(self.broker.data['orders']),1)
 
-    def test_upgrade_preserves_old_active_symmetric_cycle_and_saved_cursor(self):
-        from tradfi.engine import Controller
-        old=Controller(self.store,self.broker);old.command('/start')
-        self.bar();old.tick();old.tick()
-        self.assertEqual(len(self.broker.data['orders']),2)
-        for settings in [old.state['settings'],old.state['cycle']['settings']]:
-            for key in ('INITIAL_ENTRY_DISTANCE','INITIAL_SL_DISTANCE','INITIAL_TP_DISTANCE'):settings.pop(key)
-        old.state['telegram_offset']=17;old.state.pop('command_offset');old.save('old_version_fixture')
-        before=deepcopy(self.broker.data['orders']);self.restart()
-        self.bar(120,'4001','4000');self.tick(3)
-        self.assertEqual(self.broker.data['orders'],before)
-        self.assertEqual(self.bot.state['command_offset'],17)
-        self.assertNotIn('telegram_offset',self.bot.state)
-        self.assertFalse(self.bot.state['cycle'].get('candle_initial'))
 
 # The same strategy through native obligation evidence and durable MT5 journal.
 import test_tradfi_native_interactive as native

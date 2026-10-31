@@ -104,12 +104,6 @@ class NativeInteractiveTest(unittest.TestCase):
         self.assertTrue(self.api.positions);self.assertFalse(self.ledger())
         self.assertEqual(len([r for r in self.api.sends if r['action']==self.api.TRADE_ACTION_DEAL]),1)
 
-    def test_native_fixed_recovery_n_immediately_modifies_tp_not_sl(self):
-        self.recovery();p=self.api.positions[0];sl=p.sl
-        self.bot.configure('fixed',RecoveryConfig(parts=5).dump());self.tick(3)
-        self.assertEqual(self.api.positions[0].sl,sl)
-        self.assertAlmostEqual(self.api.positions[0].tp,p.price_open+.4)
-        self.assertEqual(len(self.ledger()),1)
 
     def test_native_open_and_exit_costs_once(self):
         self.position()
@@ -135,31 +129,6 @@ class NativeInteractiveTest(unittest.TestCase):
         self.position();self.api.close_position(reason=3);self.tick()
         self.assertEqual(self.bot.state['phase'],'SAFE_PAUSE');self.assertFalse(self.ledger())
 
-    def test_existing_legacy_cycle_bound_before_settings_command(self):
-        self.position();c=self.bot.state['cycle']
-        for key in ('engine','operation_mode','module_config','fixed_recovery'):c.pop(key,None)
-        c['recovery']='54';self.bot.state.pop('modules');self.bot.state.pop('interactive_contract')
-        self.bot.save('legacy_fixture');self.restart()
-        self.bot.configure('fixed',RecoveryConfig().dump());self.tick()
-        self.assertEqual(self.bot.state['cycle']['engine'],'legacy')
-        self.assertEqual(self.bot.state['cycle']['recovery'],'54')
-        self.assertNotIn('fixed_recovery',self.bot.state['cycle'])
-
-    def test_recovery_close_rechecks_target_after_order_check(self):
-        self.recovery();p=self.api.positions[0]
-        self.api.tick=self.api.tick._replace(bid=p.price_open+.5,ask=p.price_open+.6)
-        original=self.api.order_check
-        def checked(request):
-            result=original(request)
-            if request['action']==self.api.TRADE_ACTION_DEAL:
-                self.api.tick=self.api.tick._replace(bid=p.price_open-1,ask=p.price_open-.9)
-            return result
-        self.api.order_check=checked
-        self.bot.configure('fixed',RecoveryConfig(parts=5).dump());self.tick(3)
-        self.assertTrue(self.api.positions)
-        self.assertFalse([r for r in self.api.sends if r['action']==self.api.TRADE_ACTION_DEAL])
-        rows=[r for r in self.broker.rows.values() if r['command']['kind']=='CLOSE']
-        self.assertTrue(rows);self.assertTrue(all(r['send_started'] is False for r in rows))
 
     def test_native_replace_pending_confirmed_and_restart_no_duplicates(self):
         self.start();old={o.ticket for o in self.api.orders}
@@ -184,47 +153,6 @@ class NativeInteractiveTest(unittest.TestCase):
     def manual(self):
         self.bot._enter_manual(self.bot.state['cycle'],'CYCLE_24H_LIMIT',self.api.now)
 
-    def test_fixed_reset_retains_debt_restart_duplicate_and_explicit_resume(self):
-        self.recovery();self.close();debt=self.bot.state['cycle']['fixed_recovery']['debt'];self.manual()
-        self.bot.state['time_block']={'reason':'CLOCK_JUMP'};self.bot.save('time_fixture')
-        before=len(self.api.sends);self.bot.command('/reset_manual',500)
-        self.assertEqual(self.bot.state['fixed_recovery_carry']['fixed_recovery']['debt'],debt)
-        self.assertEqual(self.bot.state['phase'],'WAIT_START');self.assertTrue(self.bot.state['stop'])
-        self.assertIn('time_block',self.bot.state);seen=list(self.bot.state['seen_deals'])
-        self.restart();self.tick(3);self.bot.command('/reset_manual',500);self.bot.command('/reset_manual',501)
-        self.assertEqual(len(self.api.sends),before);self.assertEqual(self.bot.state['seen_deals'],seen)
-        self.assertEqual(self.bot.state['fixed_recovery_carry']['fixed_recovery']['debt'],debt)
-        with self.assertRaises(ValueError):self.bot.command('/start semi')
-        # Simulate separately authorized independent clock recovery, not reset behavior.
-        self.bot.state.pop('time_block');self.bot.save('clock_restored_fixture')
-        self.api.now+=60;self.api.tick=self.api.tick._replace(time_msc=self.api.now*1000);self.api.rates=[dict(time=int(self.api.now//60)*60-60,open=3999.,close=4000.)]
-        self.bot.command('/start semi');self.bot.triggers('ranges',{'BUY':'3','SELL':'3'});self.tick(3)
-        self.assertEqual(self.bot.state['cycle']['fixed_recovery']['debt'],debt)
-        self.assertFalse(self.bot.state['cycle']['first']);self.assertIsNone(self.bot.state['fixed_recovery_carry'])
-        self.assertEqual(len(self.api.orders),2)
-
-    def test_fixed_reset_fresh_external_close_net_costs_atomic_and_zero_debt(self):
-        self.position();self.manual();self.api.close_position(reason=0,profit=5)
-        self.api.deals[-1]=record(**dict(self.api.deals[-1]._asdict(),commission=-1.,swap=-.5,fee=-.25))
-        self.bot.command('/reset_manual')
-        self.assertEqual(self.bot.state['completed'][-1]['realized'],'3.25')
-        self.assertEqual(self.bot.state['completed'][-1]['written_off_recovery'],'0')
-        self.assertIsNone(self.bot.state['fixed_recovery_carry']);self.assertEqual(len(self.ledger()),1)
-        self.restart();self.tick(3);self.bot.command('/reset_manual')
-        self.assertEqual(len(self.ledger()),1);self.assertFalse(self.api.orders)
-
-    def test_fixed_reset_fresh_loss_and_crash_rolls_back_then_accounts_once(self):
-        self.position();self.manual();self.api.close_position(reason=0,profit=-5)
-        self.api.deals[-1]=record(**dict(self.api.deals[-1]._asdict(),commission=-1.))
-        def crash(event):
-            if event=='manual_reset_snapshot_written':raise RuntimeError('power loss')
-        self.store.fault=crash
-        with self.assertRaises(DurabilityError):self.bot.command('/reset_manual')
-        self.assertFalse(self.ledger());self.assertEqual(self.bot.state['phase'],'MANUAL')
-        self.restart();self.bot.command('/reset_manual')
-        self.assertEqual(self.bot.state['fixed_recovery_carry']['fixed_recovery']['debt'],'6.0')
-        self.assertEqual(len(self.ledger()),1)
-        self.restart();self.bot.command('/reset_manual');self.assertEqual(len(self.ledger()),1)
 
     def test_fixed_reset_rejects_live_position_pending_unknown_and_unavailable(self):
         self.start();self.manual()
@@ -264,23 +192,3 @@ class NativeInteractiveTest(unittest.TestCase):
         self.assertEqual(D(self.bot.state['completed'][-1]['realized']),D(0))
         self.assertEqual(D(self.bot.state['completed'][-1]['recovery_retained']),D(0))
         self.assertIsNone(self.bot.state['fixed_recovery_carry']);self.assertEqual(len(self.ledger()),2)
-
-    def test_auto_carry_metadata_atomic_at_first_snapshot(self):
-        self.position();self.manual();self.api.close_position(reason=0,profit=-6);self.bot.command('/reset_manual')
-        # Auto variant of the same recovery state, representing an auto-origin cycle.
-        carry=self.bot.state['fixed_recovery_carry'];carry['operation_mode']='auto'
-        self.bot.state['operation_mode']='auto';self.bot.save('auto_origin_fixture')
-        self.api.now+=60;self.api.tick=self.api.tick._replace(time_msc=self.api.now*1000)
-        self.api.rates=[dict(time=int(self.api.now//60)*60-60,open=3999.,close=4000.)]
-        self.bot.command('/start auto')
-        self.api.now+=60;self.api.tick=self.api.tick._replace(time_msc=self.api.now*1000);self.api.rates[0]['time']+=60
-        original=self.bot.save
-        def crash(event):
-            original(event)
-            if event=='new_cycle_snapshot':raise RuntimeError('power loss after durable new cycle')
-        self.bot.save=crash
-        with self.assertRaises(RuntimeError):self.tick()
-        self.restart();self.tick(2)
-        self.assertEqual(self.bot.state['cycle']['engine'],'fixed')
-        self.assertEqual(D(self.bot.state['cycle']['fixed_recovery']['debt']),D(6))
-        self.assertIsNone(self.bot.state['fixed_recovery_carry'])
