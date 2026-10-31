@@ -17,6 +17,9 @@ class Conflict(ValueError):
 
 class ActionRejected(ValueError):
     """Executor positively established that the requested action was refused."""
+    def __init__(self,message,*,public_message=None):
+        super().__init__(message)
+        self.public_message=public_message
 
 
 def validate_request(request):
@@ -72,8 +75,9 @@ class ActionGateway:
         self.controller.save('control_action_reserved')
         try:
             self.execute(deepcopy(request['action']))
-        except ActionRejected:
+        except ActionRejected as exc:
             status = 'REJECTED'
+            if exc.public_message is not None:receipt['reason']=str(exc.public_message)[:400]
         except (ValueError, OSError, TimeoutError):
             status = 'UNKNOWN'
         else:

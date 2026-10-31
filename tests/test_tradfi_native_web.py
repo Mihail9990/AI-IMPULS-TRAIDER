@@ -101,16 +101,16 @@ class RuntimePipelineTest(unittest.TestCase):
                 bots.append(bot);self.n+=1
                 if self.n>20:raise AssertionError('runtime failed to settle')
                 if self.n==1:
-                    bot.command('/start semi');bot.triggers('ranges',{'BUY':'3','SELL':'3'});stages.append('semi')
+                    bot.command('/start');api.now+=60;api.rates[0]['time']+=60;stages.append('candle')
                 elif self.n==3:api.fill();stages.append('fill')
                 elif self.n==6:
                     p=bot.snapshot()['positions'][0]
-                    bot.protection(p['id'],{'sl':p['sl'],'tp':p['tp']},{'sl':p['sl'],'tp':str(float(p['tp'])+.25)})
+                    bot.action(dict(type='protection',cycle_id=bot.state['cycle']['id'],position_id=p['id'],old={'sl':p['sl'],'tp':p['tp']},new={'sl':p['sl'],'tp':str(float(p['tp'])+.25)}))
                     stages.append('modify')
                 elif self.n==9:
-                    p=bot.snapshot()['positions'][0];bot.close_position(p['id'],p['size']);stages.append('close')
+                    api.close_position(reason=api.DEAL_REASON_TP);stages.append('close')
                 elif self.n==12:
-                    assert bot.state['phase']=='WAIT_TRIGGER';stop.done=True
+                    assert bot.state['phase'] in {'COOLDOWN','WAIT_CANDLE'};stop.done=True
         with tempfile.TemporaryDirectory() as tmp:
             config=dict(backend='mt5_direct_v1',time_profile=BYBIT_PROFILE,expected_server='Bybit-Live-6',expected_login=111111111,
                 symbol='XAUUSD.s',magic=25101102,terminal_path='C:/Program Files/MetaTrader 5/terminal64.exe',enable_trading=True,
@@ -119,10 +119,10 @@ class RuntimePipelineTest(unittest.TestCase):
             with patch.dict('os.environ',{'LOCALAPPDATA':tmp}),patch('tradfi.time_safety.TimeSafety',side_effect=verified_time):
                 _run_mt5(config,False,service=True,execute=True,api=api,panel_factory=Panel,
                     stop_event=stop,clock=lambda:api.now,monotonic=lambda:api.now)
-            self.assertEqual(stages,['semi','fill','modify','close']);self.assertFalse(api.positions)
+            self.assertEqual(stages,['candle','fill','modify','close']);self.assertFalse(api.positions)
             self.assertEqual(panels[0].mailbox.view()['source'],'INJECTED_MT5')
             self.assertEqual(panels[0].mailbox.view()['feed']['status'],'FRESH')
-            self.assertEqual(len([s for s in api.sends if s['action']==api.TRADE_ACTION_DEAL]),1)
+            self.assertEqual(len([s for s in api.sends if s['action']==api.TRADE_ACTION_DEAL]),0)
             self.assertTrue(any(s['action']==api.TRADE_ACTION_SLTP for s in api.sends))
 
 class WebServiceSecurityTest(unittest.TestCase):

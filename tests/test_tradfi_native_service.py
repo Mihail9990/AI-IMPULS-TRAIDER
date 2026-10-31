@@ -257,7 +257,7 @@ class NativeServiceTest(unittest.TestCase):
                 controller=self.controller
                 self.controller=controller
                 controller.command('/status'); controller.command('/settings')
-                with self_test.assertRaisesRegex(ValueError,'Execution unavailable'): controller.command('/start')
+                with self_test.assertRaisesRegex(ValueError,'READ_ONLY'): controller.command('/start')
                 observed.append(controller.status()); stopped.set()
         self_test=self
         # A stale enable_trading=true config cannot activate without --execute.

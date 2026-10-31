@@ -96,7 +96,9 @@ class Store:
                     or data['phase']!='WAIT_START' or data['cycle'] is not None
                     or data.get('last_manual_reset')!=expected['cycle']['id']):
                 raise DurabilityError('Invalid manual reset transition')
-            positions=set(expected['cycle'].get('reset_position_ids',[])) if manual_reset else {expected['cycle']['position']['id']}
+            positions=(set(expected['cycle'].get('reset_position_ids',[])) if manual_reset else
+                       set(expected['cycle']['tickets']) if expected['cycle'].get('contract')=='ticket_basket_v1' else
+                       {expected['cycle']['position']['id']})
             for row,payload in encoded:
                 if (row['backend']!=data['backend'] or row['account']!=data['account']
                         or row['currency']!=data['currency'] or row['ticket'] not in data['seen_deals']

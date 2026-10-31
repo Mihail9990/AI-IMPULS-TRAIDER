@@ -88,6 +88,8 @@ class NativePanel:
     def view(self):
         s=self.controller.state;c=s.get('cycle') or {};snap=self.snapshot or {}
         feed=self.feed.view()
+        if 'basket_settings' in s:
+            return self.basket_view(s,c,snap,feed)
         return dict(source=feed['source'],scope=self.scope,revision=s.get('control_revision',0),
             symbol=self.controller.broker.symbol,phase=s['phase'],mode=s['operation_mode'],
             settings=deepcopy(s['settings']),read_only=bool(getattr(self.controller.broker,'read_only',False)),
@@ -96,10 +98,33 @@ class NativePanel:
             time_block=deepcopy(s.get('time_block')),feed=feed,quote=feed.get('quote'),timestamp=feed.get('timestamp'),
             orders=deepcopy(snap.get('orders',[])),positions=deepcopy(snap.get('positions',[])),
             journal=[n['text'] for n in s['notifications'][-30:]],
-            action_results={key:{'status':r['status'],'revision':r['revision']} for key,r in s.get('control_receipts',{}).items()})
+            action_results={key:{'status':r['status'],'revision':r['revision'],'reason':r.get('reason')} for key,r in s.get('control_receipts',{}).items()})
+    def basket_view(self,s,c,snap,feed):
+        projection=None
+        try:
+            key=(str(snap.get('positions',[])),c.get('recovery'),str(c.get('cfg')))
+            if getattr(self,'_basket_projection_key',None)!=key:
+                from decimal import Decimal as D
+                ps=snap.get('positions',[])
+                gross=sum((self.controller.broker.profit(p['side'],D(p['size']),D(p['entry']),D(p['tp'])) for p in ps),D(0))
+                debt=D(c.get('recovery') or s.get('basket_carry','0'));reserve=D(c.get('cfg',s['basket_settings'])['COST_RESERVE'])
+                self._basket_projection=dict(gross_tp=str(gross),cost_reserve=str(reserve),shortfall=str(max(D(0),debt+reserve-gross)))
+                self._basket_projection_key=key
+            projection=self._basket_projection
+        except (ValueError,OSError,TimeoutError):pass
+        return dict(contract='ticket_basket_v1',source=feed['source'],scope=self.scope,revision=s.get('control_revision',0),symbol=self.controller.broker.symbol,
+            phase=s['phase'],read_only=bool(getattr(self.controller.broker,'read_only',False)),stopped=s['stop'],settings=deepcopy(s['basket_settings']),
+            active_settings=deepcopy(c.get('cfg')),cycle_id=c.get('id'),debt=c.get('recovery',s.get('basket_carry','0')),realized=c.get('realized','0'),
+            frozen_levels=deepcopy(c.get('expanded')),levels=self.controller.levels(),edit=deepcopy(c.get('edit')),projection=projection,
+            migration_block=s.get('migration_block'),manual_reason=c.get('manual_reason'),time_block=deepcopy(s.get('time_block')),feed=feed,
+            tickets=deepcopy(list(c.get('tickets',{}).values())),orders=deepcopy(snap.get('orders',[])),positions=deepcopy(snap.get('positions',[])),
+            journal=[n['text'] for n in s['notifications'][-50:]],
+            action_results={key:{'status':r['status'],'revision':r['revision'],'reason':r.get('reason')} for key,r in s.get('control_receipts',{}).items()})
+
     def start(self):
         from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
         from .local_panel import ROOT
+        if 'basket_settings' in self.controller.state:ROOT=ROOT.parent/'basket-panel'
         transport=self.transport;authority=self.authority
         class Handler(BaseHTTPRequestHandler):
             def setup(self):super().setup();self.connection.settimeout(2)

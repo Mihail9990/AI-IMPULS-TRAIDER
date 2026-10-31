@@ -25,6 +25,8 @@ manual_reset_evidence manual_reset_duplicate manual_reset
 candle_doji_wait candle_observed candle_cancel_confirmed candle_entry_rejected candle_level_rejected candle_stop_intent
 control_action_reserved control_action_completed mode_selected interactive_confirmed_closure
 unknown_gateway_outcome protection_unchanged mt5_unavailable'''.split())
+EVENTS.update(['basket_actual_fill_ladder', 'basket_cancel_pending', 'basket_candle_observed', 'basket_close_reconciliation', 'basket_controller_loaded', 'basket_cooldown_finished', 'basket_cycle_complete', 'basket_doji', 'basket_edit_confirmed', 'basket_edit_modifications', 'basket_edit_requested', 'basket_expanded_once', 'basket_fills_adopted', 'basket_gap_exit_observed', 'basket_gap_profit_cleanup', 'basket_group_armed', 'basket_initial_protected', 'basket_initial_rejected_wait', 'basket_level_wait', 'basket_manual_reset', 'basket_manual_reset_evidence', 'basket_new_cycle', 'basket_paused', 'basket_paused_debt_retained', 'basket_settings_saved', 'basket_signal_replaced', 'basket_start', 'basket_status', 'basket_stop', 'basket_tick', 'basket_ticket_closed'])
+PHASES.update({'MIGRATION_BLOCK','INITIAL_WAIT','INITIAL_PENDING','INITIAL_POSITION','RECOVERY_WAIT','RECOVERY_PENDING','RECOVERY_POSITION','RECOVERY_CLEANUP'})
 ERROR_TYPES = {'OSError','TimeoutError','ValueError','QuoteFreshnessError','ConnectionError',
                'ReadTimeout','ConnectTimeout','HTTPError','Error'}
 LEVELS = {'DEBUG','INFO','WARNING','ERROR','CRITICAL'}

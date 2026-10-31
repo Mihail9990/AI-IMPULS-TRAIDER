@@ -110,8 +110,8 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
         broker = MT5EvidenceBroker(config, store=store,api=api,clock=clock,monotonic=monotonic)
         resources.callback(broker.close)
         broker.connect()
-        from .interactive import InteractiveController
-        controller = InteractiveController(store, broker,clock=clock,monotonic=monotonic)
+        from .basket import BasketController
+        controller = BasketController(store, broker,clock=clock,monotonic=monotonic)
         panel=None
         web_config=config.get('web',{})
         if not isinstance(web_config,dict):raise ValueError('web must be a configuration object')
