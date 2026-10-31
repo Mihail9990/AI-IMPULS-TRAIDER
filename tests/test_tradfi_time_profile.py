@@ -60,6 +60,29 @@ class BybitInspectTest(unittest.TestCase):
     def set_tick(self, raw):
         self.api.tick = record(bid=4000., ask=4000.1, time=int(raw), time_msc=round(raw*1000))
 
+    def test_november_2_winter_display_decodes_tick_and_m1_once(self):
+        self.mono+=epoch('2026-11-02T12:00:30')-self.api.now
+        self.api.now=epoch('2026-11-02T12:00:30')
+        self.set_tick(self.api.now+7200)
+        bars=[self.api.now-150,self.api.now-90,self.api.now-30]
+        self.api.rates=[dict(time=t+7200,open=3999.,close=4000.) for t in bars]
+        result=self.broker.preflight()
+        self.assertEqual(result['quote_time']['offset_seconds'],7200)
+        self.assertEqual(result['quote_time']['utc_time'],self.api.now)
+        self.assertEqual(result['m1_utc_times'],bars)
+        self.assertEqual(result['history_time_status'],'UNVERIFIED')
+        self.assertFalse(result['execution_ready']);self.assertFalse(self.api.sends)
+    def test_november_2_genuine_utc_cannot_be_mislabelled_fresh_by_wall_profile(self):
+        self.mono+=epoch('2026-11-02T12:00:30')-self.api.now
+        self.api.now=epoch('2026-11-02T12:00:30');self.set_tick(self.api.now)
+        with self.assertRaises(QuoteFreshnessError):self.broker.preflight()
+        self.assertFalse(self.api.sends)
+    def test_november_2_stale_weekend_quote_is_not_fixed_by_offset(self):
+        self.mono+=epoch('2026-11-02T12:00:30')-self.api.now
+        self.api.now=epoch('2026-11-02T12:00:30')
+        friday=epoch('2026-10-30T20:00:00');self.set_tick(friday+10800)
+        with self.assertRaises(QuoteFreshnessError):self.broker.preflight()
+        self.assertFalse(self.api.sends)
     def test_observed_vps_sample_inspects_without_history_or_mutation(self):
         with patch.object(self.api, 'history_orders_get', side_effect=AssertionError('history forbidden')), \
              patch.object(self.api, 'history_deals_get', side_effect=AssertionError('history forbidden')):

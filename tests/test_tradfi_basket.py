@@ -38,6 +38,20 @@ class BasketTest(unittest.TestCase):
     def close_all(self,reason='SL'):
         for p in list(self.b.data['positions']):self.b.close(reason,position_id=p['id'])
     def restart(self):self.bot=BasketController(self.store,self.b)
+    def test_november_2_mid_minute_start_and_24h_are_real_utc(self):
+        from datetime import datetime,timezone
+        now=datetime(2026,11,2,12,0,30,tzinfo=timezone.utc).timestamp()
+        self.b.data.update(now=now,candle=dict(id=now-90,open='3999',close='4000'))
+        self.bot=BasketController(self.store,self.b,clock=lambda:self.b.data['now'],monotonic=lambda:self.b.data['now'])
+        self.bot.command('/start');self.tick(2);self.assertFalse(self.b.data['orders'])
+        self.b.data.update(now=now+30,candle=dict(id=now-30,open='3999',close='4000'));self.tick(2)
+        self.assertEqual(len(self.b.data['orders']),1)
+        c=self.bot.state['cycle'];self.assertEqual(c['started_at_utc'],now+30)
+        self.assertEqual(c['deadline_utc'],now+30+86400)
+        self.assertEqual(c['signal']['id'],now-30)
+        self.b.data['now']=c['deadline_utc']-1;self.assertFalse(self.bot._deadline_guard())
+        self.b.data['now']+=1;self.assertTrue(self.bot._deadline_guard())
+        self.assertEqual(c['manual_reason'],'CYCLE_24H_LIMIT')
     def test_realized_costs_are_retained_across_restart(self):
         self.reversal()
         self.b.close('TP',position_id=self.b.data['positions'][0]['id'],commission='-0.20',swap='-0.10',fee='-0.05')
