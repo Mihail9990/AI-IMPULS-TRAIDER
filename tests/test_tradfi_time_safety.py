@@ -268,7 +268,7 @@ class DurableTimeTest(unittest.TestCase):
         self.broker.connect()
         with patch('requests.get',side_effect=AssertionError('No network during guard')):
             self.bot=Controller(self.store,self.broker,clock=lambda:self.api.now,monotonic=lambda:self.api.now)
-            self.assertEqual(self.store.load()['time_block']['reason'],'MT5_TIMESTAMP_SEMANTICS_UNVERIFIED')
+            self.assertEqual(self.store.load()['time_block']['reason'],'MT5_UTC_WAIT_REFERENCE')
             with self.assertRaisesRegex(ValueError,'TIME_BLOCK'): self.bot.command('/start')
             self.bot.tick()
             snap=self.bot.snapshot()

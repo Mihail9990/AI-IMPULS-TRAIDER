@@ -96,7 +96,7 @@ class TimeSafety:
                 if mono < old_mono or abs(wall-old_wall-(mono-old_mono)) > self.jump_tolerance:
                     return 'LOCAL_CLOCK_JUMP'
             if not self.semantics_verifier():
-                return 'MT5_TIMESTAMP_SEMANTICS_UNVERIFIED'
+                return getattr(self.semantics_verifier,'reason',None) or 'MT5_TIMESTAMP_SEMANTICS_UNVERIFIED'
             if not self.result or not self.result['ok']:
                 return (self.result or {}).get('reason', 'EXTERNAL_UTC_UNVERIFIED')
             age = mono-self.result['checked_monotonic']

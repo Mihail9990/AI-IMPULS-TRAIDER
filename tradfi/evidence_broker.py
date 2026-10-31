@@ -4,7 +4,7 @@ from types import ModuleType
 
 from .mt5_adapter import MT5Broker, QuoteFreshnessError, NotSent, dec
 from .settings import number
-from .time_profile import TEST_PROFILE, BYBIT_PROFILE, HistoryTimeUnverified, TimeProfileError, server_to_utc
+from .time_profile import TEST_PROFILE, BYBIT_PROFILE, HistoryTimeUnverified, TimeProfileError, server_to_utc, offset_at
 
 
 class MT5EvidenceBroker(MT5Broker):
@@ -19,6 +19,17 @@ class MT5EvidenceBroker(MT5Broker):
         self.time_safety = time_safety
         if self.time_profile == BYBIT_PROFILE and self.time_safety is None:
             self.time_safety = TimeSafety(clock=self.clock, monotonic=self.monotonic)
+            # Only the normal unconfigured safety object receives the native verifier.
+            # Explicit injected safety doubles retain their test contract.
+            if self.time_safety.semantics_verifier() is not True:
+                from .native_time import NativeUTCVerifier
+                self.time_safety.semantics_verifier=NativeUTCVerifier(self,self.time_safety)
+
+    def market_time_to_utc(self,stamp):
+        from .native_time import NativeUTCVerifier
+        if isinstance(getattr(self.time_safety,'semantics_verifier',None),NativeUTCVerifier):
+            return float(stamp)  # Official MT5 SDK contract: already UTC, never −2h/−3h.
+        return super().market_time_to_utc(stamp)
 
     def _timestamp_semantics_verified(self):
         if self.time_profile == TEST_PROFILE:
@@ -117,7 +128,7 @@ class MT5EvidenceBroker(MT5Broker):
             quote_time = None
             candle_time = 0
         elif self.time_profile==BYBIT_PROFILE:
-            candle_time=server_to_utc(float(candle_time))
+            candle_time=self.market_time_to_utc(float(candle_time))
             if candle_time%60 or candle_time+60>self._quote_clock():
                 raise ValueError('Invalid closed native M1 candle')
             if quote_time and candle_time!=int(quote_time['utc_time']//60)*60-60:
@@ -190,7 +201,8 @@ class MT5EvidenceBroker(MT5Broker):
                     history_time_status='UNVERIFIED',settlement_basis='cycle_scoped_identity_v1',
                     mt5_timestamp_semantics='VERIFIED' if semantics_verified else 'UNVERIFIED',
                     mt5_display_time=dict(tick_time_msc=getattr(tick,'time_msc',None),
-                        candle_time=rates[0]['time']),
+                        candle_time=rates[0]['time'],
+                        server_display_utc_offset_seconds=offset_at(quote_time['utc_time']) if quote_time else None),
                     now=self.clock(),spec=spec,quote=dict(bid=dec(tick.bid),ask=dec(tick.ask),
                         utc_time=quote_time['utc_time'] if quote_time else None),
                     candle=dict(id=int(candle_time),open=dec(rates[0]['open']),close=dec(rates[0]['close'])),

@@ -23,7 +23,7 @@ class ChartFeed:
             if number(stamp)<=0:raise ValueError('Invalid raw candle timestamp')
             utc=None
             if verified:
-                utc=float(number(stamp)) if b.time_profile==TEST_PROFILE else server_to_utc(float(number(stamp)))
+                utc=float(number(stamp)) if b.time_profile==TEST_PROFILE else b.market_time_to_utc(float(number(stamp)))
                 if utc<=0 or utc%60:raise ValueError('Invalid native M1 timestamp')
             row={k:str(number(r[k])) for k in ('open','high','low','close')}
             if number(row['low'])<=0 or number(row['high'])<max(number(row['open']),number(row['close'])) or number(row['low'])>min(number(row['open']),number(row['close'])):

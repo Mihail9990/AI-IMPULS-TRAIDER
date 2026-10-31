@@ -191,6 +191,9 @@ class MT5Broker:
                 self.clock_anchor = (now, mono)
         return now
 
+    def market_time_to_utc(self,stamp):
+        return server_to_utc(stamp)
+
     def _check_quote_time(self, tick, stage):
         now = self._quote_clock()
         raw = getattr(tick, 'time_msc', None)
@@ -202,7 +205,7 @@ class MT5Broker:
             if (isinstance(seconds, bool) or not isinstance(seconds, (int, float))
                     or not math.isfinite(seconds) or not 0 <= stamp-seconds < 1):
                 raise TimeProfileError('TICK_SECONDS_MILLISECONDS_DISAGREE')
-            stamp = server_to_utc(stamp)
+            stamp = self.market_time_to_utc(stamp)
         if stamp is None:
             reason = 'TICK_UNAVAILABLE' if tick is None else 'TICK_TIME_INVALID'
         elif abs(now-stamp) <= self.max_age:
