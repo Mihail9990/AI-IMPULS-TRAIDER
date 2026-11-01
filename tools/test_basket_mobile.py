@@ -50,7 +50,7 @@ def main():
             box=target.bounding_box();x=box['x']+box['width']*.6;y=box['y']
             before=len(requests);page.mouse.move(x,y);page.mouse.down();page.wait_for_timeout(80);page.mouse.move(x,y+18);page.mouse.up()
             assert page.locator('#preview').is_hidden();assert len(requests)==before
-            page.locator('#chart-reset').click();target=page.locator('g[data-line$="-tp"] line').first;box=target.bounding_box();x=box['x']+box['width']*.6;y=box['y']
+            page.locator('#chart-reset').click();page.locator('#chart').scroll_into_view_if_needed();target=page.locator('g[data-line$="-tp"] line').first;box=target.bounding_box();x=box['x']+box['width']*.6;y=box['y']
             page.mouse.move(x,y);page.mouse.down();page.wait_for_timeout(580);page.mouse.move(x,y+12);page.mouse.up();page.locator('#preview').wait_for(state='visible')
             assert len(requests)==before
             page.locator('#new-price').fill('3997.60');page.locator('#apply-level').click()

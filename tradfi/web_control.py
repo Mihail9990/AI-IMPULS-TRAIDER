@@ -15,9 +15,9 @@ from .chart_feed import ChartFeed
 
 
 class WebTransport:
-    def __init__(self,mailbox,*,authority='127.0.0.1:8765',password=None,clock=time.monotonic,public_origin=None):
+    def __init__(self,mailbox,*,authority='127.0.0.1:8765',password=None,clock=time.monotonic,public_origin=None,paper_mailbox=None):
         if authority.split(':')[0]!='127.0.0.1':raise ValueError('Web server must bind loopback')
-        self.mailbox=mailbox;self.authority=authority;self.password=password;self.clock=clock
+        self.mailbox=mailbox;self.paper_mailbox=paper_mailbox;self.authority=authority;self.password=password;self.clock=clock
         self.origin=public_origin or 'http://'+authority
         parsed=urlsplit(self.origin)
         if public_origin and (parsed.scheme!='https' or not parsed.hostname or parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment):
@@ -54,25 +54,27 @@ class WebTransport:
         except (KeyError,ValueError,CookieError):return reply(401,{'error':'AUTH_REQUIRED'})
         with self.lock:
             if self.sessions.get(sid,0)<=self.clock():return reply(401,{'error':'SESSION_EXPIRED'})
-        if method=='GET' and route=='/api/state':return reply(200,self.mailbox.view())
+        mailbox=self.paper_mailbox if route.startswith('/api/paper/') else self.mailbox
+        if route.startswith('/api/paper/') and mailbox is None:return reply(404,{'error':'PAPER_UNAVAILABLE'})
+        if method=='GET' and route in {'/api/state','/api/paper/state'}:return reply(200,mailbox.view())
         if method=='POST' and route=='/api/logout':
             with self.lock:self.sessions.pop(sid,None)
             return reply(200,{'status':'SIGNED_OUT'},'tradfi_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0')
-        if method=='POST' and route=='/api/action':
-            view=self.mailbox.view()
+        if method=='POST' and route in {'/api/action','/api/paper/action'}:
+            view=mailbox.view()
             if not view.get('scope') or headers.get('x-controller-scope')!=view['scope']:return reply(409,{'error':'SCOPE_CHANGED'})
-            try:return reply(202,self.mailbox.submit(json.loads(body)))
+            try:return reply(202,mailbox.submit(json.loads(body)))
             except (ValueError,TypeError):return reply(400,{'error':'INVALID_ACTION'})
             except queue.Full:return reply(429,{'error':'QUEUE_FULL'})
         return reply(404,{'error':'NOT_FOUND'})
 
 
 class NativePanel:
-    def __init__(self,controller,*,authority='127.0.0.1:8765',password=None,clock=time.time,monotonic=time.monotonic,public_origin=None):
-        self.controller=controller;self.clock=clock;self.monotonic=monotonic
+    def __init__(self,controller,*,authority='127.0.0.1:8765',password=None,clock=time.time,monotonic=time.monotonic,public_origin=None,paper_session=None):
+        self.controller=controller;self.clock=clock;self.monotonic=monotonic;self.paper_session=paper_session
         self.mailbox=OwnerMailbox();self.gateway=ActionGateway(controller,execute=controller.action)
         self.feed=ChartFeed(controller.broker,clock=clock,monotonic=monotonic)
-        self.transport=WebTransport(self.mailbox,authority=authority,password=password,clock=monotonic,public_origin=public_origin)
+        self.transport=WebTransport(self.mailbox,authority=authority,password=password,clock=monotonic,public_origin=public_origin,paper_mailbox=paper_session.mailbox if paper_session else None)
         self.authority=authority;self.next_feed=0;self.snapshot=None;self.server=None
         if 'web_store_id' not in controller.state:
             controller.state['web_store_id']=uuid.uuid4().hex

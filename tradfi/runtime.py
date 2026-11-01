@@ -80,7 +80,7 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
         require_execution_profile(config)  # no implicit activation through the old CLI
     if execute:
         require_execution_profile(config,evidence_contract='per_obligation_v1')
-    config=dict(config,enable_trading=bool(execute))
+    config=dict(config,enable_trading=bool(execute),market_observation_only=not execute)
     if execute and config.get('legacy_ea_removed') is not True:
         raise ValueError('Legacy EA removal must be explicitly confirmed')
     if execute and config.get('legacy_state_reconciled') is not True:
@@ -112,7 +112,7 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
         broker.connect()
         from .basket import BasketController
         controller = BasketController(store, broker,clock=clock,monotonic=monotonic)
-        panel=None
+        panel=None;paper=None
         web_config=config.get('web',{})
         if not isinstance(web_config,dict):raise ValueError('web must be a configuration object')
         if not isinstance(web_config.get('enabled',True),bool):raise ValueError('web.enabled must be boolean')
@@ -120,9 +120,16 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
             if web_config.get('host','127.0.0.1')!='127.0.0.1':raise ValueError('Web server requires loopback')
             port=web_config.get('port',8765)
             if isinstance(port,bool) or not isinstance(port,int) or not 1024<=port<=65535:raise ValueError('Invalid loopback port')
+            from .paper_market import MarketReader
+            from .paper import PaperSession
+            paper_path=state_file.with_name(state_file.stem+'.paper.sqlite3')
+            if paper_path.resolve()==state_file:raise ValueError('Paper and live databases must be separate')
+            resources.enter_context(owner_lock(str(paper_path)+'.lock'))
+            paper=PaperSession(paper_path,MarketReader(broker.api,symbol=broker.symbol,clock=clock,monotonic=monotonic,expected_account=broker.account),clock=clock,monotonic=monotonic)
+            resources.callback(paper.close)
             from .web_control import NativePanel
             authority='127.0.0.1:'+str(port)
-            panel=(panel_factory or NativePanel)(controller,authority=authority,password=os.environ.get('TRADFI_WEB_PASSWORD'),clock=clock,monotonic=monotonic,public_origin=web_config.get('public_origin'))
+            panel=(panel_factory or NativePanel)(controller,authority=authority,password=os.environ.get('TRADFI_WEB_PASSWORD'),clock=clock,monotonic=monotonic,public_origin=web_config.get('public_origin'),paper_session=paper)
             resources.callback(panel.close)
             panel.start()
             controller.panel_url='http://'+authority+'/?controller=native'
@@ -144,6 +151,7 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
             if safety is not None and monotonic() >= next_time_check:
                 controller.refresh_time()
                 next_time_check = monotonic() + 30.
+            if paper is not None:paper.step()
             try:
                 controller.tick()
                 if panel is not None:panel.step()

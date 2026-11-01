@@ -230,7 +230,7 @@ class MT5Broker:
             raise ValueError('Unexpected MT5 account/server')
         if self.account is not None and identity != self.account:
             raise ValueError('MT5 account changed')
-        if account.currency != 'UST' or account.margin_mode != self.api.ACCOUNT_MARGIN_MODE_RETAIL_HEDGING:
+        if account.currency != 'UST' or (account.margin_mode != self.api.ACCOUNT_MARGIN_MODE_RETAIL_HEDGING and not (not self.enable_trading and self.config.get('market_observation_only') is True)):
             raise ValueError('UST hedging account required')
         self.account = identity
         if mutation and (not self.enable_trading or not terminal.trade_allowed or terminal.tradeapi_disabled

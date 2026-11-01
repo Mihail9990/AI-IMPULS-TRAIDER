@@ -1,0 +1,91 @@
+"""Chromium on actual authenticated route handlers + two independent controllers. Offline."""
+from pathlib import Path
+import sys,json,time
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'tests'))
+from playwright.sync_api import sync_playwright
+from test_tradfi_basket import BasketTest
+from test_tradfi_paper import PaperTest
+from tradfi.web_control import NativePanel
+ROOT=Path(__file__).resolve().parents[1]/'web/basket-panel'
+
+def main():
+    live=BasketTest();live.setUp();live.reversal();fixed=live.bot.clock();live.bot.clock=lambda:fixed;live.bot.monotonic=lambda:fixed;live.bot._cycle_clock=None;paper=PaperTest();paper.setUp();paper.reversal()
+    live.b.account='TEST-LIVE';live.b.symbol='XAUUSD.s'
+    panel=NativePanel(live.bot,password='x'*32,paper_session=paper.session)
+    requests=[];errors=[];drop=[False]
+    def refresh():
+        live.tick(2);panel.snapshot=live.b.snapshot()
+        panel.feed.view=lambda:dict(source='OFFLINE_MT5_FIXTURE',status='FRESH',timestamp=paper.reader.now,age_seconds=0,quote=live.b.data['quote'],candles=[dict(open='3998',close='3998.2',high='3998.5',low='3997.5',utc_time=paper.reader.now-60*i) for i in reversed(range(60))])
+        paper.reader.data['candles']=panel.feed.view()['candles'];paper.session.step()
+        panel.mailbox.drain(panel.gateway,panel.view)
+    def route(r):
+        path=r.request.url.split('8765',1)[-1].split('?',1)[0]
+        if path.startswith('/api/'):
+            refresh()
+            if path.endswith('/action'):
+                requests.append((path,json.loads(r.request.post_data)))
+                if drop[0] and path=='/api/paper/action':r.abort();return
+            h=dict(r.request.headers);h['host']='127.0.0.1:8765'
+            code,data,extra=panel.transport.request(r.request.method,path,h,(r.request.post_data or '').encode())
+            r.fulfill(status=code,json=data,headers=extra);return
+        files={'/':'index.html','/panel.js':'panel.js','/panel.css':'panel.css'}
+        if path not in files:r.abort();return
+        r.fulfill(body=(ROOT/files[path]).read_text(),content_type={'/':'text/html','/panel.js':'text/javascript','/panel.css':'text/css'}[path])
+    with sync_playwright() as pw:
+        browser=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox'])
+        try:
+            page=browser.new_page(viewport=dict(width=390,height=844),is_mobile=True,has_touch=True);page.route('**/*',route);page.on('pageerror',lambda e:errors.append(str(e)));page.on('dialog',lambda d:d.accept())
+            def wait(expression):
+                end=time.monotonic()+10
+                while not page.evaluate(expression):
+                    if time.monotonic()>end:raise AssertionError(expression)
+                    page.wait_for_timeout(40)
+            page.goto('http://127.0.0.1:8765/');page.locator('#password').fill('x'*32);page.locator('#login-button').click();page.locator('#workspace').wait_for(state='visible')
+            page.locator('#open-pattern').click();assert page.locator('#analysis-pane').is_visible();assert page.locator('#chart').is_visible()
+            page.locator('#main-cycle').uncheck();assert page.locator('#chart g[visibility=visible]').count()==0;assert page.locator('#analysis-chart g[visibility=visible]').count()>0
+            page.locator('#analysis-cycle').uncheck();page.locator('#analysis-trend').check();page.locator('#open-figure').click();assert page.locator('#analysis-cycle').is_checked();assert not page.locator('#analysis-trend').is_checked()
+            page.locator('#open-pattern').click();assert not page.locator('#analysis-cycle').is_checked();assert page.locator('#analysis-trend').is_checked()
+            page.locator('#main-cycle').check();page.locator('.appearance summary').click();page.locator('#color-BUY').fill('#39c5bb');page.locator('#zone-opacity').fill('37');page.locator('#liquidity-visible').check()
+            page.reload();page.locator('#workspace').wait_for(state='visible');assert page.evaluate("JSON.parse(localStorage.getItem('chart-preferences-v1')).opacity===37")
+            assert page.evaluate("JSON.parse(localStorage.getItem('chart-preferences-v1')).colors.BUY==='#39c5bb'")
+            assert 'не подключён' in page.locator('.pending-analysis').inner_text()
+            # A tab switch itself emits no trading action, and cancels the old preview.
+            before=len(requests);live_before=live.store.load();page.locator('#tab-paper').click();wait("document.querySelector('#mode').textContent.startsWith('PAPER')")
+            assert len(requests)==before;assert page.locator('#tickets tr').count()==6
+            page.locator('#level-buttons button').filter(has_text='TP ').first.click();assert page.locator('#preview').is_visible()
+            page.locator('#tab-live').click();wait("document.querySelector('#tab-live').getAttribute('aria-selected')==='true'");assert page.locator('#preview').is_hidden();assert len(requests)==before
+            page.locator('#tab-paper').click();wait("document.querySelector('#mode').textContent.startsWith('PAPER')")
+            page.locator('#setting-BASKET_COUNT').fill('0');page.locator('#save-settings').click();wait("localStorage.getItem('basket-request-paper')===null && document.querySelector('#action-error').textContent.includes('Неверные параметры')")
+            page.locator('#setting-BASKET_COUNT').fill('6');page.locator('#save-settings').click();wait("localStorage.getItem('basket-request-paper')===null")
+            page.locator('#paper-cost').fill('2');page.locator('#paper-save-cost').click();wait("localStorage.getItem('basket-request-paper')===null");assert paper.p['commission_per_lot_side']=='2'
+            page.locator('#chart').scroll_into_view_if_needed()
+            target=page.locator('#chart g[data-line$="-tp"] line').first;box=target.bounding_box();x=box['x']+box['width']*.6;y=box['y']
+            page.mouse.move(x,y);page.mouse.down();page.wait_for_timeout(580);page.mouse.move(x,y+12);page.mouse.up();page.locator('#preview').wait_for(state='visible')
+            changed=f"{float(paper.p['positions'][0]['tp'])-.01:.2f}"
+            page.locator('#new-price').fill(changed);page.locator('#apply-level').click();wait("localStorage.getItem('basket-request-paper')===null && document.querySelector('#edit-status').textContent===''")
+            assert float(paper.p['positions'][0]['tp'])==float(changed)
+            page.locator('#level-buttons button').filter(has_text='TP ').first.click()
+            pstate=paper.session.controller.state
+            paper.session.gateway.apply(dict(id='other-tab-costs',revision=pstate['control_revision'],action=dict(type='paper_costs',commission_per_lot_side='3')))
+            prior=[(p['sl'],p['tp']) for p in paper.p['positions']]
+            page.locator('#apply-level').click();wait("localStorage.getItem('basket-request-paper')===null && document.querySelector('#action-error').textContent.includes('устарел')")
+            assert [(p['sl'],p['tp']) for p in paper.p['positions']]==prior
+            if page.locator('#cancel-level').is_visible():page.locator('#cancel-level').click()
+            assert live.store.load()==live_before, {k:(live_before.get(k),v) for k,v in live.store.load().items() if live_before.get(k)!=v}
+            for width in (360,390,768,1280):
+                page.set_viewport_size(dict(width=width,height=1000));assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+                assert page.locator('#chart').is_visible();assert page.locator('#analysis-pane').is_visible()
+                assert page.evaluate("document.querySelector('#chart').getBoundingClientRect().bottom<=document.querySelector('#chart-workspace').getBoundingClientRect().bottom+1")
+                assert page.evaluate("document.querySelector('#analysis-chart').getBoundingClientRect().bottom<=document.querySelector('#chart-workspace').getBoundingClientRect().bottom+1")
+            page.locator('.chart-card').screenshot(path='/tmp/paper-chart-desktop.png')
+            page.set_viewport_size(dict(width=390,height=844));page.locator('.chart-card').screenshot(path='/tmp/paper-chart-mobile.png')
+            page.locator('#close-analysis').click();assert page.locator('#analysis-pane').is_hidden();assert page.locator('#chart').is_visible()
+            # Network ambiguity belongs only to paper; neither tab switch nor reload replays it.
+            drop[0]=True;page.locator('#stop').click();wait("localStorage.getItem('basket-request-paper')!==null");page.wait_for_timeout(100)
+            page.locator('#tab-live').click();wait("document.querySelector('#tab-live').getAttribute('aria-selected')==='true'")
+            wait("!document.querySelector('#mode').textContent.startsWith('PAPER') && !document.querySelector('#start').disabled");count=len(requests);page.reload();page.locator('#workspace').wait_for(state='visible');assert len(requests)==count
+            page.locator('#tab-paper').click();wait("document.querySelector('#mode').textContent.startsWith('PAPER')");assert page.locator('#start').is_disabled();assert len(requests)==count
+            assert not errors,errors
+            print('PASS: actual auth/routes; isolated live/paper; no requests on tab switch; preview cancelled across mode; per-mode UNKNOWN persists; invalid setting then valid action; paper long-press TP readback; stale preview rejected; independent panes/toggles; colors/opacity persist; main visible; mobile360/390 desktop768/1280; no live state changes; no JS errors.')
+        finally:browser.close();paper.tearDown();paper.doCleanups();live.doCleanups()
+if __name__=='__main__':main()
