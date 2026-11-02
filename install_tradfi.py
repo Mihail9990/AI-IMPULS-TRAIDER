@@ -397,11 +397,11 @@ def gui():
     ttk.Label(app,text='Репозиторий: '+REPO+' • ветка work').pack(anchor='w',padx=12,pady=8)
     ttk.Label(app,text='Данные: '+str(root/'data'),wraplength=750).pack(anchor='w',padx=12)
     text=tk.Text(app,height=17,state='disabled',wrap='word'); text.pack(fill='both',expand=True,padx=12,pady=8)
-    buttons=[]; busy=False; child=None; session=None
+    buttons=[]; busy=False; child=None; session=None; https_window=None
     def log(s):
         text.configure(state='normal'); text.insert('end',s+'\n'); text.see('end'); text.configure(state='disabled')
     def refresh():
-        for b in buttons: b.configure(state='disabled' if busy or child else 'normal')
+        for b in buttons: b.configure(state='disabled' if busy or child or (https_window is not None and https_window.winfo_exists()) else 'normal')
         stop.configure(state='normal' if child else 'disabled')
     def work(action):
         nonlocal busy
@@ -443,9 +443,12 @@ def gui():
                      ('Rollback кода',lambda:work(manager.rollback))]:
         b=ttk.Button(panel,text=label,command=fn); b.pack(side='left',padx=2); buttons.append(b)
     def https_wizard():
+        nonlocal https_window
+        if busy:return
+        if https_window is not None and https_window.winfo_exists():https_window.lift();return
         try:
             from https_setup import wizard
-            wizard(manager)
+            https_window=wizard(manager)
         except ImportError:
             messagebox.showerror('HTTPS','Скачайте полный архив новой версии: рядом с install_tradfi.py нужен https_setup.py.')
     ttk.Button(app,text='HTTPS для телефона…',command=https_wizard).pack(pady=4)
@@ -468,6 +471,7 @@ def gui():
             log(f'Процесс завершён (код {code}). При ошибке проверьте конфигурацию, MT5 и свежесть котировок. Повторно автоматически не запускается.')
         refresh(); app.after(200,poll)
     def close():
+        if https_window is not None and https_window.winfo_exists():messagebox.showinfo('TradFi','Сначала закройте HTTPS мастер, дождавшись завершения операции.');return
         if busy: messagebox.showinfo('TradFi','Дождитесь завершения операции.'); return
         if child: messagebox.showinfo('TradFi','Сначала остановите процесс кнопкой или оставьте это окно открытым.'); return
         app.destroy()
