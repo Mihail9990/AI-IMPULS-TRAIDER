@@ -210,6 +210,8 @@ def main(argv=None):
     except KeyboardInterrupt:
         parser.exit(130, 'TradFi stopped.\n')
     except (Exception, DurabilityError) as exc:
+        from .startup_errors import write_failure
+        startup_message=write_failure(args.config,exc)
         from .mt5_adapter import QuoteFreshnessError
         from .time_profile import TimeProfileError
         if isinstance(exc, TimeProfileError):
@@ -221,7 +223,4 @@ def main(argv=None):
                         'Trading permissions were not changed.\n')
         from .web_auth import WebAuthError
         if isinstance(exc,WebAuthError):parser.exit(2,str(exc)+'\n')
-        # Never echo raw MT5 errors, config paths, account identity or web credentials.
-        parser.exit(2, 'MT5 check/runner stopped (' + type(exc).__name__ + '). '
-                    'Verify config, terminal connection, UST hedging account and fresh quotes; '
-                    'preserve existing state. Trading permissions were not changed.\n')
+        parser.exit(2,startup_message)

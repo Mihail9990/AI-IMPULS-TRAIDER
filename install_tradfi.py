@@ -325,6 +325,29 @@ class Manager:
         if 'password' not in web:
             web['password']=''
             atomic_json(self.config_path,config)
+    def diagnose(self):
+        # A separate, bounded, read-only probe. No trading-service launch or account login.
+        release=self.current_release()
+        script=Path(__file__).resolve().parent/'startup_diagnostics.py'
+        if not script.is_file(): raise SetupError('Нужен полный новый архив со startup_diagnostics.py рядом с установщиком.')
+        output=self.root/'data'/'startup-diagnostic.txt'
+        from startup_diagnostics import Report
+        report=Report(output)
+        env=dict(os.environ)
+        for key in ('PYTHONPATH','PYTHONHOME','PYTHONSTARTUP','TRADFI_LAUNCH_SESSION'):env.pop(key,None)
+        try:
+            result=self.runner([str(release/'venv'/'Scripts'/'python.exe'),str(script),'--root',str(self.root),'--output',str(output)],
+                cwd=self.root/'data',env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=40,
+                creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+            if result.returncode not in (0,2) or not any(marker in output.read_text(encoding='utf-8-sig') for marker in ('ERROR ', 'INFO COMPLETE:')):
+                Report.resume(output).add('ERROR','PROBE_FAILED')
+        except subprocess.TimeoutExpired:
+            Report.resume(output).add('ERROR','TIMEOUT')
+        except Exception:
+            Report.resume(output).add('ERROR','PROBE_FAILED')
+        self.report('Диагностика сохранена: '+str(output)+'. Сделки и торговый сервис не запускались.')
+        if os.name=='nt':subprocess.Popen(['notepad.exe',str(output)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        return output
     def launch(self,execute=False):
         # Runtime acquires the same lock for its whole lifetime, including direct launches.
         with lock(self.root/'operation.lock'),account_lock(self.root,self.config()),state_lock(self.root,self.config()):
@@ -366,7 +389,7 @@ def gui():
             import ctypes
             ctypes.windll.user32.MessageBoxW(0,'Не удалось открыть Tkinter. Восстановите Tcl/Tk в установщике Python.','TradFi',16)
         return
-    app.title('TradFi — установка и запуск'); app.geometry('880x620')
+    app.title('TradFi — установка и запуск'); app.geometry('1020x640')
     if os.name!='nt' or sys.version_info[:2]!=(3,13) or sys.maxsize<=2**32:
         messagebox.showerror('Среда','Нужен Windows и Python 3.13 x64 из python.org.'); app.destroy(); return
     root=Path(os.environ['LOCALAPPDATA'])/'AI_IMPULS_TRADFI_Manager'
@@ -415,6 +438,7 @@ def gui():
             except OSError: messagebox.showerror('Остановка','Не удалось передать запрос остановки.')
     panel=ttk.Frame(app); panel.pack(fill='x',padx=12,pady=4)
     for label,fn in [('Установить / обновить',lambda:work(manager.install)),('Настройки (Блокнот)',edit_config),
+                     ('Диагностика запуска',lambda:work(manager.diagnose)),
                      ('READ_ONLY',lambda:launch(False)),('Реальный запуск…',lambda:launch(True)),
                      ('Rollback кода',lambda:work(manager.rollback))]:
         b=ttk.Button(panel,text=label,command=fn); b.pack(side='left',padx=2); buttons.append(b)
