@@ -51,13 +51,13 @@ class Early(unittest.TestCase):
     def test_zip_stage(self):
         data=b'not a zip';self.a.fetch=lambda:data
         with patch.object(h,'ARCHIVE_SHA256',h.digest(data)),self.assertRaises(h.AttemptError):self.apply()
-        self.failure('unpack','ZIP_INVALID')
+        self.failure('unpack','GUARD_REJECTED')
     def test_zip_missing_exe(self):
         data=io.BytesIO()
         with zipfile.ZipFile(data,'w') as z:z.writestr('other',b'other')
         self.a.fetch=lambda:data.getvalue()
         with patch.object(h,'ARCHIVE_SHA256',h.digest(data.getvalue())),self.assertRaises(h.AttemptError):self.apply()
-        self.failure('unpack','ZIP_INVALID')
+        self.failure('unpack','GUARD_REJECTED')
     def test_foreign_empty_directory_not_adopted(self):
         self.s.home.mkdir()
         with self.assertRaises(h.AttemptError):self.apply()
@@ -187,7 +187,7 @@ class GuiTests(unittest.TestCase):
                 obj=FakeTkWindow(**kw);buttons[kw['text']]=obj;return obj
             mb=SimpleNamespace(askyesno=Mock(return_value=False),showinfo=Mock(),showerror=Mock())
             ttk=SimpleNamespace(Label=FakeTkWindow,Entry=FakeTkWindow,Frame=FakeTkWindow,Button=button)
-            tk=types.ModuleType('tkinter');tk.Toplevel=lambda:window;tk.StringVar=FakeTkWindow;tk.Text=FakeTkWindow;tk.messagebox=mb;tk.ttk=ttk
+            tk=types.ModuleType('tkinter');tk.Toplevel=lambda:window;tk.StringVar=FakeTkWindow;tk.Text=FakeTkWindow;tk.messagebox=mb;tk.ttk=ttk;tk.filedialog=SimpleNamespace(askopenfilename=Mock(return_value=''))
             prepared={'old':None,'origin':'https://38.60.203.9','caddyfile':'safe'}
             setup=Mock();setup.home=root/'https';setup.attempt_path=root/'https-attempt.json';setup.prepare.return_value=prepared
             setup.local_report.return_value={};manager=SimpleNamespace(root=root,config=lambda:{})
@@ -201,7 +201,15 @@ class GuiTests(unittest.TestCase):
                 h.wizard(manager)
                 buttons['Подготовить план'].options['command']()
                 pump_until(lambda:buttons['Применить'].options.get('state')=='normal')
+                buttons['Выбрать официальный ZIP…'].options['command']();setup.select_local_zip.assert_not_called()
                 buttons['Применить'].options['command']();setup.apply.assert_not_called()
+                tk.filedialog.askopenfilename.return_value='/local/test.zip'
+                buttons['Выбрать официальный ZIP…'].options['command']()
+                pump_until(lambda:buttons['Применить'].options.get('state')=='normal')
+                setup.select_local_zip.assert_called_once_with('/local/test.zip')
+                buttons['Применить'].options['command']();setup.apply.assert_not_called()
+                buttons['Подготовить план'].options['command']()
+                pump_until(lambda:buttons['Применить'].options.get('state')=='normal')
                 mb.askyesno.return_value=True;entered=threading.Event();release=threading.Event()
                 def apply(*a):entered.set();release.wait(2);return 'completed'
                 setup.apply.side_effect=apply

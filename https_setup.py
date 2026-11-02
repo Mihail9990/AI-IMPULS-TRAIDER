@@ -9,6 +9,8 @@ import os
 from pathlib import Path, PureWindowsPath
 import re
 import ssl
+import stat
+import struct
 import queue
 import threading
 import subprocess
@@ -33,7 +35,7 @@ class CommandError(HttpsError):
 
 class AttemptError(HttpsError): pass
 
-STAGES={'begin','admin','preflight','download','checksum','unpack','recheck','directory','acl','backup',
+STAGES={'local_archive','begin','admin','preflight','download','checksum','unpack','recheck','directory','acl','backup',
         'binary','caddyfile','adapt','old_service','config','service_create','service_start','complete','recovery'}
 MESSAGES={
  'ADMIN_REQUIRED':'Для изменения служб нужен запуск установщика от имени администратора того же пользователя Windows.',
@@ -91,6 +93,37 @@ class BackgroundJob:
         try:result=self.events.get_nowait()
         except queue.Empty:return None
         self.busy=False;return result
+
+
+MAX_ARCHIVE=64*1024*1024
+MAX_EXE=128*1024*1024
+
+def validate_archive(data):
+    """Return only the pinned executable bytes. Never extract archive paths."""
+    if not isinstance(data,bytes) or len(data)>MAX_ARCHIVE or digest(data)!=ARCHIVE_SHA256:
+        raise HttpsError('Нужен неизменённый официальный Caddy '+VERSION+' Windows amd64 ZIP: SHA256 не совпал. Другие версии не поддерживаются.')
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            entries=z.infolist();names=[i.filename for i in entries]
+            if not entries or len(names)!=len(set(names)) or set(names)-{'LICENSE','README.md','caddy.exe'} or 'caddy.exe' not in names:
+                raise ValueError()
+            binary=None
+            for i in entries:
+                mode=(i.external_attr>>16)&0xffff
+                if i.is_dir() or (mode and stat.S_IFMT(mode) not in (0,stat.S_IFREG)) or i.flag_bits&1 or i.compress_type not in (zipfile.ZIP_STORED,zipfile.ZIP_DEFLATED):raise ValueError()
+                if i.file_size<0 or i.file_size>(MAX_EXE if i.filename=='caddy.exe' else 1024*1024):raise ValueError()
+                value=z.read(i)  # CRC verification; size bounded before decompression.
+                if i.filename=='caddy.exe':binary=value
+            if binary is None or len(binary)<64 or binary[:2]!=b'MZ':raise ValueError()
+            pe=struct.unpack_from('<I',binary,0x3c)[0]
+            if pe<64 or pe+26>len(binary) or binary[pe:pe+4]!=b'PE\0\0':raise ValueError()
+            machine=struct.unpack_from('<H',binary,pe+4)[0]
+            optional=struct.unpack_from('<H',binary,pe+20)[0]
+            flags=struct.unpack_from('<H',binary,pe+22)[0]
+            if machine!=0x8664 or optional<2 or pe+24+optional>len(binary) or flags&0x2000 or struct.unpack_from('<H',binary,pe+24)[0]!=0x20b:raise ValueError()
+            return binary
+    except (ValueError,KeyError,struct.error,zipfile.BadZipFile,RuntimeError,NotImplementedError):
+        raise HttpsError('ZIP повреждён или содержит неподдерживаемые файлы/архитектуру. Нужен официальный архив Windows amd64; ничего не извлечено.') from None
 
 
 def digest(data): return hashlib.sha256(data).hexdigest()
@@ -253,7 +286,24 @@ class Setup:
     def __init__(self,root,adapter=None):
         self.root=Path(root); self.home=self.root/'https'; self.adapter=adapter or Windows()
         self.config=self.root/'data'/'service.json'; self.journal=self.home/'transaction.json'
-        self.attempt_path=self.root/'https-attempt.json'; self.attempt=None
+        self.attempt_path=self.root/'https-attempt.json'; self.attempt=None; self.local_archive=None
+    def select_local_zip(self,path):
+        # Cancellation is a no-op. An actual reselection invalidates the previous bytes first.
+        if not path:return False
+        self.local_archive=None
+        try:
+            if str(path).startswith(('\\\\','//')):raise HttpsError('Выберите ZIP на локальном диске VPS, не сетевой путь.')
+            with Path(path).open('rb') as file:
+                info=os.fstat(file.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_size>MAX_ARCHIVE:raise HttpsError('Нужен обычный ZIP-файл размером не более 64 MiB.')
+                data=file.read(MAX_ARCHIVE+1)
+            validate_archive(data)
+        except HttpsError:raise
+        except OSError:raise HttpsError('Не удалось прочитать выбранный ZIP. Проверьте права и завершение загрузки; прежний выбор сброшен.') from None
+        self.local_archive=data  # Immutable verified bytes, not a path to reopen at Apply.
+        return True
+    def use_download(self):self.local_archive=None
+    def archive_source(self):return 'LOCAL_OFFICIAL_SHA256' if self.local_archive is not None else 'OFFICIAL_HTTPS_DOWNLOAD'
     def prepare(self,address):
         if self.attempt_path.exists() and read(self.attempt_path).get('status')!='RECOVERED': raise HttpsError('Есть предыдущая попытка HTTPS. Сначала диагностика и восстановление подготовки либо откат; повторное Apply запрещено.')
         public=origin(address); raw=self.config.read_bytes(); cfg=json.loads(raw.decode('utf-8-sig'))
@@ -274,7 +324,7 @@ class Setup:
         if old: verify_service_process(old)
         ports(inventory,old['ProcessId'] if old and old['State']=='Running' else 0)
         return {'format':1,'origin':public,'inventory_hash':digest(canonical(relevant(inventory))),
-                'config_hash':digest(raw),'old':old,
+                'config_hash':digest(raw),'old':old,'archive_source':self.archive_source(),
                 'caddyfile':caddyfile(public,self.home/'certificates')}
     def _stage(self,stage,**values):
         self.attempt.update(stage=stage,**values)
@@ -297,7 +347,7 @@ class Setup:
             raise HttpsError('Предыдущая попытка не сверена. Повторное Apply запрещено.')
         self.attempt={'format':1,'id':uuid.uuid4().hex,'status':'RUNNING','stage':'begin',
                       'mutation_started':False,'home_owned':False,'files':{},
-                      'config_before':plan['config_hash'],'inventory_hash':plan['inventory_hash']}
+                      'config_before':plan['config_hash'],'inventory_hash':plan['inventory_hash'],'archive_source':plan.get('archive_source','OFFICIAL_HTTPS_DOWNLOAD')}
         try:
             # Independent of the https directory: even download/admin failures have a report.
             self._stage('begin')
@@ -312,19 +362,17 @@ class Setup:
     def _apply(self,plan):
         self._stage('admin');self.adapter.admin()
         self._stage('preflight')
+        if plan.get('archive_source','OFFICIAL_HTTPS_DOWNLOAD')!=self.archive_source():raise HttpsError('Источник архива изменился. Нужен новый план.')
         if self.journal.exists(): raise HttpsError('Переход уже начат; повтор запрещён.')
         if self.home.exists(): raise HttpsError('Папка HTTPS уже существует. Автоматическое присвоение запрещено.')
         if digest(self.config.read_bytes())!=plan['config_hash']: raise HttpsError('Настройки изменились. Подготовьте план заново.')
         snapshot=same_plan(self.adapter,plan)
         if any(x['port']==8765 for x in snapshot['listeners']): raise HttpsError('Сначала остановите процесс бота.')
-        self._stage('download');archive=self.adapter.fetch()
+        self._stage('local_archive' if self.local_archive is not None else 'download')
+        archive=self.local_archive if self.local_archive is not None else self.adapter.fetch()
         self._stage('checksum')
-        if digest(archive)!=ARCHIVE_SHA256: raise HttpsError('Контрольная сумма Caddy не совпала.')
-        self._stage('unpack')
-        with zipfile.ZipFile(io.BytesIO(archive)) as z:
-            entry=z.getinfo('caddy.exe')
-            if entry.file_size>128*1024*1024: raise HttpsError('Слишком большой исполняемый файл.')
-            binary=z.read(entry)
+        if len(archive)>MAX_ARCHIVE or digest(archive)!=ARCHIVE_SHA256:raise HttpsError('Контрольная сумма Caddy не совпала.')
+        self._stage('unpack');binary=validate_archive(archive)
         self._stage('recheck');same_plan(self.adapter,plan)
         if digest(self.config.read_bytes())!=plan['config_hash']: raise HttpsError('Настройки изменились во время загрузки.')
         self._stage('directory')
@@ -434,9 +482,11 @@ class Setup:
     def local_report(self):
         report={'attempt_report_exists':self.attempt_path.is_file(),'transaction_exists':self.journal.is_file(),
                 'https_directory_exists':self.home.exists(),'backup_exists':(self.home/'backup').is_dir()}
+        report['selected_archive_source']=self.archive_source()
         if report['attempt_report_exists']:
             try:
                 a=read(self.attempt_path)
+                if a.get('archive_source') in ('LOCAL_OFFICIAL_SHA256','OFFICIAL_HTTPS_DOWNLOAD'):report['attempt_archive_source']=a['archive_source']
                 report['attempt_status']=a.get('status') if a.get('status') in ('RUNNING','FAILED','SUCCEEDED','RECOVERED') else 'UNKNOWN'
                 report['stage']=a.get('stage') if a.get('stage') in STAGES else 'UNKNOWN'
                 report['mutation_started']=a.get('mutation_started') is not False
@@ -536,7 +586,7 @@ class OldRemoval:
 def wizard(manager):
     """All slow work is off the Tk thread; no cancellation of an uncertain mutation."""
     import tkinter as tk
-    from tkinter import messagebox,ttk
+    from tkinter import messagebox,ttk,filedialog
     from install_tradfi import lock,account_lock,state_lock
     window=tk.Toplevel();window.title('HTTPS для телефона');window.geometry('920x650')
     address=tk.StringVar();plan=None;setup=Setup(manager.root);job=BackgroundJob();buttons=[];pending=None
@@ -581,11 +631,23 @@ def wizard(manager):
                  +'Пароль 32+, Secure cookie. Торговля не включается.\n'
                  +('Остановить и отключить автозапуск старой службы '+old['Name']+'\nФайлы: '+old['PathName']+'\n' if old else 'Старая служба не обнаружена.\n')
                  +'Резервная копия: '+str(setup.home/'backup')+'\n'
-                 +'Скачать проверенный Caddy '+VERSION+', создать службу '+SERVICE+' с автозапуском.\n'
+                 +('Использовать локальный официальный ZIP, SHA256 проверен.\n' if plan.get('archive_source')=='LOCAL_OFFICIAL_SHA256' else 'Скачать официальный ZIP по HTTPS.\n')
+                 +'Caddy '+VERSION+', создать службу '+SERVICE+' с автозапуском.\n'
                  +'Изменить только web.public_origin. После применения нажмите READ_ONLY отдельно.\n'
                  +'Порты 80/443 должны быть доступны извне; firewall не меняется.\n'
                  +'Сертификат выпускается/продлевается Caddy. Старые папки не удаляются.\n\n'+plan['caddyfile'])
         launch(lambda:setup.prepare(value),done)
+    def select_zip():
+        nonlocal plan
+        if job.busy:return
+        path=filedialog.askopenfilename(parent=window,title='Официальный Caddy '+VERSION+' Windows amd64 ZIP',filetypes=[('ZIP архив','*.zip')])
+        if not path:return
+        plan=None
+        launch(lambda:setup.select_local_zip(path),lambda _:show('Выбран локальный официальный Caddy '+VERSION+' ZIP. SHA256 и AMD64 проверены. Используются проверенные байты, путь не записывается.\nПосле прежнего отказа сначала восстановите подготовку. Затем подготовьте НОВЫЙ план.'),locked=False)
+    def use_download():
+        nonlocal plan
+        if job.busy:return
+        plan=None;setup.use_download();show('Источник: официальный HTTPS download. Подготовьте новый план.')
     def apply():
         nonlocal plan
         if job.busy:return
@@ -607,6 +669,9 @@ def wizard(manager):
         if job.busy:return
         if messagebox.askyesno('Откат HTTPS','Остановить новую службу и восстановить прежнюю конфигурацию/службу? Бот должен быть остановлен. Файлы сохраняются.',parent=window):
             plan=None;launch(lambda:setup.rollback(True),show)
+    sources=ttk.Frame(window);sources.pack(fill='x',padx=8,pady=4)
+    for label,action in [('Выбрать официальный ZIP…',select_zip),('Использовать HTTPS загрузку',use_download)]:
+        button=ttk.Button(sources,text=label,command=action);button.pack(side='left',padx=4);buttons.append(button)
     panel=ttk.Frame(window);panel.pack(fill='x',padx=8,pady=10)
     for label,action in [('Диагностика',diagnose),('Подготовить план',prepare),('Применить',apply),('Восстановить подготовку',recover),('Откат HTTPS',rollback)]:
         button=ttk.Button(panel,text=label,command=action);button.pack(side='left',padx=4);buttons.append(button)

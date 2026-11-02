@@ -2,6 +2,7 @@ import copy
 import io
 import json
 import tempfile
+import struct
 import unittest
 import zipfile
 from pathlib import Path
@@ -22,7 +23,9 @@ class Fake:
         self.services=[legacy] if legacy else []; self.listeners=[]; self.calls=[]; self.fail=None
         if legacy and legacy['State']=='Running': self.listeners=[dict(port=443,pid=42,address='::')]
         self.archive=io.BytesIO()
-        with zipfile.ZipFile(self.archive,'w') as z:z.writestr('caddy.exe',b'OFFLINE-NOT-EXECUTABLE')
+        binary=bytearray(256);binary[:2]=b'MZ';struct.pack_into('<I',binary,0x3c,64);binary[64:68]=b'PE\0\0'
+        struct.pack_into('<H',binary,68,0x8664);struct.pack_into('<H',binary,84,2);struct.pack_into('<H',binary,88,0x20b)
+        with zipfile.ZipFile(self.archive,'w') as z:z.writestr('caddy.exe',bytes(binary))
     def inventory(self):return copy.deepcopy(dict(services=self.services,listeners=self.listeners))
     def admin(self): self.calls.append(('admin',))
     def protect(self,p): self.calls.append(('protect',))
