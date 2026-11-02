@@ -112,7 +112,7 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
         broker.connect()
         from .basket import BasketController
         controller = BasketController(store, broker,clock=clock,monotonic=monotonic)
-        panel=None;paper=None
+        panel=None;paper=None;demo=None
         web_config=config.get('web',{})
         if not isinstance(web_config,dict):raise ValueError('web must be a configuration object')
         if not isinstance(web_config.get('enabled',True),bool):raise ValueError('web.enabled must be boolean')
@@ -127,9 +127,17 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
             resources.enter_context(owner_lock(str(paper_path)+'.lock'))
             paper=PaperSession(paper_path,MarketReader(broker.api,symbol=broker.symbol,clock=clock,monotonic=monotonic,expected_account=broker.account),clock=clock,monotonic=monotonic)
             resources.callback(paper.close)
+            from .demo_test import DemoSession
+            from .demo_runtime import strategy_flat
+            demo_path=state_file.with_name(state_file.stem+'.demo.sqlite3')
+            resources.enter_context(owner_lock(str(demo_path)+'.lock'))
+            resources.enter_context(owner_lock(account_lock_path(dict(config,symbol='XAUUSDT'))))
+            demo=DemoSession(demo_path,broker.api,expected_login=login,expected_server=config['expected_server'],live_safe=lambda:strategy_flat(controller),clock=clock,monotonic=monotonic)
+            resources.callback(demo.close)
+            demo.step()
             from .web_control import NativePanel
             authority='127.0.0.1:'+str(port)
-            panel=(panel_factory or NativePanel)(controller,authority=authority,password=os.environ.get('TRADFI_WEB_PASSWORD'),clock=clock,monotonic=monotonic,public_origin=web_config.get('public_origin'),paper_session=paper)
+            panel=(panel_factory or NativePanel)(controller,authority=authority,password=os.environ.get('TRADFI_WEB_PASSWORD'),clock=clock,monotonic=monotonic,public_origin=web_config.get('public_origin'),paper_session=paper,**({'demo_session':demo} if panel_factory is None else {}))
             resources.callback(panel.close)
             panel.start()
             controller.panel_url='http://'+authority+'/?controller=native'
@@ -153,7 +161,7 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
                 next_time_check = monotonic() + 30.
             if paper is not None:paper.step()
             try:
-                controller.tick()
+                if demo is None or not demo.blocking:controller.tick()
                 if panel is not None:panel.step()
             except (OSError, TimeoutError) as exc:
                 # Terminal exception payloads can contain private account/order data.
@@ -170,8 +178,10 @@ def main(argv=None):
     parser.add_argument('--inspect-evidence', action='store_true', help='Read-only obligation evidence summary; never execute')
     parser.add_argument('--journal-snapshot', help='Existing compatible offline rollback-journal SQLite snapshot for evidence audit')
     parser.add_argument('--service',action='store_true',help='Native MT5 + web service; trading disabled by default')
+    parser.add_argument('--demo-service',action='store_true',help='Isolated DEMO XAUUSDT panel; no live strategy or paper startup')
     parser.add_argument('--execute',action='store_true',help='Explicit execution activation; requires --service and config opt-ins')
     args = parser.parse_args(argv)
+    if args.demo_service and (args.mode!='mt5' or args.execute or args.service or args.inspect or args.inspect_evidence):parser.error('--demo-service requires only --mode mt5 and --config')
     if (args.service and (args.mode!='mt5' or args.inspect or args.inspect_evidence)
             or args.execute and not args.service):
         parser.error('--service requires --mode mt5 without inspect; --execute requires --service')
@@ -202,6 +212,10 @@ def main(argv=None):
         for key in ('enable_trading', 'legacy_ea_removed', 'legacy_state_reconciled'):
             if not isinstance(config.get(key, False), bool):
                 raise ValueError('Execution flags must be JSON booleans')
+        if args.demo_service:
+            from .demo_runtime import run_demo_service
+            run_demo_service(config)
+            return
         _run_mt5(config, args.inspect or args.inspect_evidence,
                  evidence=args.inspect_evidence, journal_path=args.journal_snapshot,
                  service=args.service,execute=args.execute,config_path=args.config)

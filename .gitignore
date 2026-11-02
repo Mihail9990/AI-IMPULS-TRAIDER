@@ -15,3 +15,9 @@ service.json
 telegram.json
 telegram.local.json
 *.credentials.json
+
+# Local native demo state and bounded diagnostic exports
+tradfi_demo.json
+tradfi_xauusdt_demo.sqlite3*
+*.demo.sqlite3*
+*.diagnostic.jsonl*

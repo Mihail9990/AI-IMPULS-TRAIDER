@@ -9,15 +9,16 @@ import secrets
 import uuid
 import threading
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit,parse_qs
 from .control import OwnerMailbox,ActionGateway
 from .chart_feed import ChartFeed
 
 
 class WebTransport:
-    def __init__(self,mailbox,*,authority='127.0.0.1:8765',password=None,clock=time.monotonic,public_origin=None,paper_mailbox=None):
+    def __init__(self,mailbox,*,authority='127.0.0.1:8765',password=None,clock=time.monotonic,public_origin=None,paper_mailbox=None,demo_mailbox=None,logs=None):
         if authority.split(':')[0]!='127.0.0.1':raise ValueError('Web server must bind loopback')
-        self.mailbox=mailbox;self.paper_mailbox=paper_mailbox;self.authority=authority;self.password=password;self.clock=clock
+        self.logs=logs
+        self.mailbox=mailbox;self.paper_mailbox=paper_mailbox;self.demo_mailbox=demo_mailbox;self.authority=authority;self.password=password;self.clock=clock
         self.origin=public_origin or 'http://'+authority
         parsed=urlsplit(self.origin)
         if public_origin and (parsed.scheme!='https' or not parsed.hostname or parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment):
@@ -54,13 +55,24 @@ class WebTransport:
         except (KeyError,ValueError,CookieError):return reply(401,{'error':'AUTH_REQUIRED'})
         with self.lock:
             if self.sessions.get(sid,0)<=self.clock():return reply(401,{'error':'SESSION_EXPIRED'})
-        mailbox=self.paper_mailbox if route.startswith('/api/paper/') else self.mailbox
+        if method=='GET' and route in {'/api/logs','/api/logs/download'}:
+            if self.logs is None:return reply(404,{'error':'LOGS_UNAVAILABLE'})
+            try:
+                query=parse_qs(urlsplit(path).query,strict_parsing=True)
+                if set(query)-{'scope','page'} or any(len(v)!=1 for v in query.values()):raise ValueError()
+                scope=query.get('scope',['live'])[0];page=int(query.get('page',['0'])[0])
+                value=self.logs.response(scope,page,download=route.endswith('/download'))
+                if isinstance(value,bytes):return 200,value,{'Content-Disposition':'attachment; filename="tradfi-'+scope+'-logs.txt"'}
+                return reply(200,value)
+            except ValueError:return reply(400,{'error':'INVALID_LOG_REQUEST'})
+        mailbox=self.demo_mailbox if route.startswith('/api/demo/') else self.paper_mailbox if route.startswith('/api/paper/') else self.mailbox
+        if route.startswith('/api/demo/') and mailbox is None:return reply(404,{'error':'DEMO_UNAVAILABLE'})
         if route.startswith('/api/paper/') and mailbox is None:return reply(404,{'error':'PAPER_UNAVAILABLE'})
-        if method=='GET' and route in {'/api/state','/api/paper/state'}:return reply(200,mailbox.view())
+        if method=='GET' and route in {'/api/state','/api/paper/state','/api/demo/state'}:return reply(200,mailbox.view())
         if method=='POST' and route=='/api/logout':
             with self.lock:self.sessions.pop(sid,None)
             return reply(200,{'status':'SIGNED_OUT'},'tradfi_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0')
-        if method=='POST' and route in {'/api/action','/api/paper/action'}:
+        if method=='POST' and route in {'/api/action','/api/paper/action','/api/demo/action'}:
             view=mailbox.view()
             if not view.get('scope') or headers.get('x-controller-scope')!=view['scope']:return reply(409,{'error':'SCOPE_CHANGED'})
             try:return reply(202,mailbox.submit(json.loads(body)))
@@ -70,23 +82,35 @@ class WebTransport:
 
 
 class NativePanel:
-    def __init__(self,controller,*,authority='127.0.0.1:8765',password=None,clock=time.time,monotonic=time.monotonic,public_origin=None,paper_session=None):
+    def __init__(self,controller,*,authority='127.0.0.1:8765',password=None,clock=time.time,monotonic=time.monotonic,public_origin=None,paper_session=None,demo_session=None):
+        self.demo_session=demo_session
         self.controller=controller;self.clock=clock;self.monotonic=monotonic;self.paper_session=paper_session
-        self.mailbox=OwnerMailbox();self.gateway=ActionGateway(controller,execute=controller.action)
+        self.mailbox=OwnerMailbox();self.gateway=ActionGateway(controller,execute=self.live_action)
         self.feed=ChartFeed(controller.broker,clock=clock,monotonic=monotonic)
-        self.transport=WebTransport(self.mailbox,authority=authority,password=password,clock=monotonic,public_origin=public_origin,paper_mailbox=paper_session.mailbox if paper_session else None)
+        from .web_logs import DiagnosticLogs
+        self.logs=DiagnosticLogs(controller.broker.config.get('log_file','tradfi_mt5.log') if hasattr(controller.broker,'config') else None)
+        self.transport=WebTransport(self.mailbox,authority=authority,password=password,clock=monotonic,public_origin=public_origin,paper_mailbox=paper_session.mailbox if paper_session else None,demo_mailbox=demo_session.mailbox if demo_session else None,logs=self.logs)
         self.authority=authority;self.next_feed=0;self.snapshot=None;self.server=None
         if 'web_store_id' not in controller.state:
             controller.state['web_store_id']=uuid.uuid4().hex
             controller.save('bind_web_store_identity')
         self.scope=hashlib.sha256((controller.broker.account+'|'+controller.broker.symbol+'|'+controller.state['web_store_id']).encode()).hexdigest()
+    def live_action(self,action):
+        if self.demo_session and self.demo_session.blocking:
+            from .control import ActionRejected
+            raise ActionRejected('DEMO active',public_message='Сначала выключите DEMO и завершите сверку его билетов.')
+        return self.controller.action(action)
     def step(self):
+        if self.demo_session:self.demo_session.step()
         if self.monotonic()>=self.next_feed:
             try:
                 self.snapshot=self.controller.snapshot();self.feed.capture(self.snapshot)
             except (ValueError,OSError,TimeoutError):self.feed.disconnected()
             self.next_feed=self.monotonic()+1
         self.mailbox.drain(self.gateway,self.view)
+        self.logs.capture('live',self.controller.store,self.controller.state,self.clock(),self.view())
+        if self.paper_session:self.logs.capture('paper',self.paper_session.controller.store,self.paper_session.controller.state,self.clock(),self.paper_session.view())
+        if self.demo_session:self.logs.capture('demo',self.demo_session.store,self.demo_session.state,self.clock(),self.demo_session.view())
     def view(self):
         s=self.controller.state;c=s.get('cycle') or {};snap=self.snapshot or {}
         feed=self.feed.view()
@@ -143,7 +167,7 @@ class NativePanel:
                 except ValueError:size=-1
                 if not 0<=size<=8192:self.reply(413,b'{}','application/json',{});return
                 code,data,extra=transport.request(self.command,self.path,dict(self.headers),self.rfile.read(size))
-                self.reply(code,json.dumps(data,allow_nan=False).encode(),'application/json',extra)
+                self.reply(code,data if isinstance(data,bytes) else json.dumps(data,allow_nan=False).encode(),'text/plain; charset=utf-8' if isinstance(data,bytes) else 'application/json',extra)
             def reply(self,code,body,mime,extra):
                 self.send_response(code)
                 for k,v in dict({'Content-Type':mime,'Content-Length':str(len(body)),'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Content-Security-Policy':"frame-ancestors 'none'"},**extra).items():self.send_header(k,v)
@@ -164,4 +188,5 @@ class NativePanel:
         self.server=BoundedServer((host,int(port)),Handler)
         threading.Thread(target=self.server.serve_forever,daemon=True).start()
     def close(self):
+        self.logs.close()
         if self.server:self.server.shutdown();self.server.server_close()
