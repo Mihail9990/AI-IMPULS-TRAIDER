@@ -18,8 +18,10 @@ def main():
         panel.feed.view=lambda:dict(source='OFFLINE_MT5_FIXTURE',status='FRESH',timestamp=paper.reader.now,age_seconds=0,quote=live.b.data['quote'],candles=[dict(open='3998',close='3998.2',high='3998.5',low='3997.5',utc_time=paper.reader.now-60*i) for i in reversed(range(60))])
         paper.reader.data['candles']=panel.feed.view()['candles'];paper.session.step()
         panel.mailbox.drain(panel.gateway,panel.view)
+        panel.logs.capture('live',live.store,live.bot.state,fixed,panel.view())
+        panel.logs.capture('paper',paper.session.store,paper.session.controller.state,paper.reader.now,paper.session.view())
     def route(r):
-        path=r.request.url.split('8765',1)[-1].split('?',1)[0]
+        path=r.request.url.split('8765',1)[-1]
         if path.startswith('/api/'):
             refresh()
             if path.endswith('/action'):
@@ -27,7 +29,9 @@ def main():
                 if drop[0] and path=='/api/paper/action':r.abort();return
             h=dict(r.request.headers);h['host']='127.0.0.1:8765'
             code,data,extra=panel.transport.request(r.request.method,path,h,(r.request.post_data or '').encode())
-            r.fulfill(status=code,json=data,headers=extra);return
+            if isinstance(data,bytes):r.fulfill(status=code,body=data,headers={'Content-Type':'text/plain; charset=utf-8',**extra})
+            else:r.fulfill(status=code,json=data,headers=extra)
+            return
         files={'/':'index.html','/panel.js':'panel.js','/panel.css':'panel.css'}
         if path not in files:r.abort();return
         r.fulfill(body=(ROOT/files[path]).read_text(),content_type={'/':'text/html','/panel.js':'text/javascript','/panel.css':'text/css'}[path])
@@ -80,12 +84,21 @@ def main():
             page.locator('.chart-card').screenshot(path='/tmp/paper-chart-desktop.png')
             page.set_viewport_size(dict(width=390,height=844));page.locator('.chart-card').screenshot(path='/tmp/paper-chart-mobile.png')
             page.locator('#close-analysis').click();assert page.locator('#analysis-pane').is_hidden();assert page.locator('#chart').is_visible()
+            assert page.locator('#demo-test').count()==0
+            page.locator('#logs-section summary').click()
+            for scope in ('live','paper','runtime'):
+                page.locator('#log-scope').select_option(scope);page.locator('#logs-refresh').click();wait("document.querySelector('#logs-status').textContent.includes('Страница')")
+                with page.expect_download() as event:page.locator('#logs-download').click()
+                download=event.value;assert download.suggested_filename=='tradfi-'+scope+'-logs.txt'
+                data=Path(download.path()).read_bytes();assert len(data)<=1048576;data.decode('utf-8')
+                if scope!='runtime':assert 'Логи' in data.decode()
+            assert page.locator('#log-scope option[value=demo]').count()==0
             # Network ambiguity belongs only to paper; neither tab switch nor reload replays it.
             drop[0]=True;page.locator('#stop').click();wait("localStorage.getItem('basket-request-paper')!==null");page.wait_for_timeout(100)
             page.locator('#tab-live').click();wait("document.querySelector('#tab-live').getAttribute('aria-selected')==='true'")
             wait("!document.querySelector('#mode').textContent.startsWith('PAPER') && !document.querySelector('#start').disabled");count=len(requests);page.reload();page.locator('#workspace').wait_for(state='visible');assert len(requests)==count
             page.locator('#tab-paper').click();wait("document.querySelector('#mode').textContent.startsWith('PAPER')");assert page.locator('#start').is_disabled();assert len(requests)==count
             assert not errors,errors
-            print('PASS: actual auth/routes; isolated live/paper; no requests on tab switch; preview cancelled across mode; per-mode UNKNOWN persists; invalid setting then valid action; paper long-press TP readback; stale preview rejected; independent panes/toggles; colors/opacity persist; main visible; mobile360/390 desktop768/1280; no live state changes; no JS errors.')
+            print('PASS: actual auth/routes; isolated live/paper; no requests on tab switch; preview cancelled across mode; per-mode UNKNOWN persists; invalid setting then valid action; paper long-press TP readback; stale preview rejected; independent panes/toggles; colors/opacity persist; main visible; mobile360/390 desktop768/1280; no live state changes; no JS errors; DEMO absent; live/paper/runtime UTF-8 log downloads PASS.')
         finally:browser.close();paper.tearDown();paper.doCleanups();live.doCleanups()
 if __name__=='__main__':main()

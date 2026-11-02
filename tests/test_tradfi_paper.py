@@ -211,7 +211,7 @@ class NativePaperIsolationTest(unittest.TestCase):
                 if self.count==0:paper.action(dict(type='command',text='/start'))
                 if self.count==3:paper.action(dict(type='command',text='/stop'))
                 outer.api.now+=1;self.count+=1
-        with patch('tradfi.runtime.account_lock_path',side_effect=lambda cfg:str(Path(self.tmp.name)/(cfg['symbol']+'.account.lock'))),patch('tradfi.paper_market.MarketReader',return_value=self.reader),patch('tradfi.time_safety.TimeSafety',side_effect=verified_time):
+        with patch('tradfi.runtime.account_lock_path',return_value=str(Path(self.tmp.name)/'account.lock')),patch('tradfi.paper_market.MarketReader',return_value=self.reader),patch('tradfi.time_safety.TimeSafety',side_effect=verified_time):
             _run_mt5(config,False,service=True,execute=execute,api=self.api,panel_factory=Panel,stop_event=Stop(),clock=lambda:self.api.now,monotonic=lambda:self.api.now)
         self.assertFalse(self.writes);self.assertEqual(observed[0].controller.state['phase'],'IDLE')
 

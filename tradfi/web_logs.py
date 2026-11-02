@@ -34,30 +34,23 @@ class DiagnosticLogs:
                     self.handlers[scope].emit(logging.LogRecord('diagnostic',logging.INFO,'',0,json.dumps(record,ensure_ascii=False),(),None))
                 except OSError:pass # diagnostics never authorize or alter a trade
         rows=[]
-        if scope=='demo':
-            for e in state.get('demo_events',[])[-500:][::-1]:
-                safe=project(e)
-                for key in ('utc','server_display_utc_plus_2'):
-                    if isinstance(e.get(key),str) and re.fullmatch(r'[0-9T:.+Z-]{20,40}',e[key]):safe[key]=e[key]
-                rows.append(json.dumps(safe,ensure_ascii=False))
-        else:
-            # Owner thread only. Old audit rows have no timestamp: never invent it.
-            for seq,event,payload in store.db.execute('SELECT seq,event,payload FROM audit ORDER BY seq DESC LIMIT 200').fetchall()[::-1]:
-                name=event.split(':',1)[0]
-                if name not in EVENTS:continue
-                data=json.loads(payload);rows.append(json.dumps(dict(audit_seq=seq,event=name,phase=data.get('phase') if data.get('phase') in PHASES else 'OTHER',event_utc=None),ensure_ascii=False))
+        # Owner thread only. Old audit rows have no timestamp: never invent it.
+        for seq,event,payload in store.db.execute('SELECT seq,event,payload FROM audit ORDER BY seq DESC LIMIT 200').fetchall()[::-1]:
+            name=event.split(':',1)[0]
+            if name not in EVENTS:continue
+            data=json.loads(payload);rows.append(json.dumps(dict(audit_seq=seq,event=name,phase=data.get('phase') if data.get('phase') in PHASES else 'OTHER',event_utc=None),ensure_ascii=False))
         for rid,r in list(state.get('control_receipts',{}).items())[-200:]:
             if re.fullmatch(r'[a-zA-Z0-9_-]{8,80}',rid) and r.get('status') in STATUS:
                 rows.append(json.dumps(project(dict(receipt_id=rid,status=r['status'],revision=r.get('revision'))),ensure_ascii=False))
         rows.extend(json.dumps(r,ensure_ascii=False) for r in reversed(self.recent.get(scope,[])))
-        header=f'Manifest: version={VERSION}; base={BASE}; scope={scope}; max_export_bytes={LIMIT}; recent_snapshots=100; audit_tail=200; demo_events_tail=500; raw_messages/secrets/headers/credentials/account_ids omitted.\nЛоги: {scope}. Снимок UTC: {stamp}\nВремя сервера: UTC+2 только отображение, не сдвиг epoch. Старые audit без event_utc не датируются задним числом.\nОграниченная диагностическая проекция; секреты, счета и произвольные сообщения не экспортируются.\n'
+        header=f'Manifest: version={VERSION}; base={BASE}; scope={scope}; max_export_bytes={LIMIT}; recent_snapshots=100; audit_tail=200; raw_messages/secrets/headers/credentials/account_ids omitted.\nЛоги: {scope}. Снимок UTC: {stamp}\nВремя сервера: UTC+2 только отображение, не сдвиг epoch. Старые audit без event_utc не датируются задним числом.\nОграниченная диагностическая проекция; секреты, счета и произвольные сообщения не экспортируются.\n'
         text=header+'\n'.join(rows)
         with self.lock:self.documents[scope]=text.encode('utf-8')[-LIMIT:].decode('utf-8',errors='replace')
     def document(self,scope):
         if scope=='runtime':
             if not self.runtime_path:return 'Лог-файл не настроен.\n'
             return build_document(self.runtime_path).decode('utf-8',errors='replace')
-        if scope not in {'live','paper','demo'}:raise ValueError('Invalid log scope')
+        if scope not in {'live','paper'}:raise ValueError('Invalid log scope')
         with self.lock:text=self.documents.get(scope,'Логи этого контура пока отсутствуют.\n')
         archived=[]
         if self.runtime_path:
@@ -72,7 +65,7 @@ class DiagnosticLogs:
                         if len(line)>65536:continue
                         try:r=json.loads(line)
                         except (ValueError,UnicodeError):continue
-                        if not isinstance(r,dict) or r.get('scope')!=scope or r.get('version')!=VERSION:continue
+                        if not isinstance(r,dict) or r.get('scope')!=scope or r.get('version') not in {VERSION,'demo-diagnostics-v1'}:continue
                         safe={'scope':scope,'version':VERSION,'context':project(r.get('context',{}))}
                         for key in ('observed_utc','server_display_utc_plus_2'):
                             if isinstance(r.get(key),str) and re.fullmatch(r'[0-9T:.+Z-]{20,40}',r[key]):safe[key]=r[key]

@@ -2,11 +2,9 @@
 from decimal import Decimal,InvalidOperation
 import hashlib
 import re
-import traceback
-from pathlib import Path
 
-VERSION='demo-diagnostics-v1'
-BASE='ae3fa58c909b0d806713282eec5f9105a201c342'
+VERSION='panel-diagnostics-v1'
+BASE='caa4a30b9f469ef9a9df41cb4abda9eabd6b3cbe'
 NUMERIC={'sequence','line','margin_mode','price','entry','price_open','sl','tp','volume','volume_min','volume_step','volume_max','size','bid','ask','time','time_msc','utc_time','timestamp','age_seconds','raw_time_msc','offset_seconds','spread','profit','commission','swap','fee','realized','debt','recovery','retcode','revision','control_revision','point','trade_tick_size','trade_contract_size','trade_stops_level','trade_freeze_level','filling_mode','trade_exemode','trade_mode','order_mode','expiration_mode','trade_calc_mode','margin_buy','margin_sell','action','type','type_filling','type_time','deviation','started','last_candle','tick_msc','cursor','COST_RESERVE','INITIAL_SIZE','INITIAL_ENTRY_DISTANCE','INITIAL_SL_DISTANCE','INITIAL_TP_DISTANCE','BASKET_COUNT','TICKET_SIZE','RECOVERY_SL_DISTANCE','EXPANSION_DISTANCE','TP_STEP_MULTIPLIER','CYCLE_COOLDOWN_SECONDS'}
 IDS={'run_id','id','ticket','position','order','deal','position_id','operation_id','receipt','receipt_id','cycle_id'}
 CONTAINERS={'last_rejection','last_error','result','settings','active_settings','cfg','spec','specification','quote','positions','orders','tickets','request','commands','time_block','paper','expanded','levels','frozen_levels','account','edit','old','new','history','error_trace'}
@@ -41,6 +39,3 @@ def project(value,key='',depth=0):
         if key in {'event','function','file','error_type'} and re.fullmatch(r'[a-zA-Z_][a-zA-Z0-9_.]{0,79}',value):return value
         return 'REDACTED_TEXT'
     return None
-
-def safe_trace(exc):
-    return dict(error_type=type(exc).__name__,error_trace=[dict(file=Path(f.filename).name,function=f.name,line=f.lineno) for f in traceback.extract_tb(exc.__traceback__)[-12:]])
