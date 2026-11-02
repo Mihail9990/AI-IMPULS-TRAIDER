@@ -9,6 +9,8 @@ import secrets
 import uuid
 import threading
 import time
+import socket
+from .web_auth import validate_password
 from urllib.parse import urlsplit,parse_qs
 from .control import OwnerMailbox,ActionGateway
 from .chart_feed import ChartFeed
@@ -16,7 +18,7 @@ from .chart_feed import ChartFeed
 
 class WebTransport:
     def __init__(self,mailbox,*,authority='127.0.0.1:8765',password=None,clock=time.monotonic,public_origin=None,paper_mailbox=None,logs=None):
-        if authority.split(':')[0]!='127.0.0.1':raise ValueError('Web server must bind loopback')
+        if urlsplit('http://'+authority).hostname not in {'127.0.0.1','::1'}:raise ValueError('Web server must bind loopback')
         self.logs=logs
         self.mailbox=mailbox;self.paper_mailbox=paper_mailbox;self.authority=authority;self.password=password;self.clock=clock
         self.origin=public_origin or 'http://'+authority
@@ -25,7 +27,7 @@ class WebTransport:
             raise ValueError('public_origin must be an explicit HTTPS origin without path or credentials')
         self.secure=bool(public_origin)
         self.sessions={};self.attempts=[];self.lock=threading.Lock()
-        if password is not None and (not isinstance(password,str) or len(password)<32):raise ValueError('Explicit web credential must have at least 32 characters')
+        if password is not None:validate_password(password,host=urlsplit('http://'+authority).hostname,public_origin=public_origin)
     def request(self,method,path,headers,body=b''):
         headers={k.lower():v for k,v in headers.items()};origin=self.origin
         def reply(code,value,cookie=None):return code,value,({'Set-Cookie':cookie} if cookie else {})
@@ -165,6 +167,7 @@ class NativePanel:
                 self.end_headers();self.wfile.write(body)
             def log_message(self,*args):pass
         class BoundedServer(ThreadingHTTPServer):
+            address_family=socket.AF_INET6 if urlsplit('http://'+authority).hostname=='::1' else socket.AF_INET
             daemon_threads=True
             slots=threading.BoundedSemaphore(8)
             def process_request(self,request,address):
@@ -175,7 +178,7 @@ class NativePanel:
             def process_request_thread(self,request,address):
                 try:super().process_request_thread(request,address)
                 finally:self.slots.release()
-        host,port=authority.split(':')
+        endpoint=urlsplit('http://'+authority);host,port=endpoint.hostname,endpoint.port
         self.server=BoundedServer((host,int(port)),Handler)
         threading.Thread(target=self.server.serve_forever,daemon=True).start()
     def close(self):

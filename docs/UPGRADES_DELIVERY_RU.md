@@ -36,7 +36,7 @@ Time-safety ZIP не заменяется. Реальные MT5, Telegram, се�
 - Независимый read-only review описан в `UPGRADES_REVIEW_RU.md`.
 
 Native web config: `web.enabled` boolean (default false), `host` только `127.0.0.1`,
-`port` default 8765. `TRADFI_WEB_PASSWORD` должен быть явно настроен пользователем
+`port` default 8765. `web.password` в service.json должен быть заполнен локально; заданная `TRADFI_WEB_PASSWORD` имеет приоритет
 (не менее 32 символов); без него API возвращает AUTH_NOT_CONFIGURED. В frontend
 нет credentials; HttpOnly SameSite session. При включении URL —
 `http://127.0.0.1:8765/?controller=native`. Это описание реализации, не команда

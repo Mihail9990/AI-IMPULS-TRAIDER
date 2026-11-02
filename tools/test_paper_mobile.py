@@ -1,6 +1,6 @@
 """Chromium on actual authenticated route handlers + two independent controllers. Offline."""
 from pathlib import Path
-import sys,json,time
+import sys,json,time,secrets
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'tests'))
 from playwright.sync_api import sync_playwright
 from test_tradfi_basket import BasketTest
@@ -11,7 +11,9 @@ ROOT=Path(__file__).resolve().parents[1]/'web/basket-panel'
 def main():
     live=BasketTest();live.setUp();live.reversal();fixed=live.bot.clock();live.bot.clock=lambda:fixed;live.bot.monotonic=lambda:fixed;live.bot._cycle_clock=None;paper=PaperTest();paper.setUp();paper.reversal()
     live.b.account='TEST-LIVE';live.b.symbol='XAUUSD.s'
-    panel=NativePanel(live.bot,password='x'*32,paper_session=paper.session)
+    from tradfi.web_auth import resolve_password
+    credential=secrets.token_urlsafe(6)[:5]
+    panel=NativePanel(live.bot,password=resolve_password({'password':credential},{}),paper_session=paper.session)
     requests=[];errors=[];drop=[False]
     def refresh():
         live.tick(2);panel.snapshot=live.b.snapshot()
@@ -44,7 +46,7 @@ def main():
                 while not page.evaluate(expression):
                     if time.monotonic()>end:raise AssertionError(expression)
                     page.wait_for_timeout(40)
-            page.goto('http://127.0.0.1:8765/');page.locator('#password').fill('x'*32);page.locator('#login-button').click();page.locator('#workspace').wait_for(state='visible')
+            page.goto('http://127.0.0.1:8765/');page.locator('#password').fill(credential);page.locator('#login-button').click();page.locator('#workspace').wait_for(state='visible')
             page.locator('#open-pattern').click();assert page.locator('#analysis-pane').is_visible();assert page.locator('#chart').is_visible()
             page.locator('#main-cycle').uncheck();assert page.locator('#chart g[visibility=visible]').count()==0;assert page.locator('#analysis-chart g[visibility=visible]').count()>0
             page.locator('#analysis-cycle').uncheck();page.locator('#analysis-trend').check();page.locator('#open-figure').click();assert page.locator('#analysis-cycle').is_checked();assert not page.locator('#analysis-trend').is_checked()
@@ -99,6 +101,6 @@ def main():
             wait("!document.querySelector('#mode').textContent.startsWith('PAPER') && !document.querySelector('#start').disabled");count=len(requests);page.reload();page.locator('#workspace').wait_for(state='visible');assert len(requests)==count
             page.locator('#tab-paper').click();wait("document.querySelector('#mode').textContent.startsWith('PAPER')");assert page.locator('#start').is_disabled();assert len(requests)==count
             assert not errors,errors
-            print('PASS: actual auth/routes; isolated live/paper; no requests on tab switch; preview cancelled across mode; per-mode UNKNOWN persists; invalid setting then valid action; paper long-press TP readback; stale preview rejected; independent panes/toggles; colors/opacity persist; main visible; mobile360/390 desktop768/1280; no live state changes; no JS errors; DEMO absent; live/paper/runtime UTF-8 log downloads PASS.')
+            print('PASS: actual auth/routes; isolated live/paper; no requests on tab switch; preview cancelled across mode; per-mode UNKNOWN persists; invalid setting then valid action; paper long-press TP readback; stale preview rejected; independent panes/toggles; colors/opacity persist; main visible; mobile360/390 desktop768/1280; no live state changes; no JS errors; DEMO absent; live/paper/runtime UTF-8 log downloads PASS; local-config 5-character login PASS.')
         finally:browser.close();paper.tearDown();paper.doCleanups();live.doCleanups()
 if __name__=='__main__':main()

@@ -318,11 +318,25 @@ class Manager:
             if read_json(release/'ready.json')!={'sha':sha,'contract':CONTRACT}: raise SetupError('Предыдущая версия неполная.')
             atomic_json(self.root/'current.json',{'current':sha,'previous':pointer['current']})
             self.report('Переключён только код. SQLite, конфигурация и логи не откатывались.')
+    def prepare_settings(self):
+        config=self.config()
+        web=config.setdefault('web',{})
+        if not isinstance(web,dict):raise SetupError('web должен быть объектом настроек.')
+        if 'password' not in web:
+            web['password']=''
+            atomic_json(self.config_path,config)
     def launch(self,execute=False):
         # Runtime acquires the same lock for its whole lifetime, including direct launches.
         with lock(self.root/'operation.lock'),account_lock(self.root,self.config()),state_lock(self.root,self.config()):
             release=self.current_release()
             if not self.config_path.is_file(): raise SetupError('Конфигурация отсутствует.')
+            web=self.config().get('web',{})
+            if not isinstance(web,dict):raise SetupError('web должен быть объектом настроек.')
+            if web.get('enabled',True):
+                if 'password' in web and not isinstance(web['password'],str):raise SetupError('web.password должен быть строкой в кавычках.')
+                password=os.environ.get('TRADFI_WEB_PASSWORD') if 'TRADFI_WEB_PASSWORD' in os.environ else web.get('password','')
+                minimum=5 if web.get('host','127.0.0.1') in {'127.0.0.1','::1'} and web.get('public_origin') is None and not any(bool(v) for k,v in web.items() if 'proxy' in str(k).lower() or 'external' in str(k).lower()) else 32
+                if not isinstance(password,str) or not password.strip() or len(password)<minimum:raise SetupError(f'Настройки (Блокнот): задайте web.password, минимум {minimum} символов. Если задана TRADFI_WEB_PASSWORD, она имеет приоритет.')
             session=uuid.uuid4().hex
             env=dict(os.environ,TRADFI_LAUNCH_SESSION=session)
             for key in ('PYTHONPATH','PYTHONHOME','PYTHONSTARTUP'): env.pop(key,None)
@@ -390,6 +404,7 @@ def gui():
             with lock(root/'operation.lock'):
                 manager.current_release()
                 if not manager.config_path.is_file(): raise SetupError('Конфигурация отсутствует.')
+                manager.prepare_settings()
             os.startfile(str(manager.config_path),'edit')
         except Exception: messagebox.showerror('Настройки','Не удалось открыть редактор. Откройте service.json в папке data через Блокнот.')
     def stop_service():
@@ -404,7 +419,7 @@ def gui():
                      ('Rollback кода',lambda:work(manager.rollback))]:
         b=ttk.Button(panel,text=label,command=fn); b.pack(side='left',padx=2); buttons.append(b)
     stop=ttk.Button(app,text='Остановить процесс…',command=stop_service,state='disabled'); stop.pack(pady=5)
-    ttk.Label(app,text='Первый запуск: установить → заполнить service.json и пароль веб-панели → READ_ONLY.\n'
+    ttk.Label(app,text='Первый запуск: установить → заполнить service.json и web.password → READ_ONLY.\n'
               'Старые папки, базы и credentials не удаляются и автоматически не переносятся.',wraplength=740).pack(padx=12,pady=8)
     def poll():
         nonlocal busy,child,session

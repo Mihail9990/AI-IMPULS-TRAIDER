@@ -3,6 +3,10 @@ import argparse
 import json
 from pathlib import Path
 import sqlite3
+try:
+    from .web_auth import redact
+except ImportError:
+    from web_auth import redact
 
 
 def export(database, destination):
@@ -15,7 +19,7 @@ def export(database, destination):
         state['account'] = '<redacted>'
         audit = [{'seq': seq, 'event': event, 'detail': json.loads(payload)} for seq, event, payload in
                  db.execute('SELECT seq,event,payload FROM audit ORDER BY seq DESC LIMIT 500')]
-    Path(destination).write_text(json.dumps({'state': state, 'audit': audit}, indent=2), encoding='utf-8')
+    Path(destination).write_text(json.dumps(redact({'state': state, 'audit': audit}), indent=2), encoding='utf-8')
 
 
 if __name__ == '__main__':

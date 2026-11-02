@@ -1,5 +1,6 @@
 """Offline failure-atomic installer checks. No pip, network, terminal or GUI starts."""
 import io
+import contextlib
 import json
 import multiprocessing
 import os
@@ -190,6 +191,7 @@ class InstallerTest(unittest.TestCase):
     def test_launch_readonly_default_and_live_only_explicit(self):
         self.install()
         with patch('subprocess.Popen') as popen:
+            self.manager.prepare_settings();c=self.manager.config();c['web']['password']=__import__('secrets').token_urlsafe(24);tool.atomic_json(self.manager.config_path,c)
             self.manager.launch();args=popen.call_args.args[0];self.assertNotIn('--execute',args)
             self.manager.launch(True);self.assertIn('--execute',popen.call_args.args[0])
         self.assertFalse(self.manager.config()['enable_trading'])
@@ -210,3 +212,25 @@ class InstallerTest(unittest.TestCase):
             event.path.touch();self.assertTrue(event.is_set())
 
 if __name__=='__main__':unittest.main()
+
+class PasswordSettingsTest(unittest.TestCase):
+    def test_existing_settings_and_password_preserved(self):
+        import secrets
+        with tempfile.TemporaryDirectory() as tmp:
+            manager=tool.Manager(tmp);manager.config_path.parent.mkdir()
+            password=secrets.token_urlsafe(20)
+            config={'expected_login':123,'enable_trading':False,'web':{'password':password,'port':8765}}
+            tool.atomic_json(manager.config_path,config);before=manager.config_path.read_bytes()
+            manager.prepare_settings();self.assertEqual(manager.config_path.read_bytes(),before)
+            # initialize never overwrites an existing config on update.
+            tool.atomic_json(Path(tmp)/'managed-install.json',{'format':1});manager.initialize(SOURCE)
+            self.assertEqual(manager.config_path.read_bytes(),before)
+            config['web'].pop('password');tool.atomic_json(manager.config_path,config)
+            manager.prepare_settings();config['web']['password']='';self.assertEqual(manager.config(),config)
+    def test_empty_template_and_launcher_reject_before_process(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager=tool.Manager(tmp);manager.config_path.parent.mkdir()
+            tool.atomic_json(manager.config_path,{'web':{'password':''}})
+            with patch.object(tool,'account_lock',return_value=contextlib.nullcontext()),patch.object(tool,'state_lock',return_value=contextlib.nullcontext()),patch.object(manager,'current_release',return_value=Path(tmp)),patch('subprocess.Popen') as proc:
+                with self.assertRaisesRegex(tool.SetupError,'web.password'):manager.launch()
+                proc.assert_not_called()

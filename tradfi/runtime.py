@@ -90,9 +90,11 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
         raise ValueError('Explicit positive expected_login is required for a persistent service')
     if not config.get('expected_server') or not config.get('symbol'):
         raise ValueError('Explicit expected_server and symbol are required for execution')
+    from .web_auth import resolve_password
+    web_password=None
+    if not isinstance(config.get('web',{}),dict):raise ValueError('web должен быть объектом настроек.')
     if config.get('web',{}).get('enabled',True) and panel_factory is None:
-        password=os.environ.get('TRADFI_WEB_PASSWORD','')
-        if len(password)<32:raise ValueError('Set a strong TRADFI_WEB_PASSWORD of at least 32 characters before service startup')
+        web_password=resolve_password(config.get('web',{}))
     state_file = Path(config.get('state_file', 'tradfi_mt5_state.sqlite3')).resolve()
     # Both locks precede Store construction and ANY MT5 initialize/connect call.
     with ExitStack() as resources:
@@ -117,7 +119,7 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
         if not isinstance(web_config,dict):raise ValueError('web must be a configuration object')
         if not isinstance(web_config.get('enabled',True),bool):raise ValueError('web.enabled must be boolean')
         if web_config.get('enabled',True):
-            if web_config.get('host','127.0.0.1')!='127.0.0.1':raise ValueError('Web server requires loopback')
+            if web_config.get('host','127.0.0.1') not in {'127.0.0.1','::1'}:raise ValueError('Web server requires loopback')
             port=web_config.get('port',8765)
             if isinstance(port,bool) or not isinstance(port,int) or not 1024<=port<=65535:raise ValueError('Invalid loopback port')
             from .paper_market import MarketReader
@@ -128,8 +130,8 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
             paper=PaperSession(paper_path,MarketReader(broker.api,symbol=broker.symbol,clock=clock,monotonic=monotonic,expected_account=broker.account),clock=clock,monotonic=monotonic)
             resources.callback(paper.close)
             from .web_control import NativePanel
-            authority='127.0.0.1:'+str(port)
-            panel=(panel_factory or NativePanel)(controller,authority=authority,password=os.environ.get('TRADFI_WEB_PASSWORD'),clock=clock,monotonic=monotonic,public_origin=web_config.get('public_origin'),paper_session=paper)
+            authority=('[::1]' if web_config.get('host')=='::1' else '127.0.0.1')+':'+str(port)
+            panel=(panel_factory or NativePanel)(controller,authority=authority,password=web_password if panel_factory is None else os.environ.get('TRADFI_WEB_PASSWORD'),clock=clock,monotonic=monotonic,public_origin=web_config.get('public_origin'),paper_session=paper)
             resources.callback(panel.close)
             panel.start()
             controller.panel_url='http://'+authority+'/?controller=native'
@@ -217,6 +219,8 @@ def main(argv=None):
                         '\nCheck incoming ticks and Windows clock synchronization; '
                         'do not compensate broker timestamps or relax freshness without evidence. '
                         'Trading permissions were not changed.\n')
+        from .web_auth import WebAuthError
+        if isinstance(exc,WebAuthError):parser.exit(2,str(exc)+'\n')
         # Never echo raw MT5 errors, config paths, account identity or web credentials.
         parser.exit(2, 'MT5 check/runner stopped (' + type(exc).__name__ + '). '
                     'Verify config, terminal connection, UST hedging account and fresh quotes; '
