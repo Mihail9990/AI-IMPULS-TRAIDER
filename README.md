@@ -1,3 +1,5 @@
+Новый VPS: [простая установка HTTPS для телефона](docs/HTTPS_SIMPLE_RU.md) через `SETUP_PHONE_HTTPS.bat`.
+
 # AI Impuls — TradFi / MetaTrader 5
 
 Торговый бот для `XAUUSD.s`, счёта UST hedging и прямого MT5 Python API.
