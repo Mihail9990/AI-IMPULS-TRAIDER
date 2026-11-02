@@ -418,6 +418,13 @@ def gui():
                      ('READ_ONLY',lambda:launch(False)),('Реальный запуск…',lambda:launch(True)),
                      ('Rollback кода',lambda:work(manager.rollback))]:
         b=ttk.Button(panel,text=label,command=fn); b.pack(side='left',padx=2); buttons.append(b)
+    def https_wizard():
+        try:
+            from https_setup import wizard
+            wizard(manager)
+        except ImportError:
+            messagebox.showerror('HTTPS','Скачайте полный архив новой версии: рядом с install_tradfi.py нужен https_setup.py.')
+    ttk.Button(app,text='HTTPS для телефона…',command=https_wizard).pack(pady=4)
     stop=ttk.Button(app,text='Остановить процесс…',command=stop_service,state='disabled'); stop.pack(pady=5)
     ttk.Label(app,text='Первый запуск: установить → заполнить service.json и web.password → READ_ONLY.\n'
               'Старые папки, базы и credentials не удаляются и автоматически не переносятся.',wraplength=740).pack(padx=12,pady=8)
