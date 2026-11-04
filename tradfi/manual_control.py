@@ -26,7 +26,7 @@ class ManualRangeControl:
             selected=[cid for cid in g['commands'] if self.state['commands'][cid]['side']==active[0]['side']]
             if len([t for t in c['tickets'].values() if t['group']==g['id']])!=len(selected):raise ValueError()
             spec=Spec.load(snap['spec']);same=spec.price(a['same_distance']);opposite=spec.price(a['opposite_distance'])
-            prior=deepcopy(c.get('range_override'));main=deepcopy(prior['main'] if prior and prior['duration']=='once' else c.get('expanded'))
+            prior=deepcopy(c.get('range_override'));main=deepcopy(prior['main'] if prior and prior['duration']=='once' else c.get('main_range'))
             if prior and prior['duration']=='once':prior=deepcopy(prior.get('restore_override'))
             if (a['mode']=='main' or a['duration']=='once') and not main:raise ValueError('No existing main range')
             levels=None
@@ -90,6 +90,7 @@ class ManualRangeControl:
         # levels wait; no MARKET or implicit widening, even after a gap.
         c['range_override']=dict(duration=tx['duration'],levels=deepcopy(levels),main=tx['main'],restore_override=tx['prior_override'],group=None)
         c['expanded']=deepcopy(levels)
+        if tx['duration']=='permanent':c['main_range']=deepcopy(levels)
         for g in c['groups']:g['retired']=True
         c.setdefault('manual_close_history',[]).append(dict(tx,last_exit=last,stage='CONFIRMED'))
         c.pop('manual_close');self.save('manual_close_range_confirmed')
@@ -113,4 +114,5 @@ class ManualRangeControl:
             else:c.pop('range_override')
         else:
             self._halt(snap,'MANUAL_RANGE_GROUP_MISMATCH');return True
+        c['main_range']=deepcopy(c['expanded'])
         self.save('manual_range_after_closed_basket');return True

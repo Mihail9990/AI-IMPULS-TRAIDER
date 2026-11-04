@@ -26,6 +26,7 @@ class LatestCloseBasketController(ReverseLadderControl,ManualRangeControl,Basket
     def _new(self,snap):
         super()._new(snap)
         self.state['cycle']['range_policy']=RANGE_POLICY
+        self.state['cycle']['main_range']=None
         self.state['cycle']['tp_distances']=deepcopy(self.state['tp_distances'])
         self.save('latest_close_range_policy')
     def _validate_distances(self,values,spec):
@@ -161,18 +162,41 @@ class LatestCloseBasketController(ReverseLadderControl,ManualRangeControl,Basket
             price=last_closed_sl_price([initial])
             c['expanded']=recovery_range_after_sl(initial['side'],initial['entry'],price,c['cfg']['EXPANSION_DISTANCE'],initial=True)
             c['range_anchor_exit']=price
+            c['main_range']=deepcopy(c['expanded'])
             self.save('latest_close_initial_range_fixed')
         return c['expanded']
     def _after_stopped_group(self,snap,g,tickets):
         c=self.state['cycle']
-        if self._restore_manual_range(snap,g,tickets):return not c.get('manual',False)
+        all_tp=bool(tickets) and all(t.get('closed') is True and t.get('reason')=='TP' for t in tickets)
+        if self._restore_manual_range(snap,g,tickets):
+            return self._resume_main_after_tp(snap,g) if all_tp else not c.get('manual',False)
+        if all_tp:return self._resume_main_after_tp(snap,g)
         try:
             price=last_closed_sl_price(tickets)
             c['expanded']=recovery_range_after_sl(g['activated'],tickets[0]['entry'],price,c['cfg']['EXPANSION_DISTANCE'],initial=False)
         except (ValueError,ArithmeticError):
             self._halt(snap,'LAST_RECOVERY_EXIT_UNCONFIRMED_OR_AMBIGUOUS');return False
         c['range_anchor_exit']=price
+        c['main_range']=deepcopy(c['expanded'])
         self.save('latest_close_recovery_range_fixed')
+        return True
+
+    def _resume_main_after_tp(self,snap,group):
+        from .manual_range import validate_manual_stops
+        c=self.state['cycle'];levels=c.get('main_range')
+        if c.get('manual'):return False
+        if not isinstance(levels,dict) or set(levels)!={'BUY','SELL'}:
+            self._halt(snap,'TP_DEBT_MAIN_RANGE_MISSING');return False
+        if snap['positions'] or snap['orders'] or self._unresolved():
+            self._halt(snap,'TP_DEBT_RANGE_REQUIRES_FLAT_RECONCILIATION');return False
+        try:
+            levels=validate_manual_stops(Spec.load(snap['spec']),levels,snap['quote'])
+            self._plans(snap,'expanded',levels)
+        except (ValueError,TypeError,KeyError,ArithmeticError):
+            self._halt(snap,'TP_DEBT_MAIN_RANGE_INVALID');return False
+        c['expanded']=deepcopy(levels)
+        c['tp_debt_resume']=dict(group=group['id'],levels=deepcopy(levels),debt=c['recovery'])
+        self.save('tp_debt_previous_main_range_confirmed')
         return True
 
     def _live_ladder(self,snap,g):
