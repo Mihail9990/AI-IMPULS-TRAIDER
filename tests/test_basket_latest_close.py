@@ -82,6 +82,18 @@ class LatestClose(unittest.TestCase):
         with self.assertRaises(ValueError):self.f.bot.command('/start')
         self.assertFalse(self.f.b.commands)
 
+    def test_ordinary_tp_common_price_covers_actual_debt_without_bonus(self):
+        self.first_sl();self.fill_basket();f=self.f
+        positions=f.b.data['positions'];self.assertEqual(len({p['tp'] for p in positions}),1)
+        total=sum((f.b.profit(p['side'],D(p['size']),D(p['entry']),D(p['tp'])) for p in positions),D(0))
+        debt=D(f.bot.state['cycle']['recovery']);self.assertGreaterEqual(total,debt)
+        self.assertLess(total-debt,D('.06'))
+    def test_unknown_future_cost_is_not_written_off_after_common_tp(self):
+        self.first_sl();self.fill_basket();f=self.f
+        for p in list(f.b.data['positions']):f.b.close('TP',position_id=p['id'],commission='-1')
+        f.tick(4);self.assertGreater(D(f.bot.state['cycle']['recovery']),0)
+        self.assertTrue(f.bot.state['cycle'].get('manual'));self.assertFalse(f.b.data['orders'])
+
 class NativeLatestClose(unittest.TestCase):
     def setUp(self):
         self.f=fixtures.NativeBasketTest();self.f.setUp();self.addCleanup(self.f.doCleanups);self.addCleanup(self.f.tearDown)

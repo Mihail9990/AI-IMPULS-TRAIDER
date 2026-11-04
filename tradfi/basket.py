@@ -122,6 +122,9 @@ class BasketController(Controller):
             signal=dict(side='BUY' if number(bar['close'])>number(bar['open']) else 'SELL',close=bar['close'],id=bar['id']))
         self.state['cycle']=c;self.state['account']=snap['account'];self.state['last_candle']=bar['id'];self.state['phase']='INITIAL_WAIT';self._start_branch_clock(now);self.save('basket_new_cycle')
 
+    def _recovery_tps(self,cfg,spec,side,entries,sizes,debt):
+        return ladder(self.broker,spec,side,entries,sizes,debt,reserve=cfg.COST_RESERVE,multiplier=cfg.TP_STEP_MULTIPLIER)
+
     def _plans(self,snap,role,levels,cfg=None):
         c=self.state['cycle'];cfg=cfg or BasketSettings.load(c['cfg']);spec=Spec.load(snap['spec']);cfg.validate(spec)
         count=1 if role=='initial' else cfg.BASKET_COUNT;size=number(cfg.INITIAL_SIZE if role=='initial' else cfg.TICKET_SIZE)
@@ -135,7 +138,7 @@ class BasketController(Controller):
             if sign*(entry-quote)<=0 or sign*(entry-quote)<spec.point*spec.stops_level:raise ValueError('STOP пересечён/слишком близко. MARKET не создаётся')
             distance=number(cfg.INITIAL_SL_DISTANCE if role=='initial' else cfg.RECOVERY_SL_DISTANCE)
             sl=spec.price(entry-sign*distance)
-            tps=[str(entry+sign*number(cfg.INITIAL_TP_DISTANCE))] if role=='initial' else ladder(self.broker,spec,side,[entry]*count,[size]*count,debt,reserve=cfg.COST_RESERVE,multiplier=cfg.TP_STEP_MULTIPLIER)
+            tps=[str(entry+sign*number(cfg.INITIAL_TP_DISTANCE))] if role=='initial' else self._recovery_tps(cfg,spec,side,[entry]*count,[size]*count,debt)
             for i,tp in enumerate(tps):
                 spec.protection(side,entry,sl,number(tp));plans.append(dict(kind='STOP',side=side,price=str(entry),trigger=str(entry),sl=str(sl),tp=tp,size=str(size),sl_distance=str(distance),crossed_policy='reject',basket_index=i))
         return plans
@@ -230,7 +233,7 @@ class BasketController(Controller):
         cfg=BasketSettings.load(c['cfg']);spec=Spec.load(snap['spec'])
         if any(t['closed'] for t in tickets):g['ladder_applied']=True;self.save('basket_gap_exit_observed');return
         try:
-            tps=ladder(self.broker,spec,g['activated'],[t['entry'] for t in active],[t['size'] for t in active],c['recovery'],reserve=cfg.COST_RESERVE,multiplier=cfg.TP_STEP_MULTIPLIER)
+            tps=self._recovery_tps(cfg,spec,g['activated'],[t['entry'] for t in active],[t['size'] for t in active],c['recovery'])
             plans=[]
             for t,tp in zip(active,tps):
                 live=next(p for p in snap['positions'] if p['id']==t['id'])
