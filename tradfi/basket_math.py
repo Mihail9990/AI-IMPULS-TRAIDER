@@ -115,33 +115,3 @@ def last_closed_sl_price(tickets):
     price,reason=final[0]
     if reason!='SL':raise ValueError('Последнее закрытие не SL; нужен отдельный подтверждённый переход')
     return str(price)
-
-def common_recovery_tp(broker,spec,side,entries,sizes,debt):
-    """Closest whole-tick common exit whose modeled aggregate profit covers debt.
-
-    Actual realized costs belong in debt. No extra profit or guessed future fees.
-    Stops/freeze/current quote validation remains mandatory before submission.
-    Profit uses the broker contract and account currency, not a guessed lot value.
-    """
-    from decimal import ROUND_FLOOR,ROUND_CEILING
-    if side not in {'BUY','SELL'} or not entries or len(entries)!=len(sizes):raise ValueError('Нужны сторона, входы и объёмы оставшихся билетов')
-    entries=list(map(number,entries));sizes=list(map(number,sizes));goal=number(debt)
-    if goal<0 or min(entries+sizes)<=0:raise ValueError('Недопустимые входы, объёмы или долг')
-    tick=number(spec.tick_size)
-    if tick<=0:raise ValueError('Неизвестен tick size')
-    sign=1 if side=='BUY' else -1
-    anchor_ticks=int(((min(entries) if side=='BUY' else max(entries))/tick).to_integral_value(rounding=ROUND_FLOOR if side=='BUY' else ROUND_CEILING))
-    limit=2**28 if side=='BUY' else min(2**28,anchor_ticks-1)
-    if limit<1:raise ValueError('Нет положительной достижимой цены TP')
-    def price(step):return spec.price(D(anchor_ticks+sign*step)*tick)
-    def profit(step):return sum((number(broker.profit(side,v,e,price(step))) for e,v in zip(entries,sizes)),D(0))
-    low=0;high=1
-    if profit(0)>=goal:return str(price(0))
-    while profit(high)<goal:
-        if high==limit:raise ValueError('Общий TP не покрывает долг в допустимом диапазоне цены')
-        high=min(limit,high*2)
-    while high-low>1:
-        mid=(low+high)//2
-        if profit(mid)>=goal:high=mid
-        else:low=mid
-    return str(price(high))

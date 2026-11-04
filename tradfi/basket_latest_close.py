@@ -4,7 +4,7 @@ Uses the actual basket controller's ledger, ownership, OCO and intent gateway.
 No broker calls outside that gateway. Never converts existing v1 active cycles.
 """
 from .basket import BasketController
-from .basket_math import last_closed_sl_price,recovery_range_after_sl,common_recovery_tp
+from .basket_math import last_closed_sl_price,recovery_range_after_sl
 
 RANGE_POLICY='last_actual_close_v2'
 
@@ -20,11 +20,6 @@ class LatestCloseBasketController(BasketController):
         super()._new(snap)
         self.state['cycle']['range_policy']=RANGE_POLICY
         self.save('latest_close_range_policy')
-    def _recovery_tps(self,cfg,spec,side,entries,sizes,debt):
-        # No additional profit, multiplier or future-cost reserve in ordinary TP.
-        price=common_recovery_tp(self.broker,spec,side,entries,sizes,debt)
-        return [price]*len(entries)
-
     def _initial_position_recovery(self,snap,initial):
         # No reversal at the initial protective SL. Wait for actual closing proof.
         return
