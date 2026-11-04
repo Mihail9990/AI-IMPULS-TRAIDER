@@ -38,6 +38,15 @@ def main():
                     if time.monotonic()>end:raise AssertionError(condition)
                     page.wait_for_timeout(30)
             page.goto('http://127.0.0.1:8765/');page.locator('#password').fill('offline-not-a-real-password');page.locator('#login-button').click();page.locator('#workspace').wait_for(state='visible')
+            assert page.locator('#cycle-keyboard').evaluate('(e)=>e.getBoundingClientRect().top > document.querySelector(".chart-card").getBoundingClientRect().bottom')
+            before_collapse=len(requests)
+            page.locator('#cycle-keyboard summary').click()
+            wait('document.querySelector("#cycle-keyboard").open===false && localStorage.getItem("cycle-keyboard-open")==="false"')
+            assert page.locator('#cancel-initial').is_hidden();assert len(requests)==before_collapse
+            page.reload();page.locator('#workspace').wait_for(state='visible')
+            assert not page.locator('#cycle-keyboard').evaluate('(e)=>e.open')
+            page.locator('#cycle-keyboard summary').click()
+            page.locator('#cancel-initial').wait_for(state='visible')
             assert page.locator('#tickets tr').count()==6
             page.locator('#setting-BASKET_COUNT').fill('0');page.locator('#save-settings').click()
             wait("document.querySelector('#action-error').textContent.includes('Неверные параметры')")

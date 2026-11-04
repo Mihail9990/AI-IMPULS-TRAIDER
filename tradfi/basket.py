@@ -78,6 +78,8 @@ class BasketController(Controller):
         kind=a.get('type')
         if kind=='command' and set(a)=={'type','text'} and isinstance(a['text'],str):return self.command(a['text'])
         if kind=='start' and set(a)=={'type','mode'} and a['mode']=='auto':return self.command('/start')
+        if kind=='cancel_initial' and set(a)=={'type','cycle_id','expected_orders'}:
+            return self.cancel_initial(a['cycle_id'],a['expected_orders'])
         if kind in ('basket_settings','basket_levels','protection'):
             if a.get('cycle_id')!=(self.state.get('cycle') or {}).get('id'):raise ActionRejected('Цикл изменился; обновите предпросмотр')
             if self.state.get('cycle') and 'cycle_id' not in a:raise ActionRejected('Нужен ID активного цикла')
@@ -85,6 +87,20 @@ class BasketController(Controller):
         if kind=='basket_levels' and set(a)=={'type','levels','expected','cycle_id','expected_orders'}:return self.edit(levels=a['levels'],expected=a['expected'],expected_orders=a['expected_orders'])
         if kind=='protection' and set(a)=={'type','position_id','old','new','cycle_id'}:return self.edit(protection=a)
         raise ActionRejected('Неподдерживаемые поля команды')
+
+    def cancel_initial(self,cycle_id,expected_orders):
+        """Stage one candle-entry cancellation; fills always supersede this request."""
+        snap=self._guard();c=self.state.get('cycle')
+        if not c or cycle_id!=c['id']:raise ActionRejected('Цикл изменился; обновите панель')
+        if c.get('tickets') or snap['positions']:raise ActionRejected('Начальный ордер уже исполнен; позиция сохраняет защиту')
+        if c.get('edit') or c.get('initial_cancel') or self._uncertain():raise ActionRejected('Сначала дождитесь сверки предыдущей операции')
+        if self.state['stop'] or self.state['phase'] not in {'INITIAL_PENDING','INITIAL_WAIT'}:raise ActionRejected('Нет активного начального триггера')
+        if not isinstance(expected_orders,list) or not expected_orders or any(not isinstance(x,str) for x in expected_orders) or sorted(expected_orders)!=sorted(o['id'] for o in snap['orders']):raise ActionRejected('Начальные ордера изменились; обновите панель')
+        ids=[cid for g in c['groups'] if g['role']=='initial' and not g.get('retired') for cid in g['commands']]
+        if not ids or len(self._pending(snap,ids))!=len(snap['orders']):raise ActionRejected('Есть ордера другого назначения; отмена не принята')
+        boundary=max(self.state['last_candle'],snap['candle']['id'],int(number(snap['now'])//60)*60-60)
+        c['initial_cancel']={'ids':ids,'after_candle':boundary}
+        self.save('basket_cancel_initial_requested')
 
     def _cancel_ready(self,ids=None):
         for cid,cmd in self.state['commands'].items():
@@ -233,6 +249,19 @@ class BasketController(Controller):
             if self._advance_edit(snap):return
         active=[t for t in c['tickets'].values() if not t['closed']]
         initial=next((t for t in c['tickets'].values() if t['role']=='initial'),None)
+        request=c.get('initial_cancel')
+        if request:
+            if initial is not None:
+                c.pop('initial_cancel');self.save('basket_cancel_initial_fill_won')
+            else:
+                self._cancel(snap,request['ids'])
+                if snap['orders'] or snap['positions'] or not self._resolved(request['ids']) or self._uncertain():return
+                for g in c['groups']:g['retired']=True
+                c.pop('replacement',None);c.pop('signal_override',None);c.pop('level_wait',None)
+                c['wait_for_signal']=True
+                self.state['last_candle']=max(self.state['last_candle'],request['after_candle'])
+                c.pop('initial_cancel');self.state['phase']='INITIAL_WAIT'
+                self.save('basket_cancel_initial_wait_fresh_close');return
         recoveries=[t for t in active if t['role']!='initial']
         if initial and not initial['closed'] and recoveries:self._halt(snap,'INITIAL_AND_RECOVERY_OVERLAP');return
         for g in c['groups']:
@@ -374,7 +403,7 @@ class BasketController(Controller):
         if not c:
             if levels is not None or protection is not None:raise ActionRejected('Нет активного цикла')
             self.state['basket_settings']=cfg.dump();self.save('basket_settings_saved');return
-        if c.get('edit') or self._uncertain():raise ActionRejected('Предыдущая операция ещё не сверена; правка не принята')
+        if c.get('edit') or c.get('initial_cancel') or self._uncertain():raise ActionRejected('Предыдущая операция ещё не сверена; правка не принята')
         if any(g['activated'] and self._pending(snap,g['commands']) for g in c['groups']):raise ActionRejected('Корзина исполняется частично: сначала сверка всех билетов')
         oldcfg=BasketSettings.load(c['cfg']);live={p['id']:p for p in snap['positions']}
         current_levels=self.levels()

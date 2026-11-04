@@ -19,6 +19,15 @@
   }finally{busy=false;await poll();}
  }
  async function command(text,message){if(!confirm(message))return;try{await send({type:'command',text});}catch(e){error(e.message);}}
+ const keyboard=$('cycle-keyboard');
+ try{keyboard.open=localStorage.getItem('cycle-keyboard-open')!=='false';}catch{}
+ keyboard.addEventListener('toggle',()=>{try{localStorage.setItem('cycle-keyboard-open',String(keyboard.open));}catch{}});
+ $('cancel-initial').onclick=async()=>{
+  if(!view)return;const revision=view.revision,scope=view.scope;
+  const action={type:'cancel_initial',cycle_id:view.cycle_id,expected_orders:view.orders.map(o=>o.id)};
+  if(!confirm('Отменить только начальный триггер? После следующей закрытой направленной M1 он снова выставится по свечному сигналу. Если ордер успел исполниться, позиция сохраняется.'))return;
+  try{await send(action,revision,scope);}catch(e){error(e.message);}
+ };
  $('start').onclick=()=>command('/start','Запустить следование закрытым M1 и восстановление корзинами?');
  $('stop').onclick=()=>command('/stop','Остановить новые входы и отменить ожидающие ордера? Открытые билеты сохраняют SL/TP. Долг не списывается.');
  $('resume').onclick=()=>command('/resume_time','Запросить свежую проверку времени? Другие блокировки не снимаются.');
@@ -70,7 +79,7 @@
   $('edit-status').textContent=view.edit?'Правка '+view.edit.stage+': показываются фактические данные брокера. При частичном отказе автоматизация остановится.':'';$('journal').textContent=view.journal.join('\n');
   $('tickets').replaceChildren();for(const p of [...view.positions.map(p=>({...p,label:'Позиция'})),...view.orders.map(p=>({...p,entry:p.price,label:'STOP'}))]){const row=document.createElement('tr');for(const text of[p.ticket??p.id,p.label,p.side+' / '+p.size,p.entry,p.tp,p.sl]){const td=document.createElement('td');td.textContent=text;row.append(td);}$('tickets').append(row);}
   $('request-status').textContent=pending?'Запрос '+pending+': '+(pendingScope===view.scope?view.action_results[pending]?.status??'ожидание':'другой контекст')+'. До сверки новые команды запрещены. При UNKNOWN проверьте журнал и брокера на VPS; перезагрузка не разрешает повтор.':'';
-  for(const id of ['start','stop','resume','reset','save-settings','apply-level','paper-resume','paper-flatten','paper-save-cost'])$(id).disabled=!!pending||busy;
+  for(const id of ['start','stop','resume','reset','cancel-initial','save-settings','apply-level','paper-resume','paper-flatten','paper-save-cost'])$(id).disabled=!!pending||busy;
   if(loadedScope!==view.scope){fields();loadedScope=view.scope;}draw();
  }
  async function poll(){if(polling||busy)return;polling=true;try{const r=await fetch(apiPath('state'),{headers:headers(),signal:AbortSignal.timeout(2500)});if(!r.ok){if([401,403].includes(r.status)){$('login').hidden=false;$('workspace').hidden=true;}throw Error('Нет авторизованного снимка');}const v=await r.json();if(v.contract!=='ticket_basket_v1'||(mode==='paper'&&v.mode!=='PAPER'))throw Error('Несовместимая версия контроллера');view=v;const status=pending&&pendingScope===v.scope?v.action_results[pending]?.status:null;if(['APPLIED','REJECTED','CONFLICT'].includes(status)){if(status!=='APPLIED')error(status==='CONFLICT'?'Снимок устарел; создайте новый предпросмотр.':(v.action_results[pending]?.reason??'Команда отклонена до исполнения. Проверьте параметры; очередь разблокирована.'));clearPending();}$('login').hidden=true;$('workspace').hidden=false;render();}catch(e){$('feed-status').textContent='Нет свежего снимка';}finally{polling=false;}}
