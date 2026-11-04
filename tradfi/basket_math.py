@@ -91,7 +91,7 @@ def recovery_range_after_sl(side,entry,sl,distance,*,initial):
     return {'BUY':str(buy),'SELL':str(sell)}
 
 
-def last_closed_sl_price(tickets):
+def last_closed_exit(tickets):
     """Read already reconciled, durable exit facts; reject ambiguous chronology.
 
     Normalized adapter `time` preserves its native precision (native MT5 ms).
@@ -111,8 +111,13 @@ def last_closed_sl_price(tickets):
             if stamp<0 or price<=0 or volume<=0 or row.get('reason') not in ('SL','TP'):raise ValueError('Некорректные факты закрытия')
             facts.append((stamp,price,row['reason']))
     last=max(t for t,p,r in facts);final=[(p,r) for t,p,r in facts if t==last]
-    if len(set(final))!=1:raise ValueError('Порядок последних закрытий неоднозначен')
+    reasons={r for p,r in final}
+    if len(reasons)!=1 or ('SL' in reasons and len(set(final))!=1):raise ValueError('Порядок последних закрытий неоднозначен')
     price,reason=final[0]
+    return (str(price) if reason=='SL' else None),reason
+
+def last_closed_sl_price(tickets):
+    price,reason=last_closed_exit(tickets)
     if reason!='SL':raise ValueError('Последнее закрытие не SL; нужен отдельный подтверждённый переход')
     return str(price)
 

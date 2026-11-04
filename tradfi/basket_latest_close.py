@@ -6,7 +6,7 @@ No broker calls outside that gateway. Never converts existing v1 active cycles.
 from .basket import BasketController
 from .manual_control import ManualRangeControl
 from .reverse_ladder import ReverseLadderControl
-from .basket_math import last_closed_sl_price,recovery_range_after_sl,configured_ladder,BasketSettings
+from .basket_math import last_closed_exit,last_closed_sl_price,recovery_range_after_sl,configured_ladder,BasketSettings
 from .control import ActionRejected
 from .broker import Spec
 from .settings import number
@@ -167,12 +167,14 @@ class LatestCloseBasketController(ReverseLadderControl,ManualRangeControl,Basket
         return c['expanded']
     def _after_stopped_group(self,snap,g,tickets):
         c=self.state['cycle']
-        all_tp=bool(tickets) and all(t.get('closed') is True and t.get('reason')=='TP' for t in tickets)
-        if self._restore_manual_range(snap,g,tickets):
-            return self._resume_main_after_tp(snap,g) if all_tp else not c.get('manual',False)
-        if all_tp:return self._resume_main_after_tp(snap,g)
         try:
-            price=last_closed_sl_price(tickets)
+            price,reason=last_closed_exit(tickets)
+        except (ValueError,TypeError,KeyError,ArithmeticError):
+            self._halt(snap,'LAST_RECOVERY_EXIT_UNCONFIRMED_OR_AMBIGUOUS');return False
+        if self._restore_manual_range(snap,g,tickets):
+            return self._resume_main_after_tp(snap,g) if reason=='TP' else not c.get('manual',False)
+        if reason=='TP':return self._resume_main_after_tp(snap,g)
+        try:
             c['expanded']=recovery_range_after_sl(g['activated'],tickets[0]['entry'],price,c['cfg']['EXPANSION_DISTANCE'],initial=False)
         except (ValueError,ArithmeticError):
             self._halt(snap,'LAST_RECOVERY_EXIT_UNCONFIRMED_OR_AMBIGUOUS');return False
