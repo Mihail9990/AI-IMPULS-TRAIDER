@@ -489,6 +489,9 @@ class BasketController(Controller):
             if self._pending(snap,e['cancel_ids']) or not self._resolved(e['cancel_ids']) or self._uncertain():return True
             # Revalidate fresh quote before creating any protection intents.
             spec=Spec.load(snap['spec']);live={p['id']:p for p in snap['positions']}
+            for pid,old in e.get('expected_protection',{}).items():
+                if pid not in live or any(number(live[pid][k])!=number(old[k]) for k in ('sl','tp')):
+                    self._halt(snap,'EDIT_PROTECTION_CHANGED');return True
             try:
                 for u in e['updates']:
                     p=live[u['position_id']];spec.protection(p['side'],number(p['entry']),number(u['sl']),number(u['tp']),snap['quote'],modify=True)

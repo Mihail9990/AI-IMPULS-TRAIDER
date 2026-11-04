@@ -116,7 +116,7 @@ def last_closed_sl_price(tickets):
     if reason!='SL':raise ValueError('Последнее закрытие не SL; нужен отдельный подтверждённый переход')
     return str(price)
 
-def configured_ladder(broker,spec,side,entries,sizes,debt,distances,*,quote=None,modify=False):
+def configured_ladder(broker,spec,side,entries,sizes,debt,distances,*,quote=None,modify=False,active_mask=None):
     """Interpolate distances between fixed slots; solve a uniform trailing step.
 
     Every price is based on its own actual entry. Manual distances never move.
@@ -126,6 +126,8 @@ def configured_ladder(broker,spec,side,entries,sizes,debt,distances,*,quote=None
     """
     from decimal import ROUND_FLOOR,ROUND_CEILING
     if side not in ('BUY','SELL') or not entries or len(entries)!=len(sizes) or not isinstance(distances,list) or len(distances)!=len(entries):raise ValueError('Нужен один параметр ступени на билет')
+    if active_mask is None:active_mask=[True]*len(entries)
+    if not isinstance(active_mask,list) or len(active_mask)!=len(entries) or any(type(v) is not bool for v in active_mask) or not any(active_mask):raise ValueError('Нужна маска подтверждённых остатков')
     if distances[0] is None:raise ValueError('Первая TP-ступень обязательна')
     if modify and quote is None:raise ValueError('Для изменения TP нужна свежая котировка')
     tick=number(spec.tick_size);goal=number(debt)
@@ -146,7 +148,8 @@ def configured_ladder(broker,spec,side,entries,sizes,debt,distances,*,quote=None
     if executable is not None and executable<=0:raise ValueError('Некорректная котировка')
     def validate(values):
         if any(sign*(b-a)<=0 for a,b in zip(values,values[1:])):raise ValueError('Фактические TP нарушают порядок ступеней; ручные уровни сохранены')
-        for entry,price in zip(entries,values):
+        for i,(entry,price) in enumerate(zip(entries,values)):
+            if not active_mask[i]:continue
             gap=sign*(price-(executable if executable is not None else entry))
             if gap<=0 or gap<minimum:raise ValueError('TP пересечён или нарушает stop/freeze; заданные уровни не сдвинуты')
         return values
@@ -158,13 +161,13 @@ def configured_ladder(broker,spec,side,entries,sizes,debt,distances,*,quote=None
         lower=max(lower,int((-D(sign)*(entries[i]-entries[i-1])/tick).to_integral_value(rounding=ROUND_FLOOR))+1)
         q=executable if executable is not None else entries[i]
         gap=D(sign)*(entries[i]-q)+fixed[last]
-        lower=max(lower,int(((minimum-gap)/(k*tick)).to_integral_value(rounding=ROUND_CEILING)),int((-gap/(k*tick)).to_integral_value(rounding=ROUND_FLOOR))+1)
+        if active_mask[i]:lower=max(lower,int(((minimum-gap)/(k*tick)).to_integral_value(rounding=ROUND_CEILING)),int((-gap/(k*tick)).to_integral_value(rounding=ROUND_FLOOR))+1)
         if side=='SELL':upper=min(upper,int(((entries[i]-fixed[last])/(k*tick)).to_integral_value(rounding=ROUND_CEILING))-1)
     if lower>upper:raise ValueError('Нет положительной упорядоченной сетки в ограничениях брокера')
     def prices(step):
         ds=[offsets[i] if i<=last else fixed[last]+D(i-last)*tick*step for i in range(len(entries))]
         return validate([spec.price(e+sign*d) for e,d in zip(entries,ds)])
-    def profit(step):return sum((number(broker.profit(side,v,e,p)) for e,v,p in zip(entries,sizes,prices(step))),D(0))
+    def profit(step):return sum((number(broker.profit(side,v,e,p)) for e,v,p,active in zip(entries,sizes,prices(step),active_mask) if active),D(0))
     if last==len(entries)-1:
         if profit(lower)<goal:raise ValueError('Заданные и интерполированные ступени не покрывают RECOVERY; свободного продолжения нет')
         return [str(p) for p in prices(lower)]

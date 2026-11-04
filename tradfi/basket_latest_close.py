@@ -78,7 +78,9 @@ class LatestCloseBasketController(BasketController):
                     if any(not t['closed'] for t in ts):raise ValueError('Partially closed ladder: use individual chart edits')
                     continue
                 if ts:
-                    tps=configured_ladder(self.broker,spec,g['activated'],[t['entry'] for t in ts],[t['size'] for t in ts],c['recovery'],values[:len(ts)],quote=snap['quote'],modify=True)
+                    group_values=deepcopy(values[:len(ts)])
+                    for index,value in g.get('manual_tp_distances',{}).items():group_values[int(index)]=value
+                    tps=configured_ladder(self.broker,spec,g['activated'],[t['entry'] for t in ts],[t['size'] for t in ts],c['recovery'],group_values,quote=snap['quote'],modify=True)
                     for t,tp in zip(ts,tps):
                         p=live[t['id']]
                         if number(p['size'])!=number(t['size']):raise ValueError('Volume changed')
@@ -95,7 +97,50 @@ class LatestCloseBasketController(BasketController):
             fills=sorted(c['tickets']),closed=sorted(pid for pid,t in c['tickets'].items() if t['closed']),modify_ids=[],tp_distances=values)
         self.save('tp_grid_edit_requested')
 
+    def _edit_dragged_tp(self,protection):
+        # Owner-thread validation only until the complete durable batch is saved.
+        snap=self._guard(entry=True);c=self.state.get('cycle')
+        if not c or c.get('edit') or c.get('initial_cancel') or self._uncertain():
+            raise ActionRejected('Нет сверенной корзины для правки TP')
+        pid=protection.get('position_id');t=c['tickets'].get(pid)
+        if not t or t['closed']:raise ActionRejected('Билет закрыт или не принадлежит циклу')
+        g=next(g for g in c['groups'] if g['id']==t['group'])
+        tickets=sorted([t for t in c['tickets'].values() if t['group']==g['id']],key=lambda t:t['index'])
+        selected=[cid for cid in g['commands'] if self.state['commands'][cid]['side']==g['activated']]
+        if snap['orders'] or len(tickets)!=len(selected):raise ActionRejected('Сначала сверка OCO и всех исполнений')
+        try:
+            if [t['index'] for t in tickets]!=list(range(len(tickets))):raise ValueError()
+            if any(not isinstance(protection[k],dict) or set(protection[k])!={'sl','tp'} for k in ('old','new')):raise ValueError()
+            live={p['id']:p for p in snap['positions']};p=live[pid]
+            if any(number(protection['old'][k])!=number(p[k]) for k in ('sl','tp')):raise ValueError()
+            if number(protection['new']['sl'])!=number(p['sl']):raise ValueError('Separate SL and TP commands required')
+            spec=Spec.load(snap['spec']);price=spec.price(protection['new']['tp'])
+            sign=1 if t['side']=='BUY' else -1
+            distance=str(sign*(price-number(t['entry'])))
+            values=deepcopy(c['tp_distances'][:len(tickets)])
+            overrides=deepcopy(g.get('manual_tp_distances',{}));overrides[str(t['index'])]=distance
+            for index,value in overrides.items():values[int(index)]=value
+            active=[not t['closed'] for t in tickets]
+            tps=configured_ladder(self.broker,spec,t['side'],[x['entry'] for x in tickets],[x['size'] for x in tickets],c['recovery'],values,quote=snap['quote'],modify=True,active_mask=active)
+            updates=[]
+            for ticket,tp in zip(tickets,tps):
+                if ticket['closed']:continue
+                p=live[ticket['id']]
+                if number(p['size'])!=number(ticket['size']):raise ValueError()
+                spec.protection(ticket['side'],number(ticket['entry']),number(p['sl']),number(tp),snap['quote'],modify=True)
+                updates.append(dict(position_id=ticket['id'],sl=p['sl'],tp=tp))
+        except (ValueError,ArithmeticError,KeyError,TypeError,IndexError):
+            raise ActionRejected('Перерасчёт TP невозможен: проверьте ручные ступени, долг, tick/stops/freeze и актуальность билетов. Ни один уровень не изменён.')
+        c['edit']=dict(stage='CANCEL',settings=deepcopy(c['cfg']),levels=None,updates=updates,cancel_ids=[],groups=[],
+            fills=sorted(c['tickets']),closed=sorted(pid for pid,t in c['tickets'].items() if t['closed']),modify_ids=[],
+            manual_tp_group=g['id'],manual_tp_distances=overrides,
+            expected_protection={u['position_id']:{k:live[u['position_id']][k] for k in ('sl','tp')} for u in updates})
+        self.save('drag_tp_recalculation_requested')
+
     def _commit_edit_extra(self,e):
+        if 'manual_tp_group' in e:
+            group=next(g for g in self.state['cycle']['groups'] if g['id']==e['manual_tp_group'])
+            group['manual_tp_distances']=deepcopy(e['manual_tp_distances'])
         if 'tp_distances' in e:
             self.state['tp_distances']=deepcopy(e['tp_distances'])
             self.state['cycle']['tp_distances']=deepcopy(e['tp_distances'])
@@ -267,4 +312,12 @@ class LatestCloseBasketController(BasketController):
                 raise ActionRejected('Резерв и множитель прежней стратегии не используются; меняйте расстояния ступеней TP')
         if any(g.get('entry_sl_once',{}).get('status') in ('PREPARED','PENDING') or g.get('actual_ladder_tx',{}).get('status')=='PENDING' for g in c.get('groups',[])):
             raise ActionRejected('Перенос SL ещё не подтверждён; повторная правка заблокирована')
+        protection=kwargs.get('protection')
+        if protection is not None:
+            try:
+                t=c.get('tickets',{}).get(protection['position_id'])
+                if t and t['role']!='initial' and number(protection['new']['tp'])!=number(protection['old']['tp']):
+                    return self._edit_dragged_tp(protection)
+            except ActionRejected:raise
+            except (KeyError,TypeError,ValueError,ArithmeticError):raise ActionRejected('Неверные поля защиты')
         return super().edit(**kwargs)

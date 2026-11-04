@@ -88,3 +88,13 @@ class ConfiguredLadder(unittest.TestCase):
         with self.assertRaises(ValueError):configured_ladder(self.b,self.spec,'SELL',['1']*4,['.01']*4,'100',['.10',None,'.30',None])
     def test_modify_requires_quote(self):
         with self.assertRaises(ValueError):configured_ladder(self.b,self.spec,'BUY',['4000'],['.01'],'1',['1'],modify=True)
+
+    def test_closed_mask_excludes_profit_and_quote_checks_preserves_indices(self):
+        prices=configured_ladder(self.b,self.spec,'BUY',['4000']*3,['.01','.02','.03'],'2.50',['.20','.40',None],quote={'bid':'4000.25','ask':'4000.35'},modify=True,active_mask=[False,True,True])
+        self.assertEqual(prices[:2],['4000.20','4000.40'])
+        profit=sum(self.b.profit('BUY',D(v),D(4000),D(p)) for v,p in zip(['.02','.03'],prices[1:]))
+        self.assertGreaterEqual(profit,D('2.50'))
+        self.assertLess(profit-D('.03')*100*self.spec.tick_size,D('2.50'))
+    def test_closed_mask_requires_boolean_slots_and_live_remainder(self):
+        for mask in ([False,False],[True],[1,False]):
+            with self.assertRaises(ValueError):configured_ladder(self.b,self.spec,'BUY',['4000']*2,['.01']*2,'1',['.20',None],active_mask=mask)

@@ -74,9 +74,12 @@ def main():
             page.locator('#chart').scroll_into_view_if_needed()
             target=page.locator('#chart g[data-line$="-tp"] line').first;box=target.bounding_box();x=box['x']+box['width']*.6;y=box['y']
             page.mouse.move(x,y);page.mouse.down();page.wait_for_timeout(580);page.mouse.move(x,y+12);page.mouse.up();page.locator('#preview').wait_for(state='visible')
-            changed=f"{float(paper.p['positions'][0]['tp'])-.01:.2f}"
+            old_free_tp=paper.p['positions'][1]['tp'];fixed_tp=paper.p['positions'][2]['tp'];old_sl=[p['sl'] for p in paper.p['positions']]
+            changed=f"{float(paper.p['positions'][0]['tp'])-.02:.2f}"
             page.locator('#new-price').fill(changed);page.locator('#apply-level').click();wait("localStorage.getItem('basket-request-paper')===null && document.querySelector('#edit-status').textContent===''")
             assert float(paper.p['positions'][0]['tp'])==float(changed)
+            assert paper.p['positions'][1]['tp']!=old_free_tp;assert paper.p['positions'][2]['tp']==fixed_tp
+            assert [p['sl'] for p in paper.p['positions']]==old_sl
             page.locator('#level-buttons button').filter(has_text='TP ').first.click()
             pstate=paper.session.controller.state
             paper.session.gateway.apply(dict(id='other-tab-costs',revision=pstate['control_revision'],action=dict(type='paper_costs',commission_per_lot_side='3')))
