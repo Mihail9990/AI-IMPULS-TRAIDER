@@ -63,6 +63,13 @@ def main():
             page.locator('#tab-paper').click();wait("document.querySelector('#mode').textContent.startsWith('PAPER')")
             page.locator('#setting-BASKET_COUNT').fill('0');page.locator('#save-settings').click();wait("localStorage.getItem('basket-request-paper')===null && document.querySelector('#action-error').textContent.includes('Неверные параметры')")
             page.locator('#setting-BASKET_COUNT').fill('6');page.locator('#save-settings').click();wait("localStorage.getItem('basket-request-paper')===null")
+            page.locator('#refresh-settings').click();assert page.locator('#tp-grid-settings').is_visible()
+            assert page.locator('#setting-TP_STEP_MULTIPLIER').count()==0
+            before_tp_requests=len(requests);page.locator('#tp-distance-0').fill('');page.locator('#save-tp-grid').click()
+            assert len(requests)==before_tp_requests;assert 'TP 1' in page.locator('#action-error').inner_text()
+            page.locator('#tp-distance-0').fill('.30');page.locator('#tp-distance-2').fill('.50');page.locator('#save-tp-grid').click()
+            wait("localStorage.getItem('basket-request-paper')===null && document.querySelector('#edit-status').textContent===''")
+            assert paper.session.controller.state['cycle']['tp_distances'][:3]==['0.30',None,'0.50']
             page.locator('#paper-cost').fill('2');page.locator('#paper-save-cost').click();wait("localStorage.getItem('basket-request-paper')===null");assert paper.p['commission_per_lot_side']=='2'
             page.locator('#chart').scroll_into_view_if_needed()
             target=page.locator('#chart g[data-line$="-tp"] line').first;box=target.bounding_box();x=box['x']+box['width']*.6;y=box['y']
@@ -101,6 +108,6 @@ def main():
             wait("!document.querySelector('#mode').textContent.startsWith('PAPER') && !document.querySelector('#start').disabled");count=len(requests);page.reload();page.locator('#workspace').wait_for(state='visible');assert len(requests)==count
             page.locator('#tab-paper').click();wait("document.querySelector('#mode').textContent.startsWith('PAPER')");assert page.locator('#start').is_disabled();assert len(requests)==count
             assert not errors,errors
-            print('PASS: actual auth/routes; isolated live/paper; no requests on tab switch; preview cancelled across mode; per-mode UNKNOWN persists; invalid setting then valid action; paper long-press TP readback; stale preview rejected; independent panes/toggles; colors/opacity persist; main visible; mobile360/390 desktop768/1280; no live state changes; no JS errors; DEMO absent; live/paper/runtime UTF-8 log downloads PASS; local-config 5-character login PASS.')
+            print('PASS: actual auth/routes; isolated live/paper; no requests on tab switch; preview cancelled across mode; per-mode UNKNOWN persists; invalid setting then valid action; mandatory TP1 UI validation; active interpolated TP grid confirmed; retired multiplier hidden; paper long-press TP readback; stale preview rejected; independent panes/toggles; colors/opacity persist; main visible; mobile360/390 desktop768/1280; no live state changes; no JS errors; DEMO absent; live/paper/runtime UTF-8 log downloads PASS; local-config 5-character login PASS.')
         finally:browser.close();paper.tearDown();paper.doCleanups();live.doCleanups()
 if __name__=='__main__':main()

@@ -126,14 +126,14 @@ class NativePanel:
                 from decimal import Decimal as D
                 ps=snap.get('positions',[])
                 gross=sum((self.controller.broker.profit(p['side'],D(p['size']),D(p['entry']),D(p['tp'])) for p in ps),D(0))
-                debt=D(c.get('recovery') or s.get('basket_carry','0'));reserve=D(c.get('cfg',s['basket_settings'])['COST_RESERVE'])
+                debt=D(c.get('recovery') or s.get('basket_carry','0'));reserve=D(0) if 'tp_distances' in s else D(c.get('cfg',s['basket_settings'])['COST_RESERVE'])
                 self._basket_projection=dict(gross_tp=str(gross),cost_reserve=str(reserve),shortfall=str(max(D(0),debt+reserve-gross)))
                 self._basket_projection_key=key
             projection=self._basket_projection
         except (ValueError,OSError,TimeoutError):pass
         return dict(contract='ticket_basket_v1',source=feed['source'],scope=self.scope,revision=s.get('control_revision',0),symbol=self.controller.broker.symbol,
             phase=s['phase'],read_only=bool(getattr(self.controller.broker,'read_only',False)),stopped=s['stop'],settings=deepcopy(s['basket_settings']),
-            active_settings=deepcopy(c.get('cfg')),cycle_id=c.get('id'),debt=c.get('recovery',s.get('basket_carry','0')),realized=c.get('realized','0'),
+            tp_distances=deepcopy(s.get('tp_distances')),active_tp_distances=deepcopy(c.get('tp_distances')),range_policy=c.get('range_policy'),active_settings=deepcopy(c.get('cfg')),cycle_id=c.get('id'),debt=c.get('recovery',s.get('basket_carry','0')),realized=c.get('realized','0'),
             frozen_levels=deepcopy(c.get('expanded')),levels=self.controller.levels(),edit=deepcopy(c.get('edit')),projection=projection,
             migration_block=s.get('migration_block'),manual_reason=c.get('manual_reason'),time_block=deepcopy(s.get('time_block')),feed=feed,
             tickets=deepcopy(list(c.get('tickets',{}).values())),orders=deepcopy(snap.get('orders',[])),positions=deepcopy(snap.get('positions',[])),

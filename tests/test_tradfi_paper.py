@@ -27,7 +27,7 @@ class Reader:
 class PaperTest(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.path=Path(self.tmp.name)/'paper.db';self.reader=Reader();self.create();self.step()
-        self.session.controller.state['basket_settings']['INITIAL_SIZE']='.01';self.session.controller.save('fixture')
+        self.session.controller.state['tp_distances']=['.20']+[None]*19;self.session.controller.state['basket_settings']['INITIAL_SIZE']='.01';self.session.controller.save('fixture')
     def create(self):self.session=PaperSession(self.path,self.reader,clock=lambda:self.reader.now,monotonic=lambda:self.reader.now)
     def tearDown(self):self.session.close()
     def step(self,n=1):
@@ -41,10 +41,12 @@ class PaperTest(unittest.TestCase):
         self.assertEqual(len(self.p['orders']),1)
     def initial(self,side='BUY'):
         self.start(side);self.reader.tick('4000.9','4001' if side=='BUY' else '4000.99') if side=='BUY' else self.reader.tick('3999','3999.1');self.step(3)
-        self.assertEqual(len(self.p['positions']),1);self.assertEqual(len(self.p['orders']),6)
+        self.assertEqual(len(self.p['positions']),1);self.assertEqual(len(self.p['orders']),0)
     def reversal(self,side='BUY'):
         self.initial(side)
         self.reader.tick('3998','3998.1') if side=='BUY' else self.reader.tick('4001.9','4002')
+        self.step(3);self.assertFalse(self.p['positions']);self.assertEqual(len(self.p['orders']),12)
+        self.reader.tick('3997','3997.1') if side=='BUY' else self.reader.tick('4002.9','4003')
         self.step(3);self.assertEqual(len(self.p['positions']),6);self.assertFalse(self.p['orders'])
     def test_initial_tp_cancels_opposite_and_new_cycle_fresh_close(self):
         self.initial();self.reader.tick('4001.25','4001.35');self.step(5)
@@ -53,18 +55,23 @@ class PaperTest(unittest.TestCase):
     def test_ask_buy_bid_sell_and_mirror(self):
         self.initial('SELL');self.assertEqual(self.p['positions'][0]['entry'],'3999')
         self.reader.tick('4001.9','4002');self.step(3)
-        self.assertEqual({p['side'] for p in self.p['positions']},{'BUY'});self.assertEqual({p['entry'] for p in self.p['positions']},{'4002'})
+        self.assertFalse(self.p['positions']);self.assertEqual(len(self.p['orders']),12)
+        self.reader.tick('4002.9','4003');self.step(3)
+        self.assertEqual({p['side'] for p in self.p['positions']},{'BUY'});self.assertEqual({p['entry'] for p in self.p['positions']},{'4003'})
         self.assertEqual(D(self.session.controller.state['cycle']['recovery']),D(3))
-    def test_partial_tp_then_sl_expansion_once(self):
+    def test_partial_tp_then_sl_reanchors_each_round_and_tp1_moves_sl(self):
         self.reversal();targets=sorted([D(p['tp']) for p in self.p['positions']],reverse=True)
-        self.reader.tick(targets[1]-D('.1'),targets[1]);self.step(3);self.assertEqual(len(self.p['positions']),4)
-        self.reader.tick('3999.4','3999.5');self.step(3)
-        c=self.session.controller.state['cycle'];self.assertEqual(D(c['recovery']),D('8.55'));anchors=deepcopy(c['expanded']);self.assertEqual(anchors,{'BUY':'4000.50','SELL':'3997.00'})
-        self.reader.tick('4000.4','4000.5');self.step(3);self.assertEqual(len(self.p['positions']),6);self.assertFalse(self.p['orders'])
-        self.reader.tick('3999','3999.1');self.step(3);self.assertEqual(c['expanded'],anchors)
+        self.reader.tick(targets[1]-D('.1'),targets[1]);self.step(5);self.assertEqual(len(self.p['positions']),4)
+        self.assertEqual({D(p['sl']) for p in self.p['positions']},{D('3997')})
+        self.reader.tick('3998.4','3998.5');self.step(4)
+        c=self.session.controller.state['cycle'];anchors=deepcopy(c['expanded']);self.assertEqual(anchors,{'BUY':'3999.50','SELL':'3997.50'})
+        realized=sum(D(d['profit'])+D(d['commission'])+D(d['swap'])+D(d['fee']) for d in self.p['deals'])
+        self.assertEqual(D(c['recovery']),-realized)
+        self.reader.tick('3999.4','3999.5');self.step(3);self.assertEqual(len(self.p['positions']),6);self.assertFalse(self.p['orders'])
+        self.reader.tick('3998','3998.1');self.step(4);self.assertEqual(c['expanded'],{'BUY':'3999.00','SELL':'3997.00'})
     def test_all_tps_cover_debt_and_stop_has_no_trailing(self):
         self.reversal();sl=[p['sl'] for p in self.p['positions']];target=min(D(p['tp']) for p in self.p['positions'])
-        self.reader.tick('3998','3998.01');self.step(2);self.assertEqual([p['sl'] for p in self.p['positions']],sl)
+        self.reader.tick('3996.95','3997.05');self.step(2);self.assertEqual([p['sl'] for p in self.p['positions']],sl)
         self.reader.tick(target-D('.1'),target);self.step(5);self.assertIsNone(self.session.controller.state['cycle'])
     def test_gap_execution_uses_observed_price_not_trigger_or_favorable_tp(self):
         self.start();self.reader.tick('4001.1','4001.2');self.step(3);self.assertEqual(self.p['positions'][0]['entry'],'4001.2')
@@ -116,14 +123,14 @@ class PaperTest(unittest.TestCase):
     def test_active_sl_edit_confirmed_without_resizing_and_stale_preview_rejected(self):
         self.reversal();c=self.session.controller.state['cycle'];settings=dict(c['cfg'],RECOVERY_SL_DISTANCE='1.25',BASKET_COUNT=4)
         self.action(dict(type='basket_settings',settings=settings,cycle_id=c['id']));self.step(5)
-        self.assertEqual(len(self.p['positions']),6);self.assertEqual({D(p['sl']) for p in self.p['positions']},{D('3999.25')})
+        self.assertEqual(len(self.p['positions']),6);self.assertEqual({D(p['sl']) for p in self.p['positions']},{D('3998.25')})
         p=self.p['positions'][0]
         with self.assertRaises(ActionRejected):self.action(dict(type='protection',cycle_id='old-cycle',position_id=p['id'],old=dict(sl=p['sl'],tp=p['tp']),new=dict(sl=p['sl'],tp=p['tp'])))
     def test_restart_after_fill_before_controller_adoption_books_once(self):
         self.start();self.reader.tick('4000.9','4001');self.session.exchange.observe(self.reader.read())
         self.assertEqual(len(self.p['positions']),1);self.session.close();self.create();self.step()
         self.assertTrue(self.p['paused_gap']);self.action(dict(type='paper_resume'));self.step(4)
-        self.assertEqual(len(self.p['positions']),1);self.assertEqual(len(self.p['orders']),6)
+        self.assertEqual(len(self.p['positions']),1);self.assertEqual(len(self.p['orders']),0)
         self.assertEqual(len([d for d in self.p['deals'] if d['entry']=='IN']),1)
     def test_new_oco_both_sides_crossed_in_one_observed_tick_halts(self):
         self.reversal();self.reader.tick('3999.4','3999.5');self.step(3)
@@ -185,7 +192,7 @@ class NativePaperIsolationTest(unittest.TestCase):
         before=list(live_store.db.iterdump())
         h={'Host':'127.0.0.1:8765','X-Local-Control':'1','Content-Type':'application/json'}
         _,_,extra=panel.transport.request('POST','/api/login',h,json.dumps({'password':'x'*32}).encode());h['Cookie']=extra['Set-Cookie'].split(';')[0];h['X-Controller-Scope']=paper.scope
-        actions=[dict(type='paper_costs',commission_per_lot_side='2'),dict(type='command',text='/start'),dict(type='command',text='/stop'),dict(type='paper_resume'),dict(type='paper_flatten',confirmed=True),dict(type='command',text='/reset_manual')]
+        actions=[dict(type='tp_distances',cycle_id=None,distances=['.20']+[None]*19),dict(type='paper_costs',commission_per_lot_side='2'),dict(type='command',text='/start'),dict(type='command',text='/stop'),dict(type='paper_resume'),dict(type='paper_flatten',confirmed=True),dict(type='command',text='/reset_manual')]
         for i,a in enumerate(actions):
             request=dict(id='isolate-%04d'%i,revision=paper.controller.state.get('control_revision',0),action=a)
             self.assertEqual(panel.transport.request('POST','/api/paper/action',h,json.dumps(request).encode())[0],202);paper.step()
@@ -208,7 +215,9 @@ class NativePaperIsolationTest(unittest.TestCase):
             def is_set(self):return self.count>=5
             def wait(self,seconds):
                 panel=observed[0];paper=panel.paper_session
-                if self.count==0:paper.action(dict(type='command',text='/start'))
+                if self.count==0:
+                    paper.action(dict(type='tp_distances',cycle_id=None,distances=['.20']+[None]*19))
+                    paper.action(dict(type='command',text='/start'))
                 if self.count==3:paper.action(dict(type='command',text='/stop'))
                 outer.api.now+=1;self.count+=1
         with patch('tradfi.runtime.account_lock_path',return_value=str(Path(self.tmp.name)/'account.lock')),patch('tradfi.paper_market.MarketReader',return_value=self.reader),patch('tradfi.time_safety.TimeSafety',side_effect=verified_time):

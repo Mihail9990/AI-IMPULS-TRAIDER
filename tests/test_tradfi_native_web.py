@@ -101,7 +101,7 @@ class RuntimePipelineTest(unittest.TestCase):
                 bots.append(bot);self.n+=1
                 if self.n>20:raise AssertionError('runtime failed to settle')
                 if self.n==1:
-                    bot.command('/start');api.now+=60;api.rates[0]['time']+=60;stages.append('candle')
+                    bot.action(dict(type='tp_distances',cycle_id=None,distances=['.20']+[None]*19));bot.command('/start');api.now+=60;api.rates[0]['time']+=60;stages.append('candle')
                 elif self.n==3:api.fill();stages.append('fill')
                 elif self.n==6:
                     p=bot.snapshot()['positions'][0]

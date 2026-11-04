@@ -9,6 +9,7 @@ class LatestClose(unittest.TestCase):
     def setUp(self):
         self.f=fixtures.BasketTest();self.f.setUp();self.addCleanup(self.f.doCleanups)
         self.f.bot=LatestCloseBasketController(self.f.store,self.f.b)
+        self.f.bot.state['tp_distances']=['.20']+[None]*19
     def first_sl(self,side='BUY'):
         f=self.f;f.start(side);f.b.fill(side);f.tick(2)
         self.assertFalse(f.b.data['orders'])
@@ -102,6 +103,7 @@ class NativeLatestClose(unittest.TestCase):
     def setUp(self):
         self.f=fixtures.NativeBasketTest();self.f.setUp();self.addCleanup(self.f.doCleanups);self.addCleanup(self.f.tearDown)
         f=self.f;f.bot=LatestCloseBasketController(f.store,f.broker,clock=lambda:f.api.now,monotonic=lambda:f.api.now)
+        f.bot.state['tp_distances']=['.20']+[None]*19
         f.bot.command('/start');f.api.now+=60;f.api.tick=f.api.tick._replace(time_msc=f.api.now*1000)
         f.api.rates=[dict(time=int(f.api.now//60)*60-60,open=3999.,close=4000.)];f.tick(2)
     def first_sl(self):

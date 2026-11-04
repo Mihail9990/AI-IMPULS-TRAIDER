@@ -476,6 +476,9 @@ class BasketController(Controller):
             fills=sorted(c['tickets']),closed=sorted(pid for pid,t in c['tickets'].items() if t['closed']),modify_ids=[])
         self.save('basket_edit_requested')
 
+    def _commit_edit_extra(self,e):
+        pass
+
     def _advance_edit(self,snap):
         c=self.state['cycle'];e=c['edit']
         if sorted(c['tickets'])!=e['fills'] or sorted(pid for pid,t in c['tickets'].items() if t['closed'])!=e['closed']:
@@ -497,6 +500,10 @@ class BasketController(Controller):
         commands=[self.state['commands'][cid] for cid in e['modify_ids']]
         if any(cmd['status']=='REJECTED' for cmd in commands):self._halt(snap,'EDIT_PARTIAL_FAILURE_REVIEW_BROKER_TRUTH');return True
         if any(cmd['status']!='DONE' for cmd in commands):return True
+        live={p['id']:p for p in snap['positions']}
+        for u in e['updates']:
+            p=live.get(u['position_id'])
+            if not p or any(number(p[k])!=number(u[k]) for k in ('sl','tp')):return True
         for u in e['updates']:
             t=c['tickets'][u['position_id']];t.update(sl=u['sl'],tp=u['tp'])
             next(g for g in c['groups'] if g['id']==t['group'])['ladder_applied']=True
@@ -506,6 +513,7 @@ class BasketController(Controller):
         if e['levels'] is not None:
             if c['expanded'] is not None:c['expanded']=deepcopy(e['levels'])
             elif not c['tickets']:c['signal_override']=deepcopy(e['levels'])
+        self._commit_edit_extra(e)
         c.pop('edit');c.pop('level_wait',None);self.notify('Правка подтверждена брокером. Долг сохранён; дальнейшие входы используют новые параметры/уровни.');self.save('basket_edit_confirmed');return False
 
     def levels(self):

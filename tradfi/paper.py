@@ -2,7 +2,7 @@
 from copy import deepcopy
 from decimal import Decimal as D
 import hashlib,json,uuid
-from .basket import BasketController
+from .basket_latest_close import LatestCloseBasketController
 from .control import ActionRejected,ActionGateway,OwnerMailbox
 from .broker import Spec
 from .settings import number
@@ -111,7 +111,7 @@ class PaperSession:
         if existing and existing.get('backend')!=PaperExchange.backend_id:
             self.store.close();raise DurabilityError('Paper cannot adopt another controller database')
         self.exchange=PaperExchange(self.store,clock=clock)
-        self.controller=BasketController(self.store,self.exchange,clock=clock,monotonic=monotonic)
+        self.controller=LatestCloseBasketController(self.store,self.exchange,clock=clock,monotonic=monotonic)
         self.scope=self.exchange.account;self.gateway=ActionGateway(self.controller,execute=self.action);self.mailbox=OwnerMailbox();self.snapshot=None
         self.presentation=None
     def _fresh(self):
