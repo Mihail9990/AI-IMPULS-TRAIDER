@@ -1,0 +1,23 @@
+.env
+bot_state.json
+bot_state.sqlite3*
+demo_captures/
+bot_config.json
+__pycache__/
+.pytest_cache/
+*.pyc
+bot_diagnostics.log*
+bot_diagnostics*.log*
+tradfi_config.json
+tradfi_state.sqlite3*
+tradfi.log*
+service.json
+telegram.json
+telegram.local.json
+*.credentials.json
+
+# Local native demo state and bounded diagnostic exports
+tradfi_demo.json
+tradfi_xauusdt_demo.sqlite3*
+*.demo.sqlite3*
+*.diagnostic.jsonl*
