@@ -116,44 +116,62 @@ def last_closed_sl_price(tickets):
     if reason!='SL':raise ValueError('Последнее закрытие не SL; нужен отдельный подтверждённый переход')
     return str(price)
 
-def configured_ladder(broker,spec,side,entries,sizes,debt,distances):
-    """Every TP distance is relative to its own ticket's actual entry.
+def configured_ladder(broker,spec,side,entries,sizes,debt,distances,*,quote=None,modify=False):
+    """Interpolate distances between fixed slots; solve a uniform trailing step.
 
-    Supported: TP1 plus all remaining blank, or every distance specified.
-    Mixed fixed/blank later slots are explicitly blocked pending clarification.
-    For first-only, distance_i = distance_1 + i * whole_tick_step. Actual prices
-    must remain strictly ordered in the profitable direction despite fill gaps.
+    Every price is based on its own actual entry. Manual distances never move.
+    Interpolation must be exact on the broker tick, otherwise reject. The tail
+    uses the smallest admissible whole-tick step covering actual recovery debt.
+    Optional fresh quote validates TP-side stop/freeze; SL needs separate checks.
     """
     from decimal import ROUND_FLOOR,ROUND_CEILING
     if side not in ('BUY','SELL') or not entries or len(entries)!=len(sizes) or not isinstance(distances,list) or len(distances)!=len(entries):raise ValueError('Нужен один параметр ступени на билет')
     if distances[0] is None:raise ValueError('Первая TP-ступень обязательна')
+    if modify and quote is None:raise ValueError('Для изменения TP нужна свежая котировка')
     tick=number(spec.tick_size);goal=number(debt)
     entries=[spec.price(e) for e in entries];sizes=list(map(number,sizes))
-    if goal<0 or min(sizes)<=0:raise ValueError('Некорректные фактические объёмы/долг')
+    if goal<0 or any(v<spec.volume_min or v>spec.volume_max or v%spec.volume_step for v in sizes):raise ValueError('Некорректные фактические объёмы/долг')
     fixed={i:number(d) for i,d in enumerate(distances) if d is not None}
     if any(d<=0 or d%tick for d in fixed.values()):raise ValueError('Расстояния должны быть положительными и точными по tick')
-    if len(fixed) not in (1,len(entries)):
-        raise ValueError('MIXED_GRID_UNCONFIRMED: формула смешанной сетки ещё не подтверждена; заданные уровни сохранены')
-    first=fixed[0];sign=1 if side=='BUY' else -1
-    lower=1;upper=2**28
-    if len(fixed)==1:
-        for i in range(1,len(entries)):
-            lower=max(lower,int((-D(sign)*(entries[i]-entries[i-1])/tick).to_integral_value(rounding=ROUND_FLOOR))+1)
-            if side=='SELL':upper=min(upper,int(((entries[i]-first)/(D(i)*tick)).to_integral_value(rounding=ROUND_CEILING))-1)
-    if lower>upper:raise ValueError('Фактические входы не допускают положительную упорядоченную сетку')
-    def prices(step):
-        offsets=[fixed.get(i,first+D(i)*tick*step) for i in range(len(entries))]
-        values=[spec.price(e+sign*d) for e,d in zip(entries,offsets)]
-        if any(sign*(b-a)<=0 for a,b in zip(values,values[1:])):raise ValueError('Фактические TP нарушают порядок ступеней; ручные уровни не сдвинуты')
+    sign=1 if side=='BUY' else -1;last=max(fixed)
+    offsets=[None]*len(entries)
+    for i,d in fixed.items():offsets[i]=d
+    indexes=sorted(fixed)
+    for left,right in zip(indexes,indexes[1:]):
+        step=(fixed[right]-fixed[left])/D(right-left)
+        if step<=0 or step%tick:raise ValueError('Равномерная интерполяция между заданными ступенями невозможна по tick; ручные уровни сохранены')
+        for i in range(left+1,right):offsets[i]=fixed[left]+D(i-left)*step
+    minimum=spec.point*(max(spec.stops_level,spec.freeze_level) if modify else spec.stops_level)
+    executable=number(quote['bid' if side=='BUY' else 'ask']) if quote is not None else None
+    if executable is not None and executable<=0:raise ValueError('Некорректная котировка')
+    def validate(values):
+        if any(sign*(b-a)<=0 for a,b in zip(values,values[1:])):raise ValueError('Фактические TP нарушают порядок ступеней; ручные уровни сохранены')
+        for entry,price in zip(entries,values):
+            gap=sign*(price-(executable if executable is not None else entry))
+            if gap<=0 or gap<minimum:raise ValueError('TP пересечён или нарушает stop/freeze; заданные уровни не сдвинуты')
         return values
+    prefix=[spec.price(entries[i]+sign*offsets[i]) for i in range(last+1)]
+    validate(prefix)
+    lower=1;upper=2**28
+    for i in range(last+1,len(entries)):
+        k=D(i-last)
+        lower=max(lower,int((-D(sign)*(entries[i]-entries[i-1])/tick).to_integral_value(rounding=ROUND_FLOOR))+1)
+        q=executable if executable is not None else entries[i]
+        gap=D(sign)*(entries[i]-q)+fixed[last]
+        lower=max(lower,int(((minimum-gap)/(k*tick)).to_integral_value(rounding=ROUND_CEILING)),int((-gap/(k*tick)).to_integral_value(rounding=ROUND_FLOOR))+1)
+        if side=='SELL':upper=min(upper,int(((entries[i]-fixed[last])/(k*tick)).to_integral_value(rounding=ROUND_CEILING))-1)
+    if lower>upper:raise ValueError('Нет положительной упорядоченной сетки в ограничениях брокера')
+    def prices(step):
+        ds=[offsets[i] if i<=last else fixed[last]+D(i-last)*tick*step for i in range(len(entries))]
+        return validate([spec.price(e+sign*d) for e,d in zip(entries,ds)])
     def profit(step):return sum((number(broker.profit(side,v,e,p)) for e,v,p in zip(entries,sizes,prices(step))),D(0))
-    if len(fixed)==len(entries):
-        if profit(lower)<goal:raise ValueError('Все ступени заданы, но не покрывают RECOVERY')
+    if last==len(entries)-1:
+        if profit(lower)<goal:raise ValueError('Заданные и интерполированные ступени не покрывают RECOVERY; свободного продолжения нет')
         return [str(p) for p in prices(lower)]
     low=lower;high=lower
     if profit(low)>=goal:return [str(p) for p in prices(low)]
     while profit(high)<goal:
-        if high==upper:raise ValueError('Заданные ступени не позволяют покрыть RECOVERY')
+        if high==upper:raise ValueError('Не удалось покрыть RECOVERY в допустимом диапазоне цен')
         high=min(upper,high*2)
     while high-low>1:
         mid=(low+high)//2

@@ -23,9 +23,13 @@ class ConfiguredLadder(unittest.TestCase):
         buy=list(map(D,self.calc(['.20',None,None])))
         sell=list(map(D,self.calc(['.20',None,None],side='SELL')))
         self.assertEqual([x-D(4000) for x in buy],[D(4000)-x for x in sell])
-    def test_mixed_grid_explicitly_blocked_without_mutating_inputs(self):
-        values=['.20',None,'.80',None,None,None];before=list(values)
-        with self.assertRaisesRegex(ValueError,'MIXED_GRID_UNCONFIRMED'):self.calc(values)
+    def test_confirmed_mixed_example_preserves_manual_and_interpolates(self):
+        values=['.50',None,'1.50',None,None,None];before=list(values)
+        prices=list(map(D,self.calc(values,debt='10')))
+        self.assertEqual(prices[:3],[D('4000.50'),D('4001.00'),D('4001.50')])
+        self.assertEqual(prices[3]-prices[2],prices[4]-prices[3]);self.assertEqual(prices[4]-prices[3],prices[5]-prices[4])
+        self.assertGreaterEqual(sum(p-D(4000) for p in prices),10)
+        self.assertLess(sum(p-D(4000) for p in prices)-D('.01')*6,10)
         self.assertEqual(values,before)
     def test_incompatible_constraints_rejected(self):
         with self.assertRaises(ValueError):self.calc(['.20',None,'.22',None,'.23'])
@@ -58,3 +62,29 @@ class ConfiguredLadder(unittest.TestCase):
         with self.assertRaises(ValueError):configured_ladder(self.b,self.spec,'BUY',['4002','4000'],['.01','.01'],'1',['.50','1.00'])
     def test_off_tick_actual_average_is_not_silently_rounded(self):
         with self.assertRaises(ValueError):configured_ladder(self.b,self.spec,'BUY',['4000.005','4000'],['.01','.01'],'1',['.50',None])
+
+    def test_mixed_mirror_and_unequal_actual_fills_volumes(self):
+        entries=['4000','4000.02','4000.01','4000.04','4000.03','4000.05'];sizes=['.01','.02','.01','.03','.01','.02']
+        for side in ('BUY','SELL'):
+            sign=1 if side=='BUY' else -1
+            prices=list(map(D,configured_ladder(self.b,self.spec,side,entries,sizes,'20',['.50',None,'1.50',None,None,None])))
+            distances=[sign*(p-D(e)) for p,e in zip(prices,entries)]
+            self.assertEqual(distances[:3],[D('.50'),D('1.00'),D('1.50')])
+            self.assertEqual(distances[3]-distances[2],distances[4]-distances[3]);self.assertEqual(distances[4]-distances[3],distances[5]-distances[4])
+            self.assertGreaterEqual(sum(self.b.profit(side,D(v),D(e),p) for e,v,p in zip(entries,sizes,prices)),20)
+    def test_multiple_interpolation_segments(self):
+        p=self.calc(['.10',None,'.50',None,None,'1.10'],debt='1')
+        self.assertEqual([D(x)-D(4000) for x in p],list(map(D,['.10','.30','.50','.70','.90','1.10'])))
+    def test_exact_interpolation_without_tail_cannot_be_stretched_for_debt(self):
+        with self.assertRaisesRegex(ValueError,'свободного продолжения нет'):self.calc(['.10',None,'.30'],debt='10')
+    def test_already_covered_prefix_smallest_positive_tail_step(self):
+        self.assertEqual(self.calc(['.50',None,'1.50',None],debt='.1'),['4000.50','4001.00','4001.50','4001.51'])
+    def test_quote_freeze_refuses_fixed_tp_without_moving_it(self):
+        from dataclasses import replace
+        spec=replace(self.spec,freeze_level=D('20'))
+        with self.assertRaisesRegex(ValueError,'stop/freeze'):
+            configured_ladder(self.b,spec,'BUY',['4000']*3,['.01']*3,'1',['.50',None,'1.50'],quote={'bid':'4000.40','ask':'4000.50'},modify=True)
+    def test_positive_sell_tail_unreachable(self):
+        with self.assertRaises(ValueError):configured_ladder(self.b,self.spec,'SELL',['1']*4,['.01']*4,'100',['.10',None,'.30',None])
+    def test_modify_requires_quote(self):
+        with self.assertRaises(ValueError):configured_ladder(self.b,self.spec,'BUY',['4000'],['.01'],'1',['1'],modify=True)
