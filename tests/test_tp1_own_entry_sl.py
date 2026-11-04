@@ -3,7 +3,7 @@ import unittest
 import test_basket_latest_close as fixtures
 from tradfi.basket_latest_close import LatestCloseBasketController
 
-class TP1SecondEntry(unittest.TestCase):
+class TP1OwnEntry(unittest.TestCase):
     def setUp(self):
         self.case=fixtures.LatestClose();self.case.setUp();self.addCleanup(self.case.doCleanups);self.case.first_sl()
         self.f=f=self.case.f
@@ -11,24 +11,24 @@ class TP1SecondEntry(unittest.TestCase):
         f.b.quote('3996.75','3996.85');f.tick(4)
         c=f.bot.state['cycle'];self.g=next(g for g in c['groups'] if g.get('activated')=='SELL')
         self.ts=sorted([t for t in c['tickets'].values() if t['group']==self.g['id']],key=lambda t:t['index'])
-    def test_tp1_auto_uses_second_actual_entry_for_every_remaining(self):
+    def test_tp1_auto_uses_each_actual_entry(self):
         f=self.f;f.b.close('TP',position_id=self.ts[0]['id']);f.tick(6)
         self.assertEqual(self.g['entry_sl_once']['status'],'DONE')
-        self.assertEqual(self.g['entry_sl_once']['anchor_entry'],'3996.81')
-        self.assertEqual({D(p['sl']) for p in f.b.data['positions']},{D('3996.81')})
-    def test_tp2_first_does_not_trigger_but_closed_second_still_anchors(self):
+        self.assertEqual(self.g['entry_sl_once']['anchor_policy'],'own_entry_v1')
+        self.assertTrue(all(D(p['sl'])==D(p['entry']) for p in f.b.data['positions']))
+    def test_tp2_first_does_not_trigger_and_closed_second_is_not_anchor(self):
         f=self.f;f.b.close('TP',position_id=self.ts[1]['id']);f.tick(3)
         self.assertNotIn('entry_sl_once',self.g)
         f.b.close('TP',position_id=self.ts[0]['id']);f.tick(6)
         self.assertEqual(self.g['entry_sl_once']['status'],'DONE')
-        self.assertEqual({D(p['sl']) for p in f.b.data['positions']},{D('3996.81')})
+        self.assertTrue(all(D(p['sl'])==D(p['entry']) for p in f.b.data['positions']))
     def test_restart_after_tp1_does_not_repeat_after_manual_edit(self):
         f=self.f;f.b.close('TP',position_id=self.ts[0]['id']);f.tick(6)
         p=f.b.data['positions'][0];new=str(D(p['sl'])+D('.10'))
         f.bot.edit(protection=dict(position_id=p['id'],old=dict(sl=p['sl'],tp=p['tp']),new=dict(sl=new,tp=p['tp'])))
         f.tick(4);before=len(f.b.commands);f.bot=LatestCloseBasketController(f.store,f.b);f.tick(4)
         self.assertEqual(p['sl'],new);self.assertEqual(len(f.b.commands),before)
-    def test_missing_second_not_guessed(self):
+    def test_corrupted_ticket_indexes_not_guessed(self):
         f=self.f;f.b.close('TP',position_id=self.ts[0]['id']);f.bot._observe(f.bot.snapshot())
         f.bot.state['cycle']['tickets'][self.ts[1]['id']]['index']=9
         f.tick(3);self.assertTrue(f.bot.state['cycle'].get('manual'))
@@ -44,5 +44,5 @@ class TP1SecondEntry(unittest.TestCase):
             ts=sorted([t for t in c['tickets'].values() if t['group']==g['id']],key=lambda t:t['index'])
             f.b.close('TP',position_id=ts[0]['id']);f.tick(6)
             self.assertEqual(g['entry_sl_once']['status'],'DONE')
-            self.assertEqual({D(p['sl']) for p in f.b.data['positions']},{D('4003.21')})
+            self.assertTrue(all(D(p['sl'])==D(p['entry']) for p in f.b.data['positions']))
         finally:case.doCleanups()

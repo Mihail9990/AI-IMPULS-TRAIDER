@@ -14,7 +14,7 @@ def main():
     from tradfi.web_auth import resolve_password
     credential=secrets.token_urlsafe(6)[:5]
     panel=NativePanel(live.bot,password=resolve_password({'password':credential},{}),paper_session=paper.session)
-    requests=[];errors=[];drop=[False]
+    requests=[];errors=[];drop=[False];dialogs=[]
     def refresh():
         live.tick(2);panel.snapshot=live.b.snapshot()
         panel.feed.view=lambda:dict(source='OFFLINE_MT5_FIXTURE',status='FRESH',timestamp=paper.reader.now,age_seconds=0,quote=live.b.data['quote'],candles=[dict(open='3998',close='3998.2',high='3998.5',low='3997.5',utc_time=paper.reader.now-60*i) for i in reversed(range(60))])
@@ -40,7 +40,7 @@ def main():
     with sync_playwright() as pw:
         browser=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox'])
         try:
-            page=browser.new_page(viewport=dict(width=390,height=844),is_mobile=True,has_touch=True);page.route('**/*',route);page.on('pageerror',lambda e:errors.append(str(e)));page.on('dialog',lambda d:d.accept())
+            page=browser.new_page(viewport=dict(width=390,height=844),is_mobile=True,has_touch=True);page.route('**/*',route);page.on('pageerror',lambda e:errors.append(str(e)));page.on('dialog',lambda d:(dialogs.append(d.type),d.accept()))
             def wait(expression):
                 end=time.monotonic()+10
                 while not page.evaluate(expression):
@@ -106,6 +106,16 @@ def main():
                 if scope!='runtime':assert 'Логи' in data.decode()
             assert page.locator('#log-scope option[value=demo]').count()==0
             assert page.locator('#reverse-enable').is_disabled();assert page.locator('#reverse-disable').is_disabled()
+            # First control sends immediately, with no confirmation dialog.
+            first=paper.p['positions'][0];entry=float(first['entry'])
+            paper.reader.tick(entry-.15,entry-.10);paper.step(3)
+            wait("!document.querySelector('#own-entry-sl').disabled")
+            assert page.locator('.cycle-controls .controls button').first.get_attribute('id')=='own-entry-sl'
+            dialog_count=len(dialogs);page.locator('#own-entry-sl').click()
+            wait("localStorage.getItem('basket-request-paper')===null && document.querySelector('#edit-status').textContent===''")
+            assert len(dialogs)==dialog_count
+            assert all(float(p['sl'])==float(p['entry']) for p in paper.p['positions'])
+            assert live.store.load()==live_before
             # Observed paper tick closes TP1; allow its one-shot SL transfer to confirm.
             first=paper.p['positions'][0];entry=float(first['entry']);tp=float(first['tp'])
             paper.reader.tick(tp-.1,tp);paper.step(6)

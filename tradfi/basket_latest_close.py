@@ -7,6 +7,7 @@ from .basket import BasketController
 from .manual_control import ManualRangeControl
 from .reverse_ladder import ReverseLadderControl
 from .recovery_writeoff import RecoveryWriteoff
+from .entry_sl import OwnEntrySL
 from .basket_math import last_closed_exit,last_closed_sl_price,recovery_range_after_sl,configured_ladder,BasketSettings
 from .control import ActionRejected
 from .broker import Spec
@@ -15,18 +16,19 @@ from copy import deepcopy
 
 RANGE_POLICY='last_actual_close_v2'
 
-class LatestCloseBasketController(RecoveryWriteoff,ReverseLadderControl,ManualRangeControl,BasketController):
+class LatestCloseBasketController(OwnEntrySL,RecoveryWriteoff,ReverseLadderControl,ManualRangeControl,BasketController):
     def __init__(self,*args,**kwargs):
         super().__init__(*args,**kwargs)
         self.state.setdefault('tp_distances',[None]*20)
         c=self.state.get('cycle')
-        if c and (c.get('range_policy')!=RANGE_POLICY or 'tp_distances' not in c):
+        if c and (c.get('range_policy')!=RANGE_POLICY or 'tp_distances' not in c or c.get('protection_policy')!='own_entry_v1'):
             self.state['migration_block']='Активный цикл использует прежние диапазоны. Автоматического переноса нет; завершите сверку прежней версией.'
             self.state['phase']='MIGRATION_BLOCK';self.state['stop']=True
             self.save('latest_close_range_migration_block')
     def _new(self,snap):
         super()._new(snap)
         self.state['cycle']['range_policy']=RANGE_POLICY
+        self.state['cycle']['protection_policy']='own_entry_v1'
         self.state['cycle']['main_range']=None
         self.state['cycle']['tp_distances']=deepcopy(self.state['tp_distances'])
         self.save('latest_close_range_policy')
@@ -57,6 +59,7 @@ class LatestCloseBasketController(RecoveryWriteoff,ReverseLadderControl,ManualRa
         return configured_ladder(self.broker,spec,side,entries,sizes,debt,values)
 
     def action(self,a):
+        if isinstance(a,dict) and a.get('type')=='own_entry_sl':return self.request_own_entry_sl(a)
         if isinstance(a,dict) and a.get('type')=='writeoff_recovery':return self.writeoff_recovery(a)
         if isinstance(a,dict) and a.get('type')=='reverse_ladder':return self.request_reverse_ladder(a)
         if isinstance(a,dict) and a.get('type')=='manual_close':return self.request_manual_close(a)
@@ -145,6 +148,12 @@ class LatestCloseBasketController(RecoveryWriteoff,ReverseLadderControl,ManualRa
         self.save('drag_tp_recalculation_requested')
 
     def _commit_edit_extra(self,e):
+        if 'own_entry_sl_group' in e:
+            group=next(g for g in self.state['cycle']['groups'] if g['id']==e['own_entry_sl_group'])
+            group['own_entry_sl_confirmed']=deepcopy(e['updates'])
+            if group.get('reverse_ladder'):
+                group['reverse_ladder']['enabled']=False
+                group['reverse_ladder']['superseded_by']='OWN_ENTRY_SL'
         if 'reverse_group' in e:
             group=next(g for g in self.state['cycle']['groups'] if g['id']==e['reverse_group'])
             group['reverse_ladder']=deepcopy(e['reverse_ladder'])
@@ -246,7 +255,7 @@ class LatestCloseBasketController(RecoveryWriteoff,ReverseLadderControl,ManualRa
         """Owner-thread one-shot transaction; not a public unscoped action.
 
         Requires proven TP closure of index zero and the confirmed actual entry
-        of index one. Manual SL edits after DONE are never overwritten by repeats.
+        of each remaining ticket. Manual SL edits after DONE are never overwritten by repeats.
         """
         from .control import ActionRejected
         from .broker import Spec
@@ -260,19 +269,19 @@ class LatestCloseBasketController(RecoveryWriteoff,ReverseLadderControl,ManualRa
         if not trigger or trigger['group']!=group_id or trigger.get('closed') is not True or trigger.get('reason')!='TP' or trigger.get('index')!=0 or not trigger.get('exit_facts'):
             raise ActionRejected('TP ступени ещё не подтверждён')
         if c.get('edit') or self._uncertain() or snap['orders']:raise ActionRejected('Сначала сверка отмен, исполнений и предыдущей правки')
-        second=[t for t in c['tickets'].values() if t['group']==group_id and t.get('index')==1]
-        if len(second)!=1:raise ActionRejected('Фактический вход второй части ещё не подтверждён')
-        anchor=second[0]['entry']
+        group_tickets=[t for t in c['tickets'].values() if t['group']==group_id]
+        if sorted(t['index'] for t in group_tickets)!=list(range(len(group_tickets))):raise ActionRejected('Номера частей не подтверждены')
         spec=Spec.load(snap['spec']);targets=[]
         for t in c['tickets'].values():
             if t['group']!=group_id or t['closed']:continue
             live=next((p for p in snap['positions'] if p['id']==t['id']),None)
-            if not live or number(live['size'])!=number(t['size']):raise ActionRejected('Остаток билета изменился; нужна сверка')
+            if not live or number(live['size'])!=number(t['size']) or number(live['entry'])!=number(t['entry']):raise ActionRejected('Остаток или вход билета изменился; нужна сверка')
+            anchor=t['entry']
             try:spec.protection(t['side'],number(t['entry']),number(anchor),number(live['tp']),snap['quote'],modify=True)
             except (ValueError,ArithmeticError) as exc:raise ActionRejected('SL на входе пока недопустим по котировке или stop/freeze') from exc
             targets.append(dict(position_id=t['id'],sl=anchor,tp=live['tp'],old_sl=live['sl'],command_id=None))
         # Persist the one-shot marker and all targets before any broker intent.
-        g['entry_sl_once']=dict(status='PREPARED',trigger=trigger_position_id,anchor_position_id=second[0]['id'],anchor_entry=anchor,targets=targets)
+        g['entry_sl_once']=dict(status='PREPARED',trigger=trigger_position_id,anchor_policy='own_entry_v1',targets=targets)
         self.save('entry_sl_once_prepared')
 
     def _advance_entry_sl_once(self,snap,g):
@@ -324,7 +333,7 @@ class LatestCloseBasketController(RecoveryWriteoff,ReverseLadderControl,ManualRa
             if len(tickets)!=len(selected):return False
             try:self.stage_entry_sl_once(g['id'],trigger['id'])
             except ActionRejected:
-                self._halt(snap,'TP1_SECOND_ENTRY_SL_UNAVAILABLE');return True
+                self._halt(snap,'TP1_OWN_ENTRY_SL_UNAVAILABLE');return True
             return True
         return False
 

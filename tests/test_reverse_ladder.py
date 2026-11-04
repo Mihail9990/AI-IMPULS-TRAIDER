@@ -11,12 +11,19 @@ from tradfi.control import ActionRejected,ActionGateway
 
 class ReverseMath(unittest.TestCase):
     def setUp(self):self.spec=Spec.load(ARTIFICIAL_SPEC)
-    def test_confirmed_buy_example(self):self.assertEqual(reverse_sl_prices(self.spec,'BUY','4000','4002',4),['4000.0','4000.5','4001.0','4001.5'])
-    def test_sell_mirror(self):self.assertEqual(reverse_sl_prices(self.spec,'SELL','4000','3998',4),['4000.0','3999.5','3999.0','3998.5'])
-    def test_single_remainder_is_anchor(self):self.assertEqual(reverse_sl_prices(self.spec,'BUY','4000','4002',1),['4000'])
+    def test_confirmed_buy_example(self):self.assertEqual(reverse_sl_prices(self.spec,'BUY',['4000']*4,'4002',4),['4000','4000.5','4001','4001.5'])
+    def test_sell_mirror(self):self.assertEqual(reverse_sl_prices(self.spec,'SELL',['4000']*4,'3998',4),['4000','3999.5','3999','3998.5'])
+    def test_single_remainder_is_anchor(self):self.assertEqual(reverse_sl_prices(self.spec,'BUY',['4000'],'4002',1),['4000'])
     def test_no_rounding_or_crossed_direction(self):
-        for args in [('BUY','4000.02','4002',4),('SELL','4000','4002',4),('BUY','4000','4000',4),('BUY','4000','4002',True)]:
+        for args in [('BUY',['4000.02']*4,'4002',4),('SELL',['4000']*4,'4002',4),('BUY',['4000']*4,'4000',4),('BUY',['4000'],'4002',True)]:
             with self.assertRaises(ValueError):reverse_sl_prices(self.spec,*args)
+
+    def test_distinct_entries_preserve_fraction_and_order(self):
+        self.assertEqual(list(map(D,reverse_sl_prices(self.spec,'BUY',['4000','4000.04','4000.08','4000.12'],'4002',4))),list(map(D,['4000','4000.53','4001.04','4001.53'])))
+        self.assertEqual(list(map(D,reverse_sl_prices(self.spec,'SELL',['4000','3999.96','3999.92','3999.88'],'3998',4))),list(map(D,['4000','3999.47','3998.96','3998.47'])))
+    def test_crossed_rank_or_unprofitable_entry_rejected(self):
+        for entries in (['4001','3998','4000','4000'],['4000','4002','4000','4000']):
+            with self.assertRaises(ValueError):reverse_sl_prices(self.spec,'BUY',entries,'4002',4)
 
 class ReverseControl(unittest.TestCase):
     def setUp(self):
