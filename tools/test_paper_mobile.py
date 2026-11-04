@@ -105,6 +105,19 @@ def main():
                 data=Path(download.path()).read_bytes();assert len(data)<=1048576;data.decode('utf-8')
                 if scope!='runtime':assert 'Логи' in data.decode()
             assert page.locator('#log-scope option[value=demo]').count()==0
+            # Observed paper tick closes TP1; allow its one-shot SL transfer to confirm.
+            first=paper.p['positions'][0];entry=float(first['entry']);tp=float(first['tp'])
+            paper.reader.tick(tp-.1,tp);paper.step(6)
+            paper.reader.tick(entry-.45,entry-.35);paper.step(3)
+            wait("document.querySelectorAll('#tickets tr').length===5")
+            page.locator('#reverse-enable').click()
+            wait("localStorage.getItem('basket-request-paper')===null && document.querySelector('#edit-status').textContent==='' && document.querySelector('#reverse-status').textContent.includes('включена')")
+            assert len({p['sl'] for p in paper.p['positions']})==5
+            before_tps=[p['tp'] for p in paper.p['positions']]
+            page.locator('#reverse-disable').click()
+            wait("localStorage.getItem('basket-request-paper')===null && document.querySelector('#edit-status').textContent==='' && document.querySelector('#reverse-status').textContent.includes('выключена')")
+            assert len({p['sl'] for p in paper.p['positions']})==1
+            assert [p['tp'] for p in paper.p['positions']]==before_tps
             page.locator('#manual-close-controls summary').click()
             for width in (360,390,768,1280):
                 page.set_viewport_size(dict(width=width,height=1000));assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
@@ -120,6 +133,6 @@ def main():
             wait("!document.querySelector('#mode').textContent.startsWith('PAPER') && !document.querySelector('#start').disabled");count=len(requests);page.reload();page.locator('#workspace').wait_for(state='visible');assert len(requests)==count
             page.locator('#tab-paper').click();wait("document.querySelector('#mode').textContent.startsWith('PAPER')");assert page.locator('#start').is_disabled();assert len(requests)==count
             assert not errors,errors
-            print('PASS: actual auth/routes; isolated live/paper; no requests on tab switch; preview cancelled across mode; per-mode UNKNOWN persists; invalid setting then valid action; mandatory TP1 UI validation; active interpolated TP grid confirmed; retired multiplier hidden; paper long-press TP readback; stale preview rejected; independent panes/toggles; colors/opacity persist; main visible; mobile360/390 desktop768/1280; no live state changes; no JS errors; DEMO absent; live/paper/runtime UTF-8 log downloads PASS; local-config 5-character login PASS; manual close via authenticated paper route, confirmed full closure and rearmed 12 STOPs, live DB unchanged, expanded controls responsive PASS.')
+            print('PASS: actual auth/routes; isolated live/paper; no requests on tab switch; preview cancelled across mode; per-mode UNKNOWN persists; invalid setting then valid action; mandatory TP1 UI validation; active interpolated TP grid confirmed; retired multiplier hidden; paper long-press TP readback; stale preview rejected; independent panes/toggles; colors/opacity persist; main visible; mobile360/390 desktop768/1280; no live state changes; no JS errors; DEMO absent; live/paper/runtime UTF-8 log downloads PASS; local-config 5-character login PASS; reverse ladder activation/cancel after TP1 with actual paper SL readback; manual close via authenticated paper route, confirmed full closure and rearmed 12 STOPs, live DB unchanged, expanded controls responsive PASS.')
         finally:browser.close();paper.tearDown();paper.doCleanups();live.doCleanups()
 if __name__=='__main__':main()

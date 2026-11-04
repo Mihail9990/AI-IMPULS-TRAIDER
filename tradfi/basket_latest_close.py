@@ -5,6 +5,7 @@ No broker calls outside that gateway. Never converts existing v1 active cycles.
 """
 from .basket import BasketController
 from .manual_control import ManualRangeControl
+from .reverse_ladder import ReverseLadderControl
 from .basket_math import last_closed_sl_price,recovery_range_after_sl,configured_ladder,BasketSettings
 from .control import ActionRejected
 from .broker import Spec
@@ -13,7 +14,7 @@ from copy import deepcopy
 
 RANGE_POLICY='last_actual_close_v2'
 
-class LatestCloseBasketController(ManualRangeControl,BasketController):
+class LatestCloseBasketController(ReverseLadderControl,ManualRangeControl,BasketController):
     def __init__(self,*args,**kwargs):
         super().__init__(*args,**kwargs)
         self.state.setdefault('tp_distances',[None]*20)
@@ -54,6 +55,7 @@ class LatestCloseBasketController(ManualRangeControl,BasketController):
         return configured_ladder(self.broker,spec,side,entries,sizes,debt,values)
 
     def action(self,a):
+        if isinstance(a,dict) and a.get('type')=='reverse_ladder':return self.request_reverse_ladder(a)
         if isinstance(a,dict) and a.get('type')=='manual_close':return self.request_manual_close(a)
         if isinstance(a,dict) and a.get('type')=='tp_distances':
             if set(a)!={'type','cycle_id','distances'} or a['cycle_id']!=(self.state.get('cycle') or {}).get('id'):
@@ -140,6 +142,9 @@ class LatestCloseBasketController(ManualRangeControl,BasketController):
         self.save('drag_tp_recalculation_requested')
 
     def _commit_edit_extra(self,e):
+        if 'reverse_group' in e:
+            group=next(g for g in self.state['cycle']['groups'] if g['id']==e['reverse_group'])
+            group['reverse_ladder']=deepcopy(e['reverse_ladder'])
         if 'manual_tp_group' in e:
             group=next(g for g in self.state['cycle']['groups'] if g['id']==e['manual_tp_group'])
             group['manual_tp_distances']=deepcopy(e['manual_tp_distances'])
