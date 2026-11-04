@@ -23,6 +23,13 @@ class Writeoff(unittest.TestCase):
         self.assertEqual(f.bot.state['phase'],'WAIT_CANDLE');f.tick(2);self.assertFalse(f.b.data['orders'])
         f.bot=LatestCloseBasketController(f.store,f.b);f.tick(2);self.assertEqual(len(f.bot.state['recovery_writeoffs']),1)
         with self.assertRaises(ActionRejected):f.bot.action(a)
+        self.assertFalse(f.bot.state['stop'])
+        boundary=f.bot.state['last_candle']
+        f.bar(cid=boundary+60,side='BUY',close='3998');f.tick(3)
+        self.assertEqual(len(f.b.data['orders']),1)
+        self.assertNotEqual(f.bot.state['cycle']['id'],a['cycle_id'])
+        self.assertEqual(D(f.bot.state['cycle']['recovery']),0)
+        self.assertEqual(f.b.data['orders'][0]['side'],'BUY')
     def test_audit_and_download_preserve_writeoff_amount(self):
         import json
         from tradfi.web_logs import DiagnosticLogs
