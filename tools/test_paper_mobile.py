@@ -131,6 +131,17 @@ def main():
             wait("localStorage.getItem('basket-request-paper')===null && document.querySelector('#manual-close-status').textContent.includes('до закрытия следующей корзины') && document.querySelectorAll('#tickets tr').length===12")
             assert not paper.p['positions'];assert len(paper.p['orders'])==12
             assert live.store.load()==live_before
+            # Writeoff is explicit, flat-only and stays entirely in paper scope.
+            assert page.locator('#writeoff-recovery').is_disabled()
+            page.locator('#stop').click()
+            wait("localStorage.getItem('basket-request-paper')===null && !document.querySelector('#writeoff-recovery').disabled")
+            ledger_before=list(paper.p['deals']);debt_before=paper.session.controller.state['cycle']['recovery']
+            page.locator('#writeoff-recovery').click()
+            wait("localStorage.getItem('basket-request-paper')===null && document.querySelector('#phase').textContent==='WAIT_CANDLE'")
+            assert paper.session.controller.state['recovery_writeoffs'][-1]['amount']==debt_before
+            assert paper.p['deals']==ledger_before and not paper.p['positions'] and not paper.p['orders']
+            assert live.store.load()==live_before
+            assert page.locator('#writeoff-recovery').is_disabled()
             # Network ambiguity belongs only to paper; neither tab switch nor reload replays it.
             drop[0]=True;page.locator('#stop').click();wait("localStorage.getItem('basket-request-paper')!==null");page.wait_for_timeout(100)
             page.locator('#tab-live').click();wait("document.querySelector('#tab-live').getAttribute('aria-selected')==='true'")

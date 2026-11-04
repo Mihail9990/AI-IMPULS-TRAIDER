@@ -43,9 +43,12 @@ class Store:
                 self.db.execute('ROLLBACK'); return
             self.db.execute('INSERT OR REPLACE INTO snapshot VALUES(1,?)',(payload,))
             cycle=data.get('cycle') or {}
-            summary=json.dumps({'phase':data['phase'],'cycle_id':cycle.get('id'),
-                                'recovery':cycle.get('recovery'),'currency':data.get('currency'),
-                                'commands':len(data['commands'])})
+            summary_data={'phase':data['phase'],'cycle_id':cycle.get('id'),
+                          'recovery':cycle.get('recovery'),'currency':data.get('currency'),
+                          'commands':len(data['commands'])}
+            if event=='recovery_waived_without_pnl_debit':
+                summary_data['recovery_writeoff']=data['recovery_writeoffs'][-1]
+            summary=json.dumps(summary_data)
             self.db.execute('INSERT INTO audit(event,payload) VALUES(?,?)',(event,summary))
             if self.fault: self.fault(event)
             self.db.execute('COMMIT')

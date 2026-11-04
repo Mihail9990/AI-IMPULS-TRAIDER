@@ -39,6 +39,12 @@ class DiagnosticLogs:
             name=event.split(':',1)[0]
             if name not in EVENTS:continue
             data=json.loads(payload);rows.append(json.dumps(dict(audit_seq=seq,event=name,phase=data.get('phase') if data.get('phase') in PHASES else 'OTHER',event_utc=None),ensure_ascii=False))
+        for item in state.get('recovery_writeoffs',[])[-100:]:
+            try:
+                from .settings import number
+                if not re.fullmatch('[a-f0-9]{32}',item['id']):continue
+                rows.append(json.dumps(dict(event='RECOVERY_WAIVED',id=item['id'],amount=str(number(item['amount'])),event_utc=datetime.fromtimestamp(float(number(item['at_utc'])),timezone.utc).isoformat(),accounting='WAIVE_RECOVERY_ONLY_NO_PNL_DEBIT'),ensure_ascii=False))
+            except (ValueError,TypeError,KeyError,OverflowError):continue
         for rid,r in list(state.get('control_receipts',{}).items())[-200:]:
             if re.fullmatch(r'[a-zA-Z0-9_-]{8,80}',rid) and r.get('status') in STATUS:
                 rows.append(json.dumps(project(dict(receipt_id=rid,status=r['status'],revision=r.get('revision'))),ensure_ascii=False))

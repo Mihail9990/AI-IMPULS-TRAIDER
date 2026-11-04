@@ -73,6 +73,7 @@ class ActionGateway:
         state.setdefault('control_receipts', {})[request['id']] = receipt
         state['control_revision'] = revision + 1
         self.controller.save('control_action_reserved')
+        self.controller._active_control_id=request['id']
         try:
             self.execute(deepcopy(request['action']))
         except ActionRejected as exc:
@@ -82,6 +83,8 @@ class ActionGateway:
             status = 'UNKNOWN'
         else:
             status = 'APPLIED'
+        finally:
+            self.controller._active_control_id=None
         # The command may have replaced the in-memory state while reconciling.
         receipt = self.controller.state['control_receipts'][request['id']]
         receipt['status'] = status

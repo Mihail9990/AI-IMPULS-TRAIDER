@@ -6,6 +6,7 @@ No broker calls outside that gateway. Never converts existing v1 active cycles.
 from .basket import BasketController
 from .manual_control import ManualRangeControl
 from .reverse_ladder import ReverseLadderControl
+from .recovery_writeoff import RecoveryWriteoff
 from .basket_math import last_closed_exit,last_closed_sl_price,recovery_range_after_sl,configured_ladder,BasketSettings
 from .control import ActionRejected
 from .broker import Spec
@@ -14,7 +15,7 @@ from copy import deepcopy
 
 RANGE_POLICY='last_actual_close_v2'
 
-class LatestCloseBasketController(ReverseLadderControl,ManualRangeControl,BasketController):
+class LatestCloseBasketController(RecoveryWriteoff,ReverseLadderControl,ManualRangeControl,BasketController):
     def __init__(self,*args,**kwargs):
         super().__init__(*args,**kwargs)
         self.state.setdefault('tp_distances',[None]*20)
@@ -56,6 +57,7 @@ class LatestCloseBasketController(ReverseLadderControl,ManualRangeControl,Basket
         return configured_ladder(self.broker,spec,side,entries,sizes,debt,values)
 
     def action(self,a):
+        if isinstance(a,dict) and a.get('type')=='writeoff_recovery':return self.writeoff_recovery(a)
         if isinstance(a,dict) and a.get('type')=='reverse_ladder':return self.request_reverse_ladder(a)
         if isinstance(a,dict) and a.get('type')=='manual_close':return self.request_manual_close(a)
         if isinstance(a,dict) and a.get('type')=='tp_distances':

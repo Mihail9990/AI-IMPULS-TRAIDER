@@ -310,6 +310,9 @@ class BasketController(Controller):
                 self.save('basket_gap_profit_cleanup')
             return
         if not active:
+            # Explicit Stop must reconcile pending recovery orders before the
+            # pending-group wait below; otherwise a flat stopped cycle stalls.
+            if self.state['stop']:self._cancel(snap,c['entries'])
             c.pop('cleanup',None)
             # Completion may span cancellation reconciliation and a restart.
             # A retired round must never re-arm once its actual debt is covered.
