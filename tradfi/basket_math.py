@@ -116,38 +116,36 @@ def last_closed_sl_price(tickets):
     if reason!='SL':raise ValueError('Последнее закрытие не SL; нужен отдельный подтверждённый переход')
     return str(price)
 
-def configured_ladder(broker,spec,side,anchor,entries,sizes,debt,distances):
-    """Fixed distances stay exact; blank slot i uses TP1 distance + i * step.
+def configured_ladder(broker,spec,side,entries,sizes,debt,distances):
+    """Every TP distance is relative to its own ticket's actual entry.
 
-    i is zero-based. Choose the smallest positive whole-tick common step which
-    preserves strictly ordered prices and covers debt. No solution => reject.
-    Explicit anchor is required: caller must supply the agreed entry reference.
-    No guessed lot-value, extra profit, silent fixed-level changes or rounding.
+    Supported: TP1 plus all remaining blank, or every distance specified.
+    Mixed fixed/blank later slots are explicitly blocked pending clarification.
+    For first-only, distance_i = distance_1 + i * whole_tick_step. Actual prices
+    must remain strictly ordered in the profitable direction despite fill gaps.
     """
     from decimal import ROUND_FLOOR,ROUND_CEILING
     if side not in ('BUY','SELL') or not entries or len(entries)!=len(sizes) or not isinstance(distances,list) or len(distances)!=len(entries):raise ValueError('Нужен один параметр ступени на билет')
     if distances[0] is None:raise ValueError('Первая TP-ступень обязательна')
-    anchor=spec.price(anchor);tick=number(spec.tick_size);goal=number(debt)
-    entries=list(map(number,entries));sizes=list(map(number,sizes))
-    if goal<0 or min(entries+sizes)<=0:raise ValueError('Некорректные фактические входы/объёмы/долг')
+    tick=number(spec.tick_size);goal=number(debt)
+    entries=[spec.price(e) for e in entries];sizes=list(map(number,sizes))
+    if goal<0 or min(sizes)<=0:raise ValueError('Некорректные фактические объёмы/долг')
     fixed={i:number(d) for i,d in enumerate(distances) if d is not None}
     if any(d<=0 or d%tick for d in fixed.values()):raise ValueError('Расстояния должны быть положительными и точными по tick')
+    if len(fixed) not in (1,len(entries)):
+        raise ValueError('MIXED_GRID_UNCONFIRMED: формула смешанной сетки ещё не подтверждена; заданные уровни сохранены')
     first=fixed[0];sign=1 if side=='BUY' else -1
     lower=1;upper=2**28
-    for i in range(1,len(entries)):
-        if i in fixed and i-1 in fixed:
-            if fixed[i]<=fixed[i-1]:raise ValueError('Заданные ступени не возрастают')
-        elif i in fixed:
-            upper=min(upper,int(((fixed[i]-first)/(D(i-1)*tick)).to_integral_value(rounding=ROUND_CEILING))-1)
-        elif i-1 in fixed:
-            lower=max(lower,int(((fixed[i-1]-first)/(D(i)*tick)).to_integral_value(rounding=ROUND_FLOOR))+1)
-        if side=='SELL' and i not in fixed:
-            upper=min(upper,int(((anchor-first)/(D(i)*tick)).to_integral_value(rounding=ROUND_CEILING))-1)
-    if lower>upper:raise ValueError('Заданные уровни не оставляют допустимой равномерной сетки')
+    if len(fixed)==1:
+        for i in range(1,len(entries)):
+            lower=max(lower,int((-D(sign)*(entries[i]-entries[i-1])/tick).to_integral_value(rounding=ROUND_FLOOR))+1)
+            if side=='SELL':upper=min(upper,int(((entries[i]-first)/(D(i)*tick)).to_integral_value(rounding=ROUND_CEILING))-1)
+    if lower>upper:raise ValueError('Фактические входы не допускают положительную упорядоченную сетку')
     def prices(step):
         offsets=[fixed.get(i,first+D(i)*tick*step) for i in range(len(entries))]
-        if any(b<=a for a,b in zip(offsets,offsets[1:])):raise ValueError('Невозможный порядок ступеней')
-        return [spec.price(anchor+sign*d) for d in offsets]
+        values=[spec.price(e+sign*d) for e,d in zip(entries,offsets)]
+        if any(sign*(b-a)<=0 for a,b in zip(values,values[1:])):raise ValueError('Фактические TP нарушают порядок ступеней; ручные уровни не сдвинуты')
+        return values
     def profit(step):return sum((number(broker.profit(side,v,e,p)) for e,v,p in zip(entries,sizes,prices(step))),D(0))
     if len(fixed)==len(entries):
         if profit(lower)<goal:raise ValueError('Все ступени заданы, но не покрывают RECOVERY')
