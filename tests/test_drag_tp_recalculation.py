@@ -62,8 +62,8 @@ class DragTP(unittest.TestCase):
         count=len(self.f.b.commands);self.f.bot=LatestCloseBasketController(self.f.store,self.f.b);self.f.tick(4)
         self.assertEqual(count,len(self.f.b.commands));self.assertIsNotNone(self.f.bot.state['cycle']['edit'])
     def test_receipt_duplicate_executes_once_and_read_only_rejects(self):
-        self.basket();gate=ActionGateway(self.f.bot);request=dict(id='drag-tp-duplicate',revision=0,action=self.action(2,'.40'))
-        first=gate.apply(request);self.assertEqual(gate.apply(request),first);self.f.tick(5)
+        self.basket();gate=ActionGateway(self.f.bot,execute=self.f.bot.action);request=dict(id='drag-tp-duplicate',revision=0,action=self.action(2,'.40'))
+        first=gate.apply(request);self.assertEqual(first['status'],'APPLIED');self.assertEqual(gate.apply(request),first);self.f.tick(5)
         before=len(self.f.b.commands);self.assertEqual(gate.apply(request),first);self.f.tick(2);self.assertEqual(before,len(self.f.b.commands))
         self.f.b.read_only=True
         with self.assertRaises(ActionRejected):self.f.bot.action(self.action(2,'.50'))

@@ -143,6 +143,9 @@ class BasketController(Controller):
                 spec.protection(side,entry,sl,number(tp));plans.append(dict(kind='STOP',side=side,price=str(entry),trigger=str(entry),sl=str(sl),tp=tp,size=str(size),sl_distance=str(distance),crossed_policy='reject',basket_index=i))
         return plans
 
+    def _on_group_armed(self,group):
+        pass
+
     def _arm(self,snap,role,levels):
         c=self.state['cycle']
         try:plans=self._plans(snap,role,levels)
@@ -152,7 +155,7 @@ class BasketController(Controller):
         group=dict(id=uuid.uuid4().hex,role=role,levels=deepcopy(levels),commands=[],activated=None,ladder_applied=False)
         for plan in plans:
             cid=self._intent(**plan);group['commands'].append(cid);c['entries'].append(cid)
-        c['groups'].append(group);c.pop('level_wait',None);c['round']+=1;self.save('basket_group_armed');return True
+        c['groups'].append(group);c.pop('level_wait',None);c['round']+=1;self._on_group_armed(group);self.save('basket_group_armed');return True
 
     def _halt(self,snap,reason):
         c=self.state.get('cycle')

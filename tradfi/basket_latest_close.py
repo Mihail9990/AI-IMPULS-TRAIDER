@@ -4,6 +4,7 @@ Uses the actual basket controller's ledger, ownership, OCO and intent gateway.
 No broker calls outside that gateway. Never converts existing v1 active cycles.
 """
 from .basket import BasketController
+from .manual_control import ManualRangeControl
 from .basket_math import last_closed_sl_price,recovery_range_after_sl,configured_ladder,BasketSettings
 from .control import ActionRejected
 from .broker import Spec
@@ -12,7 +13,7 @@ from copy import deepcopy
 
 RANGE_POLICY='last_actual_close_v2'
 
-class LatestCloseBasketController(BasketController):
+class LatestCloseBasketController(ManualRangeControl,BasketController):
     def __init__(self,*args,**kwargs):
         super().__init__(*args,**kwargs)
         self.state.setdefault('tp_distances',[None]*20)
@@ -53,6 +54,7 @@ class LatestCloseBasketController(BasketController):
         return configured_ladder(self.broker,spec,side,entries,sizes,debt,values)
 
     def action(self,a):
+        if isinstance(a,dict) and a.get('type')=='manual_close':return self.request_manual_close(a)
         if isinstance(a,dict) and a.get('type')=='tp_distances':
             if set(a)!={'type','cycle_id','distances'} or a['cycle_id']!=(self.state.get('cycle') or {}).get('id'):
                 raise ActionRejected('Цикл изменился; обновите параметры')
@@ -64,7 +66,7 @@ class LatestCloseBasketController(BasketController):
         values=self._validate_distances(values,spec);c=self.state.get('cycle')
         if not c:
             self.state['tp_distances']=values;self.save('tp_distances_saved');return
-        if c.get('edit') or c.get('initial_cancel') or self._uncertain() or any(g.get('entry_sl_once',{}).get('status') in ('PREPARED','PENDING') or g.get('actual_ladder_tx',{}).get('status')=='PENDING' for g in c['groups']):
+        if c.get('manual_close') or c.get('edit') or c.get('initial_cancel') or self._uncertain() or any(g.get('entry_sl_once',{}).get('status') in ('PREPARED','PENDING') or g.get('actual_ladder_tx',{}).get('status')=='PENDING' for g in c['groups']):
             raise ActionRejected('Предыдущая правка или исполнение ещё не сверены')
         pending=[];updates=[];live={p['id']:p for p in snap['positions']};cfg=BasketSettings.load(c['cfg'])
         try:
@@ -158,6 +160,7 @@ class LatestCloseBasketController(BasketController):
         return c['expanded']
     def _after_stopped_group(self,snap,g,tickets):
         c=self.state['cycle']
+        if self._restore_manual_range(snap,g,tickets):return not c.get('manual',False)
         try:
             price=last_closed_sl_price(tickets)
             c['expanded']=recovery_range_after_sl(g['activated'],tickets[0]['entry'],price,c['cfg']['EXPANSION_DISTANCE'],initial=False)
@@ -298,6 +301,8 @@ class LatestCloseBasketController(BasketController):
         if c.get('manual'):return super()._step(snap)
         for g in c['groups']:
             if self._advance_actual_ladder(snap,g):return
+        if c.get('manual_close'):
+            self._advance_manual_close(snap);return
         if self._stage_first_tp_if_ready(snap):return
         for g in c['groups']:
             if g.get('entry_sl_once') and self._advance_entry_sl_once(snap,g):return
@@ -306,6 +311,7 @@ class LatestCloseBasketController(BasketController):
     def edit(self,**kwargs):
         from .control import ActionRejected
         c=self.state.get('cycle') or {}
+        if c.get('manual_close'):raise ActionRejected('Ручное закрытие ещё не сверено')
         settings=kwargs.get('settings')
         if settings is not None and isinstance(settings,dict):
             if any(settings.get(k)!=self.state['basket_settings'][k] for k in ('COST_RESERVE','TP_STEP_MULTIPLIER')):

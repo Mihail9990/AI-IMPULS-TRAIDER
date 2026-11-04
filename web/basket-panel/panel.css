@@ -8,3 +8,4 @@
 #logs-section pre{max-width:100%;max-height:360px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}#logs-section select{max-width:100%;min-height:44px;background:#181a20;color:#e8eaed;border:1px solid #343842}
 
 .cycle-controls summary{cursor:pointer;min-height:44px;padding:10px 0;font-weight:600}.cycle-controls .controls{display:flex;flex-wrap:wrap;gap:8px;padding-top:12px}.cycle-controls .controls button{min-height:44px;flex:1 1 160px}
+#manual-close-controls .fields label{min-width:0}#manual-close-controls select{width:100%;min-width:0;max-width:100%;font:inherit;min-height:44px;padding:10px;background:#252832;color:#e8eaed;border:1px solid #49637e;border-radius:8px}#manual-close-controls summary{cursor:pointer;margin:12px 0}

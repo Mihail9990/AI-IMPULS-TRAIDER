@@ -105,12 +105,21 @@ def main():
                 data=Path(download.path()).read_bytes();assert len(data)<=1048576;data.decode('utf-8')
                 if scope!='runtime':assert 'Логи' in data.decode()
             assert page.locator('#log-scope option[value=demo]').count()==0
+            page.locator('#manual-close-controls summary').click()
+            for width in (360,390,768,1280):
+                page.set_viewport_size(dict(width=width,height=1000));assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+            page.set_viewport_size(dict(width=390,height=844))
+            page.locator('#close-range-mode').select_option('from_close');page.locator('#close-range-duration').select_option('once')
+            page.locator('#manual-close-submit').click()
+            wait("localStorage.getItem('basket-request-paper')===null && document.querySelector('#manual-close-status').textContent.includes('до закрытия следующей корзины') && document.querySelectorAll('#tickets tr').length===12")
+            assert not paper.p['positions'];assert len(paper.p['orders'])==12
+            assert live.store.load()==live_before
             # Network ambiguity belongs only to paper; neither tab switch nor reload replays it.
             drop[0]=True;page.locator('#stop').click();wait("localStorage.getItem('basket-request-paper')!==null");page.wait_for_timeout(100)
             page.locator('#tab-live').click();wait("document.querySelector('#tab-live').getAttribute('aria-selected')==='true'")
             wait("!document.querySelector('#mode').textContent.startsWith('PAPER') && !document.querySelector('#start').disabled");count=len(requests);page.reload();page.locator('#workspace').wait_for(state='visible');assert len(requests)==count
             page.locator('#tab-paper').click();wait("document.querySelector('#mode').textContent.startsWith('PAPER')");assert page.locator('#start').is_disabled();assert len(requests)==count
             assert not errors,errors
-            print('PASS: actual auth/routes; isolated live/paper; no requests on tab switch; preview cancelled across mode; per-mode UNKNOWN persists; invalid setting then valid action; mandatory TP1 UI validation; active interpolated TP grid confirmed; retired multiplier hidden; paper long-press TP readback; stale preview rejected; independent panes/toggles; colors/opacity persist; main visible; mobile360/390 desktop768/1280; no live state changes; no JS errors; DEMO absent; live/paper/runtime UTF-8 log downloads PASS; local-config 5-character login PASS.')
+            print('PASS: actual auth/routes; isolated live/paper; no requests on tab switch; preview cancelled across mode; per-mode UNKNOWN persists; invalid setting then valid action; mandatory TP1 UI validation; active interpolated TP grid confirmed; retired multiplier hidden; paper long-press TP readback; stale preview rejected; independent panes/toggles; colors/opacity persist; main visible; mobile360/390 desktop768/1280; no live state changes; no JS errors; DEMO absent; live/paper/runtime UTF-8 log downloads PASS; local-config 5-character login PASS; manual close via authenticated paper route, confirmed full closure and rearmed 12 STOPs, live DB unchanged, expanded controls responsive PASS.')
         finally:browser.close();paper.tearDown();paper.doCleanups();live.doCleanups()
 if __name__=='__main__':main()
