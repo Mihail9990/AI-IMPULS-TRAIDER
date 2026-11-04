@@ -115,3 +115,50 @@ def last_closed_sl_price(tickets):
     price,reason=final[0]
     if reason!='SL':raise ValueError('Последнее закрытие не SL; нужен отдельный подтверждённый переход')
     return str(price)
+
+def configured_ladder(broker,spec,side,anchor,entries,sizes,debt,distances):
+    """Fixed distances stay exact; blank slot i uses TP1 distance + i * step.
+
+    i is zero-based. Choose the smallest positive whole-tick common step which
+    preserves strictly ordered prices and covers debt. No solution => reject.
+    Explicit anchor is required: caller must supply the agreed entry reference.
+    No guessed lot-value, extra profit, silent fixed-level changes or rounding.
+    """
+    from decimal import ROUND_FLOOR,ROUND_CEILING
+    if side not in ('BUY','SELL') or not entries or len(entries)!=len(sizes) or not isinstance(distances,list) or len(distances)!=len(entries):raise ValueError('Нужен один параметр ступени на билет')
+    if distances[0] is None:raise ValueError('Первая TP-ступень обязательна')
+    anchor=spec.price(anchor);tick=number(spec.tick_size);goal=number(debt)
+    entries=list(map(number,entries));sizes=list(map(number,sizes))
+    if goal<0 or min(entries+sizes)<=0:raise ValueError('Некорректные фактические входы/объёмы/долг')
+    fixed={i:number(d) for i,d in enumerate(distances) if d is not None}
+    if any(d<=0 or d%tick for d in fixed.values()):raise ValueError('Расстояния должны быть положительными и точными по tick')
+    first=fixed[0];sign=1 if side=='BUY' else -1
+    lower=1;upper=2**28
+    for i in range(1,len(entries)):
+        if i in fixed and i-1 in fixed:
+            if fixed[i]<=fixed[i-1]:raise ValueError('Заданные ступени не возрастают')
+        elif i in fixed:
+            upper=min(upper,int(((fixed[i]-first)/(D(i-1)*tick)).to_integral_value(rounding=ROUND_CEILING))-1)
+        elif i-1 in fixed:
+            lower=max(lower,int(((fixed[i-1]-first)/(D(i)*tick)).to_integral_value(rounding=ROUND_FLOOR))+1)
+        if side=='SELL' and i not in fixed:
+            upper=min(upper,int(((anchor-first)/(D(i)*tick)).to_integral_value(rounding=ROUND_CEILING))-1)
+    if lower>upper:raise ValueError('Заданные уровни не оставляют допустимой равномерной сетки')
+    def prices(step):
+        offsets=[fixed.get(i,first+D(i)*tick*step) for i in range(len(entries))]
+        if any(b<=a for a,b in zip(offsets,offsets[1:])):raise ValueError('Невозможный порядок ступеней')
+        return [spec.price(anchor+sign*d) for d in offsets]
+    def profit(step):return sum((number(broker.profit(side,v,e,p)) for e,v,p in zip(entries,sizes,prices(step))),D(0))
+    if len(fixed)==len(entries):
+        if profit(lower)<goal:raise ValueError('Все ступени заданы, но не покрывают RECOVERY')
+        return [str(p) for p in prices(lower)]
+    low=lower;high=lower
+    if profit(low)>=goal:return [str(p) for p in prices(low)]
+    while profit(high)<goal:
+        if high==upper:raise ValueError('Заданные ступени не позволяют покрыть RECOVERY')
+        high=min(upper,high*2)
+    while high-low>1:
+        mid=(low+high)//2
+        if profit(mid)>=goal:high=mid
+        else:low=mid
+    return [str(p) for p in prices(high)]

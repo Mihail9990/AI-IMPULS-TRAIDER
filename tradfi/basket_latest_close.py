@@ -43,11 +43,10 @@ class LatestCloseBasketController(BasketController):
         return True
 
     def stage_entry_sl_once(self,group_id,trigger_position_id):
-        """Prepared one-shot transaction, not a public action or automatic trigger.
+        """Owner-thread one-shot transaction; not a public unscoped action.
 
-        The final definition of 'first TP step' is pending. Its eventual caller
-        must select that ticket; this method requires a proven TP closure in the
-        same group. Manual SL edits after DONE are never overwritten by repeats.
+        Requires proven TP closure of index zero and the confirmed actual entry
+        of index one. Manual SL edits after DONE are never overwritten by repeats.
         """
         from .control import ActionRejected
         from .broker import Spec
@@ -58,19 +57,22 @@ class LatestCloseBasketController(BasketController):
         if not g:raise ActionRejected('Корзина изменилась')
         if g.get('entry_sl_once'):return
         trigger=c['tickets'].get(trigger_position_id)
-        if not trigger or trigger['group']!=group_id or trigger.get('closed') is not True or trigger.get('reason')!='TP' or not trigger.get('exit_facts'):
+        if not trigger or trigger['group']!=group_id or trigger.get('closed') is not True or trigger.get('reason')!='TP' or trigger.get('index')!=0 or not trigger.get('exit_facts'):
             raise ActionRejected('TP ступени ещё не подтверждён')
         if c.get('edit') or self._uncertain() or snap['orders']:raise ActionRejected('Сначала сверка отмен, исполнений и предыдущей правки')
+        second=[t for t in c['tickets'].values() if t['group']==group_id and t.get('index')==1]
+        if len(second)!=1:raise ActionRejected('Фактический вход второй части ещё не подтверждён')
+        anchor=second[0]['entry']
         spec=Spec.load(snap['spec']);targets=[]
         for t in c['tickets'].values():
             if t['group']!=group_id or t['closed']:continue
             live=next((p for p in snap['positions'] if p['id']==t['id']),None)
             if not live or number(live['size'])!=number(t['size']):raise ActionRejected('Остаток билета изменился; нужна сверка')
-            try:spec.protection(t['side'],number(t['entry']),number(t['entry']),number(live['tp']),snap['quote'],modify=True)
+            try:spec.protection(t['side'],number(t['entry']),number(anchor),number(live['tp']),snap['quote'],modify=True)
             except (ValueError,ArithmeticError) as exc:raise ActionRejected('SL на входе пока недопустим по котировке или stop/freeze') from exc
-            targets.append(dict(position_id=t['id'],sl=t['entry'],tp=live['tp'],old_sl=live['sl'],command_id=None))
+            targets.append(dict(position_id=t['id'],sl=anchor,tp=live['tp'],old_sl=live['sl'],command_id=None))
         # Persist the one-shot marker and all targets before any broker intent.
-        g['entry_sl_once']=dict(status='PREPARED',trigger=trigger_position_id,targets=targets)
+        g['entry_sl_once']=dict(status='PREPARED',trigger=trigger_position_id,anchor_position_id=second[0]['id'],anchor_entry=anchor,targets=targets)
         self.save('entry_sl_once_prepared')
 
     def _advance_entry_sl_once(self,snap,g):
@@ -109,10 +111,28 @@ class LatestCloseBasketController(BasketController):
         for target,t,live in active:t.update(sl=live['sl'],tp=live['tp'])
         tx['status']='DONE';self.save('entry_sl_once_confirmed');return False
 
+    def _stage_first_tp_if_ready(self,snap):
+        from .control import ActionRejected
+        c=self.state['cycle']
+        if c.get('edit') or self._uncertain() or snap['orders']:return False
+        for g in c['groups']:
+            if g['role']=='initial' or g.get('entry_sl_once'):continue
+            tickets=[t for t in c['tickets'].values() if t['group']==g['id']]
+            trigger=next((t for t in tickets if t.get('index')==0 and t['closed'] and t.get('reason')=='TP'),None)
+            if not trigger or not any(not t['closed'] for t in tickets):continue
+            selected=[cid for cid in g['commands'] if self.state['commands'][cid]['side']==g.get('activated')]
+            if len(tickets)!=len(selected):return False
+            try:self.stage_entry_sl_once(g['id'],trigger['id'])
+            except ActionRejected:
+                self._halt(snap,'TP1_SECOND_ENTRY_SL_UNAVAILABLE');return True
+            return True
+        return False
+
     def _step(self,snap):
         if not self._observe(snap):return
         c=self.state['cycle']
         if c.get('manual'):return super()._step(snap)
+        if self._stage_first_tp_if_ready(snap):return
         for g in c['groups']:
             if g.get('entry_sl_once') and self._advance_entry_sl_once(snap,g):return
         return super()._step(snap)

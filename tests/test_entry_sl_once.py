@@ -5,10 +5,14 @@ import test_basket_latest_close as fixtures
 from tradfi.basket_latest_close import LatestCloseBasketController
 from tradfi.control import ActionRejected
 
+class ManualStageController(LatestCloseBasketController):
+    def _stage_first_tp_if_ready(self,snap):return False
+
 class EntrySLOnce(unittest.TestCase):
     def setUp(self):
         self.case=fixtures.LatestClose();self.case.setUp();self.addCleanup(self.case.doCleanups)
         self.case.first_sl();self.case.fill_basket();self.f=self.case.f
+        self.f.bot=ManualStageController(self.f.store,self.f.b)
         c=self.f.bot.state['cycle'];self.group=next(g for g in c['groups'] if g.get('activated')=='SELL')
         self.first=min((t for t in c['tickets'].values() if t['group']==self.group['id']),key=lambda t:t['index'])
     def trigger(self):
@@ -33,7 +37,7 @@ class EntrySLOnce(unittest.TestCase):
         with self.assertRaises(ActionRejected):self.stage()
         self.assertEqual(len(self.f.b.commands),before)
     def test_restart_prepared(self):
-        self.trigger();self.stage();self.f.bot=LatestCloseBasketController(self.f.store,self.f.b);self.f.tick(4)
+        self.trigger();self.stage();self.f.bot=ManualStageController(self.f.store,self.f.b);self.f.tick(4)
         self.assertEqual(self.status(),'DONE')
     def test_pending_unknown_no_duplicate_and_edit_blocked(self):
         self.trigger();self.stage();self.f.b.fail_before.add('MODIFY');self.f.tick(3)
