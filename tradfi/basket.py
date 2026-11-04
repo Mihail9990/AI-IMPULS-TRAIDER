@@ -193,7 +193,7 @@ class BasketController(Controller):
                 try:net=net_money(exits)
                 except ValueError:self._halt(snap,'CLOSING_COSTS_UNKNOWN');return False
                 expected=deepcopy(self._durable_state)
-                t.update(closed=True,reason=next(iter(reasons)),exit_net=str(net));c['realized']=str(number(c['realized'])+net);c['recovery']=str(max(D(0),-number(c['realized'])))
+                t.update(closed=True,reason=next(iter(reasons)),exit_net=str(net),exit_facts=[{k:d.get(k) for k in ('id','price','volume','time','reason')} for d in exits]);c['realized']=str(number(c['realized'])+net);c['recovery']=str(max(D(0),-number(c['realized'])))
                 self.state['seen_deals'].extend(d['id'] for d in exits)
                 for cmd in self.state['commands'].values():
                     if cmd['kind']=='MODIFY' and cmd.get('position_id')==pid and cmd['status'] not in TERMINAL:cmd.update(status='OBSOLETE',closed_by_deals=[d['id'] for d in exits])
@@ -291,8 +291,7 @@ class BasketController(Controller):
         if not initial['closed']:
             self.state['phase']='INITIAL_POSITION'
             if self.state['stop'] or self.state.get('time_block'):self._cancel(snap,[cid for g in c['groups'] if g['role']!='initial' for cid in g['commands']]);return
-            if not any(g['role']=='reversal' and not g.get('retired') for g in c['groups']):
-                self._arm(snap,'reversal',{'SELL' if initial['side']=='BUY' else 'BUY':initial['sl']})
+            self._initial_position_recovery(snap,initial)
             self.save('basket_initial_protected');return
         # Initial SL confirmed; recovery fills are adopted only with independent ticket evidence.
         if active and (number(c['recovery'])<=0 or c.get('cleanup')):
@@ -322,14 +321,27 @@ class BasketController(Controller):
             if tickets:
                 g['retired']=True
                 if number(c['recovery'])<=0:self._finish(snap);return
-                if any(t.get('reason')=='SL' for t in tickets) and c['expanded'] is None:
-                    side=g['activated'];entry=g['levels'][side];sl=next(t['sl'] for t in tickets if t['reason']=='SL')
-                    c['expanded']=expanded_levels(side,entry,sl,c['cfg']['EXPANSION_DISTANCE']);self.save('basket_expanded_once')
+                if not self._after_stopped_group(snap,g,tickets):return
         if self.state['stop'] or self.state.get('time_block'):
             self._cancel(snap,c['entries']);self.state['phase']='PAUSED_CYCLE';self.save('basket_paused_debt_retained');return
-        levels=c['expanded'] or {'SELL' if initial['side']=='BUY' else 'BUY':initial['sl']}
+        levels=self._recovery_levels(initial)
         self.state['phase']='RECOVERY_WAIT'
         if not snap['orders'] and not self._uncertain():self._arm(snap,'expanded' if c['expanded'] else 'reversal',levels)
+
+    def _initial_position_recovery(self,snap,initial):
+        c=self.state['cycle']
+        if not any(g['role']=='reversal' and not g.get('retired') for g in c['groups']):
+            self._arm(snap,'reversal',{'SELL' if initial['side']=='BUY' else 'BUY':initial['sl']})
+
+    def _after_stopped_group(self,snap,g,tickets):
+        c=self.state['cycle']
+        if any(t.get('reason')=='SL' for t in tickets) and c['expanded'] is None:
+            side=g['activated'];entry=g['levels'][side];sl=next(t['sl'] for t in tickets if t['reason']=='SL')
+            c['expanded']=expanded_levels(side,entry,sl,c['cfg']['EXPANSION_DISTANCE']);self.save('basket_expanded_once')
+        return True
+
+    def _recovery_levels(self,initial):
+        return self.state['cycle']['expanded'] or {'SELL' if initial['side']=='BUY' else 'BUY':initial['sl']}
 
     def _follow(self,snap):
         c=self.state['cycle'];bar=snap['candle'];signal=c['signal']

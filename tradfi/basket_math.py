@@ -75,65 +75,43 @@ def net_money(deals):
     return total
 
 def recovery_range_after_sl(side,entry,sl,distance,*,initial):
-    """Proposed v2 range, pure calculation only; not an execution authorization.
+    """Confirmed v2 prices. sl is the LAST actual closing execution price.
 
-    Initial stop: keep the former entry on the same side, opposite beyond SL.
-    Subsequent stop: move the same side beyond its former entry too. Recompute
-    for each stopped basket; never reuse the v1 once-frozen expanded range.
-
-    Entry uses volume-weighted actual fills, SL uses actual closing executions.
-    Mixed closing-price aggregation and the v2 TP rules await clarification.
-    Caller must also reconcile flatness and OCO obligations before submission, so
-    this planner is deliberately not wired into the current v1 controller.
+    Initial stop retains actual initial entry on its original side. Subsequent
+    recovery stops use last exit +/- distance, regardless of prior entry/side.
+    Does not authorize submission or silently round to a broker tick.
     """
     if side not in {'BUY','SELL'} or not isinstance(initial,bool):
         raise ValueError('Нужны BUY/SELL и явный признак начальной позиции')
     entry,sl,d=map(number,(entry,sl,distance))
     if min(entry,sl,d)<=0:raise ValueError('Цены и отступ должны быть положительными')
-    if side=='BUY':
-        buy=entry if initial else entry+d
-        sell=sl-d
-    else:
-        buy=sl+d
-        sell=entry if initial else entry-d
+    buy=entry if initial and side=='BUY' else sl+d
+    sell=entry if initial and side=='SELL' else sl-d
     if sell<=0 or buy<=sell:raise ValueError('Диапазон должен иметь положительный SELL ниже BUY')
     return {'BUY':str(buy),'SELL':str(sell)}
 
-def confirmed_stop_anchors(tickets,deals,proofs):
-    """Derive v2 anchors from normalized broker facts, never requested prices.
 
-    `proofs` must be the adapter's reconciled per-command evidence, not UI data.
-    A caller still must reconcile all pending/UNKNOWN obligations and flatness.
-    Until clarified, mixed TP/SL baskets or distinct SL execution prices refuse
-    planning rather than choosing a hidden aggregation rule.
+def last_closed_sl_price(tickets):
+    """Read already reconciled, durable exit facts; reject ambiguous chronology.
+
+    Normalized adapter `time` preserves its native precision (native MT5 ms).
+    Never infer chronology from returned list order or lexical/numeric deal IDs.
     """
-    if not tickets or not isinstance(proofs,dict):raise ValueError('Нет подтверждённых билетов')
-    ids=[t.get('id') for t in tickets];commands=[t.get('command_id') for t in tickets]
-    if any(not isinstance(v,str) or not v for v in ids+commands) or len(set(ids))!=len(ids) or len(set(commands))!=len(commands):raise ValueError('Неоднозначная принадлежность билетов')
-    sides={t.get('side') for t in tickets}
-    if len(sides)!=1 or not sides<={'BUY','SELL'}:raise ValueError('Нужна одна подтверждённая сторона корзины')
-    side=next(iter(sides));volume=D(0);weighted_entry=D(0);exit_prices=set();seen=set()
-    for t in tickets:
-        if proofs.get(t['command_id'],{}).get('status')!='CLOSED_EVIDENCE':raise ValueError('Закрытие билета ещё не подтверждено')
-        expected=number(t['size'])
-        if expected<=0:raise ValueError('Неверный ожидаемый объём билета')
-        rows=[d for d in deals if d.get('position_id')==t['id']]
-        ins=[];outs=[]
-        for d in rows:
-            did=d.get('id')
-            if not isinstance(did,str) or not did or did in seen:raise ValueError('Неизвестный или повторный ID сделки')
+    if not tickets:raise ValueError('Нет закрытых билетов')
+    facts=[];seen=set()
+    for ticket in tickets:
+        if ticket.get('closed') is not True:raise ValueError('Не все остатки закрыты')
+        rows=ticket.get('exit_facts',[])
+        if not rows or sum((number(r.get('volume')) for r in rows),D(0))!=number(ticket['size']):raise ValueError('Нет полных подтверждённых закрытий')
+        for row in rows:
+            did=row.get('id')
+            if not isinstance(did,str) or not did or did in seen:raise ValueError('Повторная или неизвестная сделка')
             seen.add(did)
-            size,price=number(d.get('volume')),number(d.get('price'))
-            if size<=0 or price<=0:raise ValueError('Неверные фактические цена или объём')
-            if d.get('entry')=='IN':
-                if d.get('command_id')!=t['command_id'] or d.get('side')!=side:raise ValueError('Вход не соответствует билету')
-                ins.append((size,price))
-            elif d.get('entry')=='OUT':
-                if d.get('reason')!='SL':raise ValueError('Для смешанных TP/SL нужен подтверждённый выбор якорей')
-                outs.append((size,price));exit_prices.add(price)
-            else:raise ValueError('Неподдерживаемый тип исполнения')
-        if not ins or not outs or sum((v for v,p in ins),D(0))!=expected or sum((v for v,p in outs),D(0))!=expected:
-            raise ValueError('Неполные или противоречивые объёмы входа/закрытия')
-        volume+=expected;weighted_entry+=sum((v*p for v,p in ins),D(0))
-    if len(exit_prices)!=1:raise ValueError('SL исполнились по разным ценам: правило объединения ещё не подтверждено')
-    return {'side':side,'entry':str(weighted_entry/volume),'sl_exit':str(next(iter(exit_prices))),'volume':str(volume)}
+            stamp,price,volume=map(number,(row.get('time'),row.get('price'),row.get('volume')))
+            if stamp<0 or price<=0 or volume<=0 or row.get('reason') not in ('SL','TP'):raise ValueError('Некорректные факты закрытия')
+            facts.append((stamp,price,row['reason']))
+    last=max(t for t,p,r in facts);final=[(p,r) for t,p,r in facts if t==last]
+    if len(set(final))!=1:raise ValueError('Порядок последних закрытий неоднозначен')
+    price,reason=final[0]
+    if reason!='SL':raise ValueError('Последнее закрытие не SL; нужен отдельный подтверждённый переход')
+    return str(price)
