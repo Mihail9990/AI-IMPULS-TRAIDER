@@ -86,3 +86,12 @@ class V2Integration(unittest.TestCase):
         t=next(t for t in c['tickets'].values() if t['group']==g['id']);t['closed']=True
         self.f.bot._live_ladder(self.f.bot.snapshot(),g)
         self.assertEqual(c['manual_reason'],'ACTUAL_LADDER_GAP_EXIT_REQUIRES_REVIEW')
+    def test_initial_tp_default_and_custom_value_survive_restart(self):
+        from tradfi.basket_math import BasketSettings
+        self.assertEqual(D(BasketSettings().INITIAL_TP_DISTANCE),D('0.25'))
+        settings=dict(self.f.bot.state['basket_settings'],INITIAL_TP_DISTANCE='0.40')
+        self.f.bot.edit(settings=settings)
+        self.f.bot=LatestCloseBasketController(self.f.store,self.f.b)
+        self.f.start();order=self.f.b.data['orders'][0]
+        self.assertEqual(D(order['tp'])-D(order['price']),D('0.40'))
+        self.assertEqual(self.f.bot.state['basket_settings']['INITIAL_TP_DISTANCE'],'0.40')

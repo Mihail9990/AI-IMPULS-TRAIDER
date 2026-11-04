@@ -105,17 +105,21 @@ def main():
                 data=Path(download.path()).read_bytes();assert len(data)<=1048576;data.decode('utf-8')
                 if scope!='runtime':assert 'Логи' in data.decode()
             assert page.locator('#log-scope option[value=demo]').count()==0
+            assert page.locator('#reverse-enable').is_disabled();assert page.locator('#reverse-disable').is_disabled()
             # Observed paper tick closes TP1; allow its one-shot SL transfer to confirm.
             first=paper.p['positions'][0];entry=float(first['entry']);tp=float(first['tp'])
             paper.reader.tick(tp-.1,tp);paper.step(6)
             paper.reader.tick(entry-.45,entry-.35);paper.step(3)
             wait("document.querySelectorAll('#tickets tr').length===5")
+            wait("!document.querySelector('#reverse-enable').disabled && document.querySelector('#reverse-disable').disabled")
             page.locator('#reverse-enable').click()
             wait("localStorage.getItem('basket-request-paper')===null && document.querySelector('#edit-status').textContent==='' && document.querySelector('#reverse-status').textContent.includes('включена')")
+            assert page.locator('#reverse-enable').is_disabled();assert page.locator('#reverse-disable').is_enabled()
             assert len({p['sl'] for p in paper.p['positions']})==5
             before_tps=[p['tp'] for p in paper.p['positions']]
             page.locator('#reverse-disable').click()
             wait("localStorage.getItem('basket-request-paper')===null && document.querySelector('#edit-status').textContent==='' && document.querySelector('#reverse-status').textContent.includes('выключена')")
+            assert page.locator('#reverse-enable').is_enabled();assert page.locator('#reverse-disable').is_disabled()
             assert len({p['sl'] for p in paper.p['positions']})==1
             assert [p['tp'] for p in paper.p['positions']]==before_tps
             page.locator('#manual-close-controls summary').click()

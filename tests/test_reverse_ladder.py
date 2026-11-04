@@ -41,7 +41,7 @@ class ReverseControl(unittest.TestCase):
         self.prepare();self.apply(True);sls=self.sls();self.f.bot=LatestCloseBasketController(self.f.store,self.f.b)
         self.f.b.quote(self.anchor-D('.4'),self.anchor-D('.3'));self.f.tick(4)
         self.assertEqual(self.sls(),sls);self.assertEqual(sls,[self.anchor-D(i)*D('.05') for i in range(5)])
-    def test_before_tp1_priority_unknown_rejected(self):
+    def test_before_tp1_is_strictly_forbidden(self):
         self.prepare(first=False)
         with self.assertRaises(ActionRejected):self.f.bot.action(self.action(True))
         self.assertNotIn('reverse_ladder',self.g)
@@ -108,6 +108,35 @@ class ReverseControl(unittest.TestCase):
         self.f.b.close('SL',position_id=pid);self.f.tick(3);before=len(self.f.b.commands)
         self.apply(False);self.assertEqual(self.sls(),[self.anchor]*4)
         self.assertFalse(any(c.get('position_id')==pid for c in self.f.b.commands[before:]))
+
+    def test_capability_snapshot_tracks_tp1_transfer_and_edit_races(self):
+        self.prepare(first=False);controls=lambda:self.f.bot.reverse_controls(self.f.bot.snapshot())
+        self.assertFalse(controls()['can_enable']);self.assertFalse(controls()['can_disable'])
+        self.f.b.close('TP',position_id=self.f.b.data['positions'][0]['id']);self.f.tick(1)
+        self.assertFalse(controls()['can_enable'])
+        self.f.tick(5);self.assertTrue(controls()['can_enable'])
+        self.f.b.quote(self.anchor-D('.35'),self.anchor-D('.25'))
+        self.f.bot.action(self.action(True));self.assertFalse(controls()['can_enable']);self.assertFalse(controls()['can_disable'])
+        self.f.tick(5);self.assertFalse(controls()['can_enable']);self.assertTrue(controls()['can_disable'])
+        self.f.bot.action(self.action(False));self.assertFalse(controls()['can_disable']);self.f.tick(5)
+        self.assertTrue(controls()['can_enable']);self.assertFalse(controls()['can_disable'])
+    def test_done_marker_without_tp1_evidence_cannot_bypass_server(self):
+        self.prepare();first=next(t for t in self.f.bot.state['cycle']['tickets'].values() if t['group']==self.g['id'] and t['index']==0)
+        first['exit_facts']=[]
+        self.assertFalse(self.f.bot.reverse_controls(self.f.bot.snapshot())['can_enable'])
+        with self.assertRaises(ActionRejected):self.f.bot.action(self.action(True))
+    def test_other_exit_or_wrong_trigger_cannot_unlock_ladder(self):
+        self.prepare();c=self.f.bot.state['cycle'];first=next(t for t in c['tickets'].values() if t['group']==self.g['id'] and t['index']==0)
+        first['reason']='SL'
+        with self.assertRaises(ActionRejected):self.f.bot.action(self.action(True))
+        first['reason']='TP';self.g['entry_sl_once']['trigger']='another-ticket'
+        with self.assertRaises(ActionRejected):self.f.bot.action(self.action(True))
+    def test_read_only_and_safe_pause_capabilities_disabled(self):
+        self.prepare();self.f.b.read_only=True
+        self.assertFalse(self.f.bot.reverse_controls(self.f.bot.snapshot())['can_enable'])
+        self.f.b.read_only=False;self.f.bot.state['phase']='SAFE_PAUSE'
+        self.assertFalse(self.f.bot.reverse_controls(self.f.bot.snapshot())['can_enable'])
+
 
 class NativeReverse(unittest.TestCase):
     def test_native_evidence_activate_cancel_and_restart(self):
