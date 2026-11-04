@@ -73,3 +73,28 @@ def net_money(deals):
         if any(deal.get(k) is None for k in ('profit','commission','swap','fee')):raise ValueError('Неизвестны комиссии/своп/прибыль')
         total+=sum((number(deal[k]) for k in ('profit','commission','swap','fee')),D(0))
     return total
+
+def recovery_range_after_sl(side,entry,sl,distance,*,initial):
+    """Proposed v2 range, pure calculation only; not an execution authorization.
+
+    Initial stop: keep the former entry on the same side, opposite beyond SL.
+    Subsequent stop: move the same side beyond its former entry too. Recompute
+    for each stopped basket; never reuse the v1 once-frozen expanded range.
+
+    Caller must resolve which entry/SL anchors represent independently filled
+    tickets, and reconcile flatness and OCO obligations before submitting orders.
+    That anchor policy and the v2 TP rules are awaiting user clarification, so
+    this planner is deliberately not wired into the current v1 controller.
+    """
+    if side not in {'BUY','SELL'} or not isinstance(initial,bool):
+        raise ValueError('Нужны BUY/SELL и явный признак начальной позиции')
+    entry,sl,d=map(number,(entry,sl,distance))
+    if min(entry,sl,d)<=0:raise ValueError('Цены и отступ должны быть положительными')
+    if side=='BUY':
+        buy=entry if initial else entry+d
+        sell=sl-d
+    else:
+        buy=sl+d
+        sell=entry if initial else entry-d
+    if sell<=0 or buy<=sell:raise ValueError('Диапазон должен иметь положительный SELL ниже BUY')
+    return {'BUY':str(buy),'SELL':str(sell)}
