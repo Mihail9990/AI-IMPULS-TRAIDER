@@ -1,0 +1,88 @@
+"""V3 panel UI smoke/regression. All HTTP intercepted; no broker/service/network."""
+from pathlib import Path
+import copy
+from playwright.sync_api import sync_playwright
+ROOT=Path(__file__).resolve().parents[1]/'web/basket-panel'
+
+def main():
+    base=dict(contract='ticket_basket_v1',scope='live-ui',revision=1,cycle_id=None,phase='WAIT_START',debt='0',realized='0',stopped=True,read_only=False,migration_block=None,manual_reason=None,time_block=None,
+        settings=dict(INITIAL_SIZE='0.09',INITIAL_ENTRY_DISTANCE='1',INITIAL_SL_DISTANCE='3',INITIAL_TP_DISTANCE='.25',BASKET_COUNT=6,TICKET_SIZE='.01',RECOVERY_SL_DISTANCE='1.5',EXPANSION_DISTANCE='1',CYCLE_COOLDOWN_SECONDS='0'),
+        feed=dict(status='FRESH',quote=dict(bid='4000',ask='4000.23'),age_seconds=0,candles=[dict(open='3999',close='4000',high='4001',low='3998',utc_time=1804800000+i*60) for i in range(20)]),levels={},positions=[],orders=[],journal=[],action_results={},projection=None,
+        recovery_mode='V1',v3_settings=dict(entry_distance='1',count_presets=[4,6,10]),v3_request=None,v3_link=None,v3_sl_distance='1.50',v3_controls=dict(can_enter=True,can_link=True,can_cancel_link=False,can_adjust_sl=True,reason=''))
+    state=copy.deepcopy(base);paper=copy.deepcopy(base);paper.update(scope='paper-ui',mode='PAPER',recovery_mode='V1')
+    requests=[];errors=[];dialogs=[];auth=True;fail_state=False;unknown=False;dismiss=False
+    def route(r):
+        nonlocal auth
+        path=r.request.url.split('8765',1)[-1].split('?',1)[0]
+        if path=='/api/login':auth=True;r.fulfill(json={});return
+        if path=='/api/logout':auth=False;r.fulfill(json={});return
+        if path in ('/api/state','/api/paper/state'):
+            if fail_state:r.fulfill(status=503,json={});return
+            r.fulfill(status=200 if auth else 401,json=state if path=='/api/state' else paper);return
+        if path in ('/api/action','/api/paper/action'):
+            req=r.request.post_data_json;requests.append(req);s=state if path=='/api/action' else paper;a=req['action']
+            if a['type']=='recovery_mode':s['recovery_mode']=a['mode']
+            if a['type']=='v3_settings':s['v3_settings']=dict(entry_distance=a['entry_distance'],count_presets=a['count_presets'])
+            if a['type']=='v3_link':s['v3_link']=dict(stage='ARMED',count=a['count']);s['v3_controls']['can_cancel_link']=True
+            if a['type']=='v3_cancel_link':s['v3_link']=None;s['v3_controls']['can_cancel_link']=False
+            if a['type']=='v3_adjust_sl':s['v3_sl_distance']=a['distance']
+            if a['type']=='v3_entry' and a['timing']!='now':s['v3_request']=a.copy();s['v3_controls']['can_enter']=False
+            if a['type']=='v3_cancel_request':s['v3_request']=None;s['v3_controls']['can_enter']=True
+            status='UNKNOWN' if unknown else 'APPLIED';s['action_results'][req['id']]=dict(status=status);s['revision']+=1
+            r.fulfill(json=dict(status=status));return
+        files={'/':'index.html','/panel.js':'panel.js','/panel.css':'panel.css'}
+        if path not in files:r.abort();return
+        r.fulfill(body=(ROOT/files[path]).read_text(),content_type={'/':'text/html','/panel.js':'text/javascript','/panel.css':'text/css'}[path])
+    with sync_playwright() as pw:
+        b=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox'])
+        try:
+            p=b.new_page(viewport=dict(width=390,height=844),is_mobile=True,has_touch=True)
+            p.route('**/*',route);p.on('pageerror',lambda e:errors.append(str(e)))
+            def dialog(d):
+                dialogs.append(d.message)
+                d.dismiss() if dismiss else d.accept()
+            p.on('dialog',dialog)
+            def wait(js):p.wait_for_function(js,timeout=7000)
+            p.goto('http://127.0.0.1:8765/');p.locator('#workspace').wait_for(state='visible')
+            assert p.locator('#v3-panels').is_hidden();assert p.locator('#manual-close-controls').is_visible()
+            p.locator('#recovery-mode').select_option('V3');p.locator('#save-recovery-mode').click();p.locator('#v3-panels').wait_for(state='visible')
+            assert p.locator('#manual-close-controls').is_hidden();assert p.locator('#v3-side').is_disabled()
+            assert p.locator('#v3-timing option[value=now]').is_disabled()
+            assert p.locator('#v3-presets button').count()==3
+            p.locator('#v3-presets button').nth(2).click();assert p.locator('#v3-count').input_value()=='10'
+            before=len(requests);p.locator('#v3-count').fill('1.5');p.locator('#v3-submit-entry').click();assert len(requests)==before
+            p.locator('#v3-count').fill('8');p.locator('#v3-order-type').select_option('MARKET');p.locator('#v3-timing').select_option('now');assert p.locator('#v3-side').is_enabled()
+            p.locator('#v3-side').select_option('SELL');dismiss=True;p.locator('#v3-submit-entry').click();assert len(requests)==before
+            dismiss=False;p.locator('#v3-submit-entry').click();wait("localStorage.getItem('basket-request')===null")
+            assert requests[-1]['action']==dict(type='v3_entry',cycle_id=None,order_type='MARKET',timing='now',side='SELL',count=8)
+            p.locator('#v3-order-type').select_option('STOP');assert p.locator('#v3-timing').input_value()=='current';assert p.locator('#v3-side').is_disabled()
+            p.locator('#v3-timing').select_option('next');p.locator('#v3-submit-entry').click();p.locator('#v3-cancel-request').wait_for(state='visible');assert requests[-1]['action']['timing']=='next'
+            p.locator('#v3-cancel-request').click();wait("document.querySelector('#v3-cancel-request').hidden")
+            p.locator('#v3-sl-minus').click();wait("document.querySelector('#v3-sl-value').textContent==='1.40'")
+            p.locator('#v3-sl-plus').click();wait("document.querySelector('#v3-sl-value').textContent==='1.50'")
+            p.locator('#v3-link-toggle').click();wait("document.querySelector('#v3-link-toggle').dataset.cancel==='true'")
+            n=len(dialogs);p.locator('#v3-link-toggle').click();wait("document.querySelector('#v3-link-toggle').dataset.cancel==='false'");assert len(dialogs)==n
+            assert requests[-1]['action']['type']=='v3_cancel_link'
+            # Each side panel collapses independently, persists after reload, never sends a command.
+            before=len(requests);p.locator('#v3-sl-panel > summary').click();assert not p.locator('#v3-sl-panel').evaluate('(x)=>x.open');assert p.locator('#v3-entry-panel').evaluate('(x)=>x.open')
+            p.reload();p.locator('#workspace').wait_for(state='visible');assert not p.locator('#v3-sl-panel').evaluate('(x)=>x.open');assert len(requests)==before
+            p.locator('#v3-sl-panel > summary').click()
+            for w in (360,390,412,768,1280):
+                p.set_viewport_size(dict(width=w,height=900));assert p.evaluate('document.documentElement.scrollWidth<=innerWidth'),w
+            p.set_viewport_size(dict(width=390,height=844))
+            # Mode isolation and draft clearing.
+            p.locator('#tab-paper').click();wait("document.querySelector('#tab-paper').getAttribute('aria-selected')==='true' && document.querySelector('#v3-panels').hidden")
+            p.locator('#tab-live').click();p.locator('#v3-panels').wait_for(state='visible')
+            # Read-only and stale snapshots block V3 commands.
+            state['read_only']=True;wait("document.querySelector('#v3-submit-entry').disabled");assert p.locator('#v3-link-toggle').is_disabled()
+            state['read_only']=False;wait("!document.querySelector('#v3-submit-entry').disabled")
+            fail_state=True;wait("document.querySelector('#v3-control-reason').textContent.includes('Нет свежего')");assert p.locator('#v3-link-toggle').is_disabled()
+            fail_state=False;wait("!document.querySelector('#v3-submit-entry').disabled")
+            # UNKNOWN persists across reload; neither repeated press nor reload resends.
+            unknown=True;p.locator('#v3-link-toggle').click();wait("localStorage.getItem('basket-request')!==null");n=len(requests)
+            p.reload();p.locator('#workspace').wait_for(state='visible');assert p.locator('#v3-link-toggle').is_disabled();assert len(requests)==n
+            assert not errors,errors
+            p.screenshot(path='/tmp/v3-panel-mobile.png',full_page=True)
+            print('PASS V3 UI: V1 visibility, mode/settings, STOP/MARKET timing, count validation/presets, cancel preview, SL confirmation, immediate linked cancellation, independent collapse/reload, mobile widths, live/paper, read-only/stale/UNKNOWN. All HTTP mocked; no real trading.')
+        finally:b.close()
+if __name__=='__main__':main()

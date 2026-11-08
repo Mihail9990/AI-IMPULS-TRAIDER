@@ -399,6 +399,8 @@ class BasketController(Controller):
         if self.state['phase'] not in {'SAFE_PAUSE','MANUAL'}:self.dispatch()
         else:self.dispatch({'CANCEL'})
 
+    def _preserve_pending_edit_group(self,group):return False
+
     def edit(self,*,settings=None,levels=None,expected=None,protection=None,expected_orders=None):
         """Validate everything before staging a durable multi-step edit.
 
@@ -432,7 +434,7 @@ class BasketController(Controller):
         if levels is not None:
             if {k:str(v) for k,v in expected.items()}!=current_levels:raise ActionRejected('Уровни уже изменились; обновите предпросмотр')
             if set(levels)!=set(current_levels):raise ActionRejected('Правка не может незаметно добавить сторону корзины')
-        pending_groups=[g for g in c['groups'] if not g.get('retired') and any(self.state['commands'][cid]['status'] in {'PENDING','READY','UNKNOWN','ACCEPTED'} for cid in g['commands'])]
+        pending_groups=[g for g in c['groups'] if not self._preserve_pending_edit_group(g) and not g.get('retired') and any(self.state['commands'][cid]['status'] in {'PENDING','READY','UNKNOWN','ACCEPTED'} for cid in g['commands'])]
         updates=[]
         try:
             if levels is not None:
@@ -480,7 +482,10 @@ class BasketController(Controller):
         c['edit']=dict(stage='CANCEL',settings=cfg.dump(),levels=levels,updates=updates,
             cancel_ids=[cid for g in pending_groups for cid in g['commands']],groups=[g['id'] for g in pending_groups],
             fills=sorted(c['tickets']),closed=sorted(pid for pid,t in c['tickets'].items() if t['closed']),modify_ids=[])
+        self._prepare_edit_extra(c['edit'])
         self.save('basket_edit_requested')
+
+    def _prepare_edit_extra(self,e):pass
 
     def _commit_edit_extra(self,e):
         pass

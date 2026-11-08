@@ -37,7 +37,7 @@ class ReverseLadderControl:
         if getattr(self.broker,'read_only',False):return denied('READ_ONLY: изменение SL запрещено')
         if not c or self.state.get('phase') in ('SAFE_PAUSE','MANUAL','MIGRATION_BLOCK') or c.get('manual') or self.state.get('migration_block') or self.state.get('time_block'):
             return denied('Нет доступной для управления recovery-корзины')
-        if c.get('edit') or c.get('manual_close') or self._unresolved() or snap.get('orders'):
+        if c.get('edit') or c.get('manual_close') or self._protection_busy(snap):
             return denied('Ожидается сверка предыдущих изменений')
         active=[t for t in c['tickets'].values() if not t['closed']]
         if not active or any(t['role']=='initial' for t in active) or len({t['group'] for t in active})!=1:
@@ -56,7 +56,7 @@ class ReverseLadderControl:
             raise ActionRejected('Неверные параметры обратной лестницы')
         snap=self._guard(entry=True);c=self.state.get('cycle')
         if not c or c['id']!=a['cycle_id']:raise ActionRejected('Цикл изменился')
-        if c.get('edit') or c.get('manual_close') or self._unresolved() or snap['orders']:
+        if c.get('edit') or c.get('manual_close') or self._protection_busy(snap):
             raise ActionRejected('Сначала сверка предыдущих изменений и OCO')
         active=sorted([t for t in c['tickets'].values() if not t['closed']],key=lambda t:t['index'])
         try:

@@ -2,7 +2,7 @@
 from copy import deepcopy
 from decimal import Decimal as D
 import hashlib,json,uuid
-from .basket_latest_close import LatestCloseBasketController
+from .recovery_v3 import ControlledRecoveryController
 from .control import ActionRejected,ActionGateway,OwnerMailbox
 from .broker import Spec
 from .settings import number
@@ -79,14 +79,15 @@ class PaperExchange:
         try:
             snap=self.snapshot();spec=Spec.load(snap['spec']);q=snap['quote']
             if self.p['paused_gap'] and kind not in {'CANCEL'}:raise ValueError('Paper gap needs confirmation')
-            if kind=='STOP':
+            if kind in {'STOP','MARKET'}:
                 if cmd['side'] not in {'BUY','SELL'}:raise ValueError('side')
-                size=number(cmd['size']);price=spec.price(cmd['price']);sign=1 if cmd['side']=='BUY' else -1
+                size=number(cmd['size']);price=spec.price(q['ask' if cmd['side']=='BUY' else 'bid'] if kind=='MARKET' else cmd['price']);sign=1 if cmd['side']=='BUY' else -1
                 if not spec.volume_min<=size<=spec.volume_max or size%spec.volume_step:raise ValueError('volume')
-                if sign*(price-number(q['ask' if sign==1 else 'bid']))<max(spec.tick_size,spec.point*spec.stops_level):raise ValueError('crossed STOP')
-                spec.protection(cmd['side'],price,number(cmd['sl']),number(cmd['tp']))
+                if kind=='STOP' and sign*(price-number(q['ask' if sign==1 else 'bid']))<max(spec.tick_size,spec.point*spec.stops_level):raise ValueError('crossed STOP')
+                spec.protection(cmd['side'],price,number(cmd['sl']),number(cmd['tp']),q if kind=='MARKET' else None)
                 oid='paper-o-'+cmd['id'];self.p['orders'].append(dict(id=oid,command_id=cmd['id'],side=cmd['side'],status='PENDING',size=str(size),price=str(price),sl=cmd['sl'],tp=cmd['tp'],owned=True))
                 result=dict(status='ACCEPTED',order_id=oid)
+                if kind=='MARKET':self._fill(self.p['orders'][-1],price)
             elif kind=='CANCEL':
                 o=next((o for o in self.p['orders'] if o['id']==cmd['order_id']),None)
                 if o:
@@ -100,7 +101,6 @@ class PaperExchange:
                     spec.protection(p['side'],number(p['entry']),number(cmd['sl']),number(cmd['tp']),q,modify=True);p.update(sl=cmd['sl'],tp=cmd['tp']);result=dict(status='DONE')
                 elif number(cmd['size'])==number(p['size']):
                     self._close(p,cmd['purpose'],q['bid' if p['side']=='BUY' else 'ask'],cmd['id']);result=dict(status='ACCEPTED')
-            # MARKET deliberately unsupported: the candle/basket strategy uses STOP.
         except (ValueError,StopIteration):pass
         self.p['results'][cmd['id']]=result;self.persist()
 
@@ -111,7 +111,7 @@ class PaperSession:
         if existing and existing.get('backend')!=PaperExchange.backend_id:
             self.store.close();raise DurabilityError('Paper cannot adopt another controller database')
         self.exchange=PaperExchange(self.store,clock=clock)
-        self.controller=LatestCloseBasketController(self.store,self.exchange,clock=clock,monotonic=monotonic)
+        self.controller=ControlledRecoveryController(self.store,self.exchange,clock=clock,monotonic=monotonic)
         self.scope=self.exchange.account;self.gateway=ActionGateway(self.controller,execute=self.action);self.mailbox=OwnerMailbox();self.snapshot=None
         self.presentation=None
     def _fresh(self):

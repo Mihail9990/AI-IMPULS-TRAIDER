@@ -10,7 +10,7 @@ class OwnEntrySL:
             raise ActionRejected('Неверные поля команды SL на вход')
         snap=self._guard(entry=True);c=self.state.get('cycle')
         if not c or a['cycle_id']!=c['id']:raise ActionRejected('Цикл изменился; обновите панель')
-        if c.get('edit') or c.get('manual_close') or c.get('initial_cancel') or self._unresolved() or snap['orders']:
+        if c.get('edit') or c.get('manual_close') or c.get('initial_cancel') or self._protection_busy(snap):
             raise ActionRejected('Сначала сверка предыдущих операций и ожидающих ордеров')
         if any(r.get('status')=='UNKNOWN' and rid!=getattr(self,'_active_control_id',None) for rid,r in self.state.get('control_receipts',{}).items()):
             raise ActionRejected('Предыдущая команда имеет UNKNOWN; требуется сверка')

@@ -96,6 +96,7 @@ class LatestCloseBasketController(OwnEntrySL,RecoveryWriteoff,ReverseLadderContr
                         if number(p['size'])!=number(t['size']):raise ValueError('Volume changed')
                         spec.protection(t['side'],number(t['entry']),number(p['sl']),number(tp),snap['quote'],modify=True)
                         updates.append(dict(position_id=t['id'],sl=p['sl'],tp=tp))
+                if orders and self._preserve_pending_tp_group(g):continue
                 if orders:
                     for side,entry in g['levels'].items():
                         configured_ladder(self.broker,spec,side,[entry]*cfg.BASKET_COUNT,[cfg.TICKET_SIZE]*cfg.BASKET_COUNT,c['recovery'],values[:cfg.BASKET_COUNT])
@@ -117,7 +118,7 @@ class LatestCloseBasketController(OwnEntrySL,RecoveryWriteoff,ReverseLadderContr
         g=next(g for g in c['groups'] if g['id']==t['group'])
         tickets=sorted([t for t in c['tickets'].values() if t['group']==g['id']],key=lambda t:t['index'])
         selected=[cid for cid in g['commands'] if self.state['commands'][cid]['side']==g['activated']]
-        if snap['orders'] or len(tickets)!=len(selected):raise ActionRejected('Сначала сверка OCO и всех исполнений')
+        if self._blocking_protection_orders(snap) or len(tickets)!=len(selected):raise ActionRejected('Сначала сверка OCO и всех исполнений')
         try:
             if [t['index'] for t in tickets]!=list(range(len(tickets))):raise ValueError()
             if any(not isinstance(protection[k],dict) or set(protection[k])!={'sl','tp'} for k in ('old','new')):raise ValueError()
@@ -251,6 +252,14 @@ class LatestCloseBasketController(OwnEntrySL,RecoveryWriteoff,ReverseLadderContr
             self.state['cycle']['tickets'][u['position_id']].update(sl=u['sl'],tp=u['tp'])
         tx['status']='DONE';self.save('actual_fill_ladder_confirmed');return False
 
+    def _preserve_pending_tp_group(self,group):return False
+
+    def _protection_busy(self,snap):
+        return self._unresolved() or bool(snap.get('orders'))
+
+    def _blocking_protection_orders(self,snap):
+        return bool(snap['orders'])
+
     def stage_entry_sl_once(self,group_id,trigger_position_id):
         """Owner-thread one-shot transaction; not a public unscoped action.
 
@@ -268,7 +277,7 @@ class LatestCloseBasketController(OwnEntrySL,RecoveryWriteoff,ReverseLadderContr
         trigger=c['tickets'].get(trigger_position_id)
         if not trigger or trigger['group']!=group_id or trigger.get('closed') is not True or trigger.get('reason')!='TP' or trigger.get('index')!=0 or not trigger.get('exit_facts'):
             raise ActionRejected('TP ступени ещё не подтверждён')
-        if c.get('edit') or self._uncertain() or snap['orders']:raise ActionRejected('Сначала сверка отмен, исполнений и предыдущей правки')
+        if c.get('edit') or self._uncertain() or self._blocking_protection_orders(snap):raise ActionRejected('Сначала сверка отмен, исполнений и предыдущей правки')
         group_tickets=[t for t in c['tickets'].values() if t['group']==group_id]
         if sorted(t['index'] for t in group_tickets)!=list(range(len(group_tickets))):raise ActionRejected('Номера частей не подтверждены')
         spec=Spec.load(snap['spec']);targets=[]
@@ -323,7 +332,7 @@ class LatestCloseBasketController(OwnEntrySL,RecoveryWriteoff,ReverseLadderContr
     def _stage_first_tp_if_ready(self,snap):
         from .control import ActionRejected
         c=self.state['cycle']
-        if c.get('edit') or self._uncertain() or snap['orders']:return False
+        if c.get('edit') or self._uncertain() or self._blocking_protection_orders(snap):return False
         for g in c['groups']:
             if g['role']=='initial' or g.get('entry_sl_once'):continue
             tickets=[t for t in c['tickets'].values() if t['group']==g['id']]
