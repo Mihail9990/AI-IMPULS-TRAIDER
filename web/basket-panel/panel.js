@@ -6,6 +6,7 @@
  const storageKey=k=>'basket-'+k+(mode==='paper'?'-paper':'');
  const apiPath=kind=>'/api/'+(mode==='paper'?'paper/':'')+kind;
  let view=null,pending=localStorage.getItem(storageKey('request')),pendingScope=localStorage.getItem(storageKey('scope')),busy=false,polling=false,loadedScope=null,preview=null,lines=[],zoom=1,pan=0,gesture=null,hold=null,timeOffset=0,visibleCount=60,previewFocus=null,previewWasOpen=false;
+ let lastActionReceipt=null;
  const names={INITIAL_SIZE:'Объём начальной позиции',INITIAL_ENTRY_DISTANCE:'STOP от Close M1',INITIAL_SL_DISTANCE:'Начальный SL',INITIAL_TP_DISTANCE:'Начальный TP',BASKET_COUNT:'Число билетов корзины',TICKET_SIZE:'Объём одного билета',RECOVERY_SL_DISTANCE:'Фиксированный SL корзины',COST_RESERVE:'Резерв будущих расходов, валюта счёта',TP_STEP_MULTIPLIER:'Множитель шага TP (не меньше 1)',CYCLE_COOLDOWN_SECONDS:'Пауза после цикла, секунды'};
  const headers=()=>({'X-Local-Control':'1','X-Controller-Scope':view?.scope??''});
  function error(text){$('action-error').textContent=text;if(preview)$('preview-error').textContent=text;}
@@ -13,11 +14,11 @@
  async function send(action,revision=view?.revision,scope=view?.scope){
   if(busy||pending)throw Error('Предыдущий исход не сверён. Повтор запрещён.');
   if(!view||scope!==view.scope)throw Error('Контекст изменился; обновите предпросмотр.');
-  const request={id:crypto.randomUUID(),revision,action};pending=request.id;pendingScope=scope;localStorage.setItem(storageKey('request'),pending);localStorage.setItem(storageKey('scope'),scope);busy=true;
+  const request={id:crypto.randomUUID(),revision,action};pending=request.id;pendingScope=scope;localStorage.setItem(storageKey('request'),pending);localStorage.setItem(storageKey('scope'),scope);busy=true;lastActionReceipt=null;updateBotActivity();
   try{const r=await fetch(apiPath('action'),{method:'POST',headers:{...headers(),'Content-Type':'application/json'},body:JSON.stringify(request),signal:AbortSignal.timeout(4000)});
    if(!r.ok){if([400,401,403,409,413,429].includes(r.status))clearPending();throw Error(r.status===409?'Снимок устарел; обновите предпросмотр.':'Команда отклонена сервером.');}
-   const receipt=await r.json();if(['APPLIED','REJECTED','CONFLICT'].includes(receipt.status))clearPending();error('Запрос принят; результат проверяется по брокерскому состоянию.');
-  }finally{busy=false;await poll();}
+   const receipt=await r.json();lastActionReceipt={status:receipt.status,reason:receipt.reason};if(['APPLIED','REJECTED','CONFLICT'].includes(receipt.status))clearPending();error(actionReceiptText(receipt.status,receipt.reason));
+  }finally{busy=false;await poll();updateBotActivity();}
  }
  async function command(text,message){if(!confirm(message))return;try{await send({type:'command',text});}catch(e){error(e.message);}}
  const keyboard=$('cycle-keyboard');
@@ -38,6 +39,41 @@
  $('reset').onclick=()=>command('/reset_manual','Подтвердить ручную сверку всех ордеров и билетов? Требуются доказанное закрытие и отсутствие неопределённости. Долг сохраняется.');
  $('login-button').onclick=async()=>{const password=$('password').value;$('password').value='';try{const r=await fetch('/api/login',{method:'POST',headers:{...headers(),'Content-Type':'application/json'},body:JSON.stringify({password}),signal:AbortSignal.timeout(3000)});if(!r.ok)throw Error('Вход отклонён');$('login-error').textContent='';await poll();}catch(e){$('login-error').textContent=e.message;}};
  $('logout').onclick=async()=>{await fetch('/api/logout',{method:'POST',headers:{...headers(),'Content-Type':'application/json'},body:'{}'});location.reload();};
+ // Activity uses controller snapshots and receipts, never inferred fills.
+ function actionReceiptText(status,reason){
+  if(status==='APPLIED')return 'Команда обработана контроллером; исполнение и позиции проверяются отдельно по снимку.';
+  if(status==='REJECTED')return 'Команда отклонена до исполнения'+(reason?': '+reason:'.');
+  if(status==='CONFLICT')return 'Команда отклонена: снимок устарел. Нужен новый предпросмотр.';
+  if(status==='UNKNOWN')return 'Исход команды неизвестен. Повтор запрещён до сверки.';
+  return 'Команда ожидает результата контроллера; исполнение не подтверждено.';
+ }
+ function updateBotActivity(){
+  const write=(id,text)=>{if($(id).textContent!==text)$(id).textContent=text;};
+  const role=mode==='paper'?'PAPER · модель':'LIVE';
+  if(!view){write('bot-activity-state',role+' · Ожидание снимка контроллера.');return;}
+  const phases={WAIT_START:'Ожидание запуска',WAIT_CANDLE:'Ожидание новой закрытой свечи',INITIAL_WAIT:'Ожидание начального входа',INITIAL_PENDING:'Ожидание начального триггера',INITIAL_POSITION:'Сопровождение начальной позиции',RECOVERY_POSITION:'Сопровождение корзины RECOVERY',RECOVERY_PENDING:'Ожидание ордеров RECOVERY / сверки',RECOVERY_CLEANUP:'Очистка ордеров RECOVERY / сверка',V3_WAIT_ENTRY:'Ожидание вашего входа RECOVERY',V3_WAIT_CANDLE:'Ожидание выбранной свечи RECOVERY',COOLDOWN:'Пауза перед новым циклом',PAUSED:'Новые входы остановлены',PAUSED_CYCLE:'Цикл приостановлен',MANUAL:'Требуется ручная сверка',SAFE_PAUSE:'Защитная пауза',MIGRATION_BLOCK:'Блокировка переноса состояния'};
+  const warnings=[];if(!v3Fresh)warnings.push('Нет свежего снимка: ниже последние полученные данные.');
+  if(view.read_only)warnings.push('READ ONLY');
+  if(view.migration_block)warnings.push(String(view.migration_block));if(view.manual_reason)warnings.push(String(view.manual_reason));
+  if(view.time_block)warnings.push(timeSafetyText());
+  if(view.feed?.status!=='FRESH'||!feedUtcVerified())warnings.push('Котировки или время не подтверждены как свежие.');
+  write('bot-activity-warning',warnings.join(' · '));
+  let detail=phases[view.phase]??('Состояние контроллера: '+(view.phase??'не указано'));
+  if(view.v3_request)detail+=' · Запланирован '+view.v3_request.order_type+' по закрытию выбранной свечи';
+  if(view.v3_link?.cancel)detail+=' · Отмена связанных триггеров ожидает сверки';
+  else if(view.v3_link?.replace)detail+=' · Перенос связанных триггеров ожидает сверки';
+  if(view.edit)detail+=' · Правка уровней: '+view.edit.stage;
+  if(view.stopped&&!['PAUSED','PAUSED_CYCLE'].includes(view.phase))detail+=' · Новые входы остановлены';
+  const count=items=>Array.isArray(items)?items.length:'—';
+  write('bot-activity-state',role+' · '+detail+' · Снимок: позиций '+count(view.positions)+', ордеров '+count(view.orders));
+  let action='';
+  if(busy)action='Команда отправляется; исполнение не подтверждено.';
+  else if(pending){action=pendingScope!==view.scope?'Ожидается сверка команды другого контекста; новые команды заблокированы.':actionReceiptText(view.action_results?.[pending]?.status,view.action_results?.[pending]?.reason);}
+  else if(lastActionReceipt)action='Последняя команда: '+actionReceiptText(lastActionReceipt.status,lastActionReceipt.reason);
+  write('bot-activity-action',action);
+  const events=Array.isArray(view.journal)?view.journal.filter(x=>typeof x==='string'&&x.trim()):[];
+  write('bot-activity-event',events.length?'Последнее сообщение контроллера: '+events[events.length-1]:'Сообщений контроллера пока нет.');
+ }
  // V3 reuses scoped receipts and snapshot revisions; no live execution is enabled here.
  // Display-only helpers: timestamp labels never establish a trading time contract.
  const feedUtcVerified=()=>view?.feed?.timestamp_semantics==='VERIFIED';
@@ -123,7 +159,7 @@
  function domain(){const prices=[...lines.map(l=>l.price),...visibleCandles().flatMap(c=>[Number(c.low),Number(c.high)]),Number(view?.feed?.quote?.bid),Number(view?.feed?.quote?.ask)].filter(x=>Number.isFinite(x)&&x>0);let lo=Math.min(...prices),hi=Math.max(...prices);if(!prices.length){lo=0;hi=1;}const mid=(lo+hi)/2+pan,span=Math.max(1,hi-lo)*1.25/zoom;return{min:mid-span/2,max:mid+span/2};}
  function syncPreviewDialog(){
   const open=!!preview;$('preview-backdrop').hidden=!open;
-  for(const id of ['command-drawer','settings-page','bottom-tabs','analysis-pane'])$(id).inert=open;
+  for(const id of ['command-drawer','settings-page','bottom-tabs','analysis-pane','bot-activity'])$(id).inert=open;
   if(open&&!previewWasOpen){previewFocus=document.activeElement;$('cancel-level').focus({preventScroll:true});}
   if(!open&&previewWasOpen)(previewFocus?.isConnected?previewFocus:$('drawer-toggle')).focus({preventScroll:true});
   previewWasOpen=open;
@@ -191,7 +227,7 @@
  $('cancel-level').onclick=()=>{preview=null;$('preview').hidden=true;draw();};
  $('apply-level').onclick=async()=>{if(!preview)return;const p=preview,value=Number($('new-price').value);if(!Number.isFinite(value)||value<=0){error('Цена должна быть положительным числом.');return;}let action;if(p.line.kind==='trigger'){action={type:'basket_levels',cycle_id:p.backend.cycle_id,expected_orders:p.backend.orders.map(o=>o.id),expected:p.backend.levels,levels:{...p.backend.levels,[p.line.side]:String(value)}};}else{const position=p.backend.positions.find(x=>x.id===p.line.pid);action={type:'protection',cycle_id:p.backend.cycle_id,position_id:position.id,old:{sl:position.sl,tp:position.tp},new:{sl:position.sl,tp:position.tp,[p.line.kind]:String(value)}};}if(!confirm('Подтвердить '+p.line.label+' → '+value+'? SL меняется для всех живых билетов этой корзины, TP выбранного билета фиксируется вручную; незаданные TP пересчитываются для покрытия долга. Другие ручные TP сохраняются. Недопустимая сетка отклоняется.'))return;try{await send(action,p.backend.revision,p.backend.scope);preview=null;$('preview').hidden=true;}catch(e){error(e.message);}draw();};
  function render(){
-  connectionLabel();
+  connectionLabel();updateBotActivity();
   $('phase').textContent=view.phase;$('cycle').textContent=view.cycle_id??'Ожидание цикла';$('debt').textContent=view.debt+' UST';$('realized').textContent=(mode==='paper'?'Net модели: ':'Фактический net: ')+view.realized+' UST';$('feed-status').textContent=view.feed.status;$('mode').textContent=mode==='paper'?'PAPER · без реальных сделок':view.read_only?'READ_ONLY':view.stopped?'Новые входы остановлены':'EXECUTION';
   $('safety').textContent=view.migration_block??view.manual_reason??timeSafetyText();$('quote').textContent='Bid '+(view.feed.quote?.bid??'—')+' / Ask '+(view.feed.quote?.ask??'—')+' · возраст '+(view.feed.age_seconds??'—')+' сек.';
   $('state-heading').textContent=mode==='paper'?'Бумажные билеты и ордера':'Брокерское состояние';
@@ -214,7 +250,7 @@
   $('reverse-enable').title=view.reverse_controls?.reason??'';$('reverse-disable').title=view.reverse_controls?.reason??'';
   if(loadedScope!==view.scope){fields();loadedScope=view.scope;}v3Render();draw();
  }
- async function poll(){if(polling||busy)return;polling=true;try{const r=await fetch(apiPath('state'),{headers:headers(),signal:AbortSignal.timeout(2500)});if(!r.ok){if([401,403].includes(r.status)){$('login').hidden=false;$('workspace').hidden=true;}throw Error('Нет авторизованного снимка');}const v=await r.json();if(v.contract!=='ticket_basket_v1'||(mode==='paper'?v.mode!=='PAPER':v.mode==='PAPER'))throw Error('Несовместимая версия контроллера');view=v;v3Fresh=true;const status=pending&&pendingScope===v.scope?v.action_results[pending]?.status:null;if(['APPLIED','REJECTED','CONFLICT'].includes(status)){if(status!=='APPLIED')error(status==='CONFLICT'?'Снимок устарел; создайте новый предпросмотр.':(v.action_results[pending]?.reason??'Команда отклонена до исполнения. Проверьте параметры; очередь разблокирована.'));clearPending();}$('login').hidden=true;$('workspace').hidden=false;render();}catch(e){v3Fresh=false;if(view){v3Render();connectionLabel();}$('feed-status').textContent='Нет свежего снимка';}finally{polling=false;}}
+ async function poll(){if(polling||busy)return;polling=true;try{const r=await fetch(apiPath('state'),{headers:headers(),signal:AbortSignal.timeout(2500)});if(!r.ok){if([401,403].includes(r.status)){$('login').hidden=false;$('workspace').hidden=true;}throw Error('Нет авторизованного снимка');}const v=await r.json();if(v.contract!=='ticket_basket_v1'||(mode==='paper'?v.mode!=='PAPER':v.mode==='PAPER'))throw Error('Несовместимая версия контроллера');view=v;v3Fresh=true;const status=pending&&pendingScope===v.scope?v.action_results[pending]?.status:null;if(['APPLIED','REJECTED','CONFLICT'].includes(status)){lastActionReceipt={status,reason:v.action_results[pending]?.reason};if(status!=='APPLIED')error(status==='CONFLICT'?'Снимок устарел; создайте новый предпросмотр.':(v.action_results[pending]?.reason??'Команда отклонена до исполнения. Проверьте параметры; очередь разблокирована.'));clearPending();}$('login').hidden=true;$('workspace').hidden=false;render();}catch(e){v3Fresh=false;if(view){v3Render();connectionLabel();updateBotActivity();}$('feed-status').textContent='Нет свежего снимка';}finally{polling=false;}}
  const defaultPrefs={mainTrend:false,mainCycle:true,pane:null,pattern:{trend:false,cycle:true},figure:{trend:false,cycle:true},liquidity:false,opacity:20,colors:{BUY:'#26a69a',SELL:'#ef5350',sl:'#ef5350',tp:'#26a69a',entry:'#e0b565',up:'#26a69a',down:'#ef5350',grid:'#25282e',zone:'#e0b565'}};
  let prefs=structuredClone(defaultPrefs);try{const saved=JSON.parse(localStorage.getItem('chart-preferences-v1')??'null');if(saved){for(const k of ['mainTrend','mainCycle','liquidity'])if(typeof saved[k]==='boolean')prefs[k]=saved[k];if(['pattern','figure',null].includes(saved.pane))prefs.pane=saved.pane;for(const pane of ['pattern','figure'])for(const k of ['trend','cycle'])if(typeof saved[pane]?.[k]==='boolean')prefs[pane][k]=saved[pane][k];if(Number.isFinite(saved.opacity))prefs.opacity=Math.max(0,Math.min(100,saved.opacity));for(const k of Object.keys(prefs.colors))if(/^#[0-9a-f]{6}$/i.test(saved.colors?.[k]))prefs.colors[k]=saved.colors[k];}}catch{}
  const savePrefs=()=>{localStorage.setItem('chart-preferences-v1',JSON.stringify(prefs));layout();draw();};
@@ -234,6 +270,29 @@
  async function showLogs(){const scope=$('log-scope').value;try{const r=await fetch('/api/logs?scope='+encodeURIComponent(scope)+'&page='+logPage,{headers:{'X-Local-Control':'1'},signal:AbortSignal.timeout(4000)});if(!r.ok)throw Error('Логи недоступны: '+r.status);const v=await r.json();if(scope!==$('log-scope').value)return;$('logs-view').textContent=v.text;$('logs-status').textContent='Страница '+(v.page+1)+' · ограниченная выгрузка';$('logs-prev').disabled=v.page===0;$('logs-next').disabled=!v.has_more;}catch(e){$('logs-status').textContent=e.message;}}
  $('logs-refresh').onclick=()=>{logPage=0;showLogs();};$('log-scope').onchange=()=>{logPage=0;showLogs();};$('logs-prev').onclick=()=>{logPage=Math.max(0,logPage-1);showLogs();};$('logs-next').onclick=()=>{logPage++;showLogs();};
  $('logs-download').onclick=async()=>{const scope=$('log-scope').value;try{const r=await fetch('/api/logs/download?scope='+encodeURIComponent(scope),{headers:{'X-Local-Control':'1'},signal:AbortSignal.timeout(5000)});if(!r.ok)throw Error('Скачивание отклонено: '+r.status);const blob=await r.blob();if(blob.size>1048576)throw Error('Файл превысил лимит');const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='tradfi-'+scope+'-logs.txt';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);$('logs-status').textContent='Подготовлен файл UTF-8: '+a.download;}catch(e){$('logs-status').textContent=e.message;}};
+ // Local display preference only; each controller role has its own storage key.
+ const chartHeightKey=storageKey('chart-height-v1');
+ function normalizeChartHeight(value){
+  const percent=typeof value?.percent==='number'&&Number.isFinite(value.percent)?Math.max(30,Math.min(85,Math.round(value.percent/5)*5)):60;
+  return{mode:value?.mode==='custom'?'custom':'auto',percent};
+ }
+ let chartHeight=normalizeChartHeight(null);
+ try{chartHeight=normalizeChartHeight(JSON.parse(localStorage.getItem(chartHeightKey)??'null'));}catch{}
+ function applyChartHeight(save=false){
+  chartHeight=normalizeChartHeight(chartHeight);
+  $('chart-page').dataset.chartHeight=chartHeight.mode;
+  $('chart-page').style.setProperty('--chart-height',chartHeight.percent+'vh');
+  $('chart-page').style.setProperty('--chart-height-dynamic',chartHeight.percent+'dvh');
+  $('chart-height-mode').value=chartHeight.mode;$('chart-height-range').value=String(chartHeight.percent);
+  $('chart-height-range').disabled=chartHeight.mode!=='custom';$('chart-height-value').textContent=chartHeight.percent+'%';
+  $('chart-height-status').textContent=chartHeight.mode==='auto'?'График занимает доступную высоту.':'Выбрано '+chartHeight.percent+'% высоты экрана.';
+  if(save){try{localStorage.setItem(chartHeightKey,JSON.stringify(chartHeight));}catch{$('chart-height-status').textContent+=' Сохранение недоступно: выбор действует до перезагрузки.';}}
+  requestAnimationFrame(draw);
+ }
+ $('chart-height-mode').onchange=()=>{chartHeight.mode=$('chart-height-mode').value;applyChartHeight(true);};
+ $('chart-height-range').oninput=()=>{chartHeight.percent=Number($('chart-height-range').value);applyChartHeight(true);};
+ $('chart-height-reset').onclick=()=>{chartHeight.mode='auto';applyChartHeight(true);};
+ applyChartHeight();
  // Presentation-only navigation: the LIVE/PAPER role and API paths never change.
  let activeTab='chart';
  function setTab(tab){if(preview)return;cancelGesture();activeTab=tab==='settings'?'settings':'chart';for(const name of ['chart','settings']){$(name+'-page').hidden=activeTab!==name;$('tab-'+name).setAttribute('aria-selected',String(activeTab===name));}requestAnimationFrame(draw);}

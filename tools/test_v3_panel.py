@@ -106,6 +106,21 @@ def main():
             assert p.locator('#v3-sl-value').inner_text()=='1.50'
             for page,path in [(p,'/api/paper/state'),(pp,'/api/state')]:
                 assert page.evaluate("async path => (await fetch(path,{headers:{'X-Local-Control':'1'}})).status",path)==404
+            # Local chart height, separate roles, reload and drawer shrink; no action request.
+            before=len(requests)
+            for page,percent in ((p,'40'),(pp,'75')):
+                page.locator('#tab-settings').click();page.locator('#display-settings > summary').click()
+                page.locator('#chart-height-mode').select_option('custom')
+                page.locator('#chart-height-range').evaluate("(el,value)=>{el.value=value;el.dispatchEvent(new Event('input',{bubbles:true}));}",percent)
+                page.locator('#tab-chart').click()
+                assert page.locator('#chart-page').get_attribute('data-chart-height')=='custom'
+                assert page.locator('#chart').bounding_box()['height']>50
+                assert page.locator('#bottom-tabs').bounding_box()['y']+page.locator('#bottom-tabs').bounding_box()['height']<=844+1
+                page.reload();page.locator('#workspace').wait_for(state='visible')
+                assert page.locator('#chart-height-range').input_value()==percent
+                page.locator('#tab-settings').click();page.locator('#display-settings > summary').click()
+                page.locator('#chart-height-reset').click();page.locator('#tab-chart').click();page.locator('#drawer-toggle').click()
+            assert len(requests)==before
             p.locator('#tab-settings').click();p.locator('#logout').click();p.locator('#login').wait_for(state='visible')
             assert pp.evaluate("async () => (await fetch('/api/paper/state',{headers:{'X-Local-Control':'1'}})).status")==200
             assert {c['name'] for c in context.cookies()}=={'tradfi_paper_session'}
@@ -118,7 +133,9 @@ def main():
                 p.locator('#tab-chart').click()
                 if p.locator('#drawer-toggle').get_attribute('aria-expanded')=='true':p.locator('#drawer-toggle').click()
                 chart=p.locator('#chart').bounding_box();nav=p.locator('#bottom-tabs').bounding_box()
-                assert chart['y']<3 and chart['height']>150,(width,height,chart)
+                activity=p.locator('#bot-activity').bounding_box()
+                assert activity['height']<=height*.1+1 and chart['y']>=activity['height']-1
+                assert chart['height']>150,(width,height,chart)
                 assert nav['y']+nav['height']<=height+1
                 assert p.evaluate('document.documentElement.scrollWidth<=innerWidth'),width
                 p.locator('#drawer-toggle').click()

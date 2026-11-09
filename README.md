@@ -1,4 +1,6 @@
-Новый VPS: [простая установка HTTPS для телефона](docs/HTTPS_SIMPLE_RU.md) через `SETUP_PHONE_HTTPS.bat`.
+PAPER на телефоне: [отдельный HTTPS-мастер](docs/PAPER_HTTPS_RU.md) через `SETUP_PAPER_PHONE_HTTPS.bat`.
+
+Прежний LIVE HTTPS: [старый мастер](docs/HTTPS_SIMPLE_RU.md) через `SETUP_PHONE_HTTPS.bat`; он не настраивает отдельный PAPER.
 
 # AI Impuls — TradFi / MetaTrader 5
 

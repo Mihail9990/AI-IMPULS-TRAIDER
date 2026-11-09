@@ -20,8 +20,12 @@ for id in ('start','stop','resume','reset','logout','save-settings','refresh-set
     assert inside(id,'settings-page'),id
 for id in ('own-entry-sl','reverse-enable','reverse-disable','cancel-initial','v3-submit-entry','v3-cancel-request','v3-link-toggle','v3-sl-plus','v3-sl-minus','level-buttons'):
     assert inside(id,'drawer-content'),id
+assert not inside('bot-activity','chart-page') and not inside('bot-activity','settings-page')
+assert p.nodes['bot-activity'][1]['tabindex']=='0'
 assert not inside('chart-notices','chart-page') and not inside('chart-notices','settings-page')
 assert inside('preview-error','preview')
+for id in ('chart-height-mode','chart-height-range','chart-height-reset'):assert inside(id,'display-settings')
+assert p.nodes['chart-height-range'][1]['min']=='30' and p.nodes['chart-height-range'][1]['max']=='85' and p.nodes['chart-height-range'][1]['step']=='5'
 assert inside('chart','chart-page') and inside('preview','chart-page')
 assert not inside('bottom-tabs','chart-page') and not inside('bottom-tabs','settings-page')
 assert 'hidden' in p.nodes['settings-page'][1] and 'hidden' in p.nodes['drawer-content'][1]

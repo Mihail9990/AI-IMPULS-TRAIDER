@@ -42,3 +42,17 @@ body{background:var(--bg)}main{padding:0;max-width:none}#login{max-width:480px;m
 #settings-page>details>summary{list-style:none;position:relative;padding:8px 24px 8px 0;margin:0;font-size:17px;font-weight:500}#settings-page>details>summary::-webkit-details-marker{display:none}#settings-page>details>summary::after{content:'›';position:absolute;right:0;top:2px;font-size:26px;color:#b6bac1}#settings-page>details[open]>summary::after{transform:rotate(90deg)}#settings-page>details[open]>summary{margin-bottom:14px}
 #preview-backdrop{position:fixed;inset:0;z-index:40;background:#0009;touch-action:none}#preview{box-shadow:0 16px 80px #0008}
 #drawer-toggle[data-warning=true]{color:#f4c984}#chart[data-feed-fresh=false] [data-quote]{opacity:.5}#preview-error{color:#ffb1b1}
+
+/* A custom chart height can shrink for commands; tabs and the drawer never grow offscreen. */
+#chart-page[data-chart-height=custom] .chart-card{flex:0 1 var(--chart-height);height:var(--chart-height);max-height:100%}
+#chart-page[data-chart-height=custom] #command-drawer{margin-top:auto}
+@supports(height:1dvh){#chart-page[data-chart-height=custom] .chart-card{flex-basis:var(--chart-height-dynamic);height:var(--chart-height-dynamic)}}
+#chart-height-settings{border:1px solid var(--line);border-radius:10px;padding:12px;margin:12px 0;min-width:0}
+#chart-height-settings legend{padding:0 6px}#chart-height-settings input[type=range]{width:100%;padding:0;min-height:44px;accent-color:#ddd}
+#chart-height-value{font-variant-numeric:tabular-nums}#chart-height-status{font-size:12px;margin:8px 0 0}
+
+#bot-activity{flex:0 0 10vh;height:10vh;max-height:10vh;min-height:0;overflow:auto;overscroll-behavior:contain;padding:5px 12px;border-bottom:1px solid var(--line);background:#12151a;scrollbar-width:thin}
+@supports(height:1dvh){#bot-activity{flex-basis:10dvh;height:10dvh;max-height:10dvh}}
+#bot-activity p{font-size:12px;line-height:1.35;margin:0 0 3px;overflow-wrap:anywhere}#bot-activity p:empty{display:none}
+#bot-activity-state{color:#e4e8ed}#bot-activity-warning{color:#f5c988}#bot-activity-action{color:#b9ccdf}#bot-activity:focus-visible{outline:2px solid #81c4ff;outline-offset:-2px}
+@media(max-height:500px){#drawer-content{max-height:30vh;max-height:30dvh}}
