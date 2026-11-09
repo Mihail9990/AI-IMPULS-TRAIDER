@@ -110,9 +110,24 @@ class PaperExchange:
 class PaperSession:
     def __init__(self,path,reader,*,clock,monotonic):
         self.store=Store(path);self.reader=reader;self.clock=clock;self.monotonic=monotonic
-        existing=self.store.load()
-        if existing and existing.get('backend')!=PaperExchange.backend_id:
-            self.store.close();raise DurabilityError('Paper cannot adopt another controller database')
+        from .market_time_state import bind_market_time_state
+        try:
+            existing=self.store.load()
+            if existing and existing.get('backend')!=PaperExchange.backend_id:
+                raise DurabilityError('Paper cannot adopt another controller database')
+            identity=getattr(reader, '_expected_account', None)
+            if identity is None and hasattr(reader, 'read_raw'):
+                # Direct callers may omit expected_account. Establish the reader's
+                # verified source identity before recording a persistent binding.
+                reader.read_raw()
+                identity=reader._expected_account
+            login, server=(identity.split('@', 1) if identity is not None else (None, None))
+            bind_market_time_state(self.store, dict(
+                market_time_offset_seconds=getattr(reader, 'market_time_offset_seconds', 0),
+                expected_login=int(login) if login is not None else None, expected_server=server))
+        except BaseException:
+            self.store.close()
+            raise
         self.exchange=PaperExchange(self.store,clock=clock)
         self.controller=ControlledRecoveryController(self.store,self.exchange,clock=clock,monotonic=monotonic)
         self.scope=self.exchange.account;self.gateway=ActionGateway(self.controller,execute=self.action);self.mailbox=OwnerMailbox();self.snapshot=None

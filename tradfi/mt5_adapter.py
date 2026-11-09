@@ -617,7 +617,7 @@ class MT5Broker:
         if any(t <= 0 or t % 60 for t in values):
             raise TimeProfileError('INVALID_M1_TIME_SEQUENCE')
         raw_bars = [int(t) for t in values]
-        bars = [server_to_utc(t) for t in raw_bars]
+        bars = [self.market_time_to_utc(t) for t in raw_bars]
         if bars != sorted(set(bars)) or any(t % 60 for t in bars):
             raise TimeProfileError('INVALID_M1_TIME_SEQUENCE')
         # A live tick must belong to the current bar; previous available bars must be closed.

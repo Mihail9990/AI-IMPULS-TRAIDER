@@ -163,7 +163,7 @@ def binding_path(root, instance='live'):
 
 def default_paper_config(root, live):
     # Allowlist only market-source identity, never copy passwords, tokens or credentials.
-    config={key:live[key] for key in ('terminal_path','time_profile','expected_server','expected_login','symbol','magic') if key in live}
+    config={key:live[key] for key in ('terminal_path','time_profile','market_time_offset_seconds','expected_server','expected_login','symbol','magic') if key in live}
     live_state=state_path(root,live)
     config.update(backend='paper_mt5_quotes_v1',enable_trading=False,
         live_state_file=str(live_state),state_file=str(live_state.with_name(live_state.stem+'.paper.sqlite3')),

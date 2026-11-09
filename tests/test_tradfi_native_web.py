@@ -79,10 +79,10 @@ class RuntimeAPI(NativeAPI):
         super().__init__();self.now=int(self.now//60)*60+10
         self.rates=[dict(time=int(self.now//60)*60-60,open=3999.,close=4000.)]
     def symbol_info_tick(self,symbol):
-        stamp=self.now+offset_at(self.now)
+        stamp=self.now
         return record(bid=self.tick.bid,ask=self.tick.ask,time=int(stamp),time_msc=int(stamp*1000))
     def copy_rates_from_pos(self,*args):
-        return [dict(r,time=r['time']+offset_at(r['time'])) for r in super().copy_rates_from_pos(*args)]
+        return super().copy_rates_from_pos(*args)
 
 class RuntimePipelineTest(unittest.TestCase):
     def test_runtime_web_controller_adapter_fill_modify_close_and_feed(self):

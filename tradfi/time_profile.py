@@ -61,3 +61,39 @@ def server_to_utc(raw_seconds):
         # No guessing in the spring gap or autumn repeated hour, even for a recent tick.
         raise TimeProfileError('AMBIGUOUS_OR_NONEXISTENT_SERVER_TIME')
     return candidates[0]
+
+
+def validate_market_time_offset(config):
+    """Fixed market-data encoding only. Never calibrate against quotes or history."""
+    value = config.get('market_time_offset_seconds', 0)
+    if isinstance(value, bool) or not isinstance(value, int) or abs(value) > 14*3600 or value % 60:
+        raise TimeProfileError('INVALID_MARKET_TIME_OFFSET_SECONDS')
+    return value
+
+
+def market_timestamp_to_utc(raw_seconds, offset_seconds=0):
+    """Normalize one raw tick/candle timestamp; callers must not pass normalized UTC."""
+    offset = validate_market_time_offset({'market_time_offset_seconds': offset_seconds})
+    raw_seconds = raw_seconds.item() if hasattr(raw_seconds, 'item') else raw_seconds
+    if (isinstance(raw_seconds, bool) or not isinstance(raw_seconds, (int, float))
+            or not math.isfinite(raw_seconds) or raw_seconds <= 0):
+        raise TimeProfileError('INVALID_MARKET_TIMESTAMP')
+    result = raw_seconds - offset
+    if not math.isfinite(result) or result <= 0:
+        raise TimeProfileError('INVALID_MARKET_TIMESTAMP')
+    return result
+
+
+def market_tick_to_utc(tick, offset_seconds=0):
+    """Validate raw seconds/milliseconds agreement before applying the fixed offset."""
+    raw = getattr(tick, 'time_msc', None)
+    seconds = getattr(tick, 'time', None)
+    raw = raw.item() if hasattr(raw, 'item') else raw
+    seconds = seconds.item() if hasattr(seconds, 'item') else seconds
+    for value in (raw, seconds):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+            raise TimeProfileError('INVALID_MARKET_TIMESTAMP')
+    stamp = raw / 1000
+    if not 0 <= stamp - seconds < 1:
+        raise TimeProfileError('TICK_SECONDS_MILLISECONDS_DISAGREE')
+    return market_timestamp_to_utc(stamp, offset_seconds)

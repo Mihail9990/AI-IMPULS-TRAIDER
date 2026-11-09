@@ -25,15 +25,24 @@ class NativeAPI(TradingAPI):
         self.now=int(self.now//60)*60+10
         self.rates=[dict(time=int(self.now//60)*60-60,open=3999.,close=4000.)]
     def symbol_info_tick(self,symbol):
-        raw=self.now+offset_at(self.now)
+        raw=self.now
         return record(bid=self.tick.bid,ask=self.tick.ask,time=int(raw),time_msc=int(raw*1000))
     def copy_rates_from_pos(self,*args):
-        return [dict(r,time=r['time']+offset_at(r['time'])) for r in self.rates]
+        return [dict(r) for r in self.rates]
     def module(self):
         module=ModuleType('MetaTrader5')
         for name in dir(self):
             if not name.startswith('_'): setattr(module,name,getattr(self,name))
         return module
+
+
+class LegacyNativeAPI(NativeAPI):
+    """Legacy adapter-only fixture retains its separately tested seasonal contract."""
+    def symbol_info_tick(self,symbol):
+        tick=super().symbol_info_tick(symbol);shift=offset_at(self.now)
+        return tick._replace(time=tick.time+shift,time_msc=tick.time_msc+shift*1000)
+    def copy_rates_from_pos(self,*args):
+        return [dict(r,time=r['time']+offset_at(r['time'])) for r in super().copy_rates_from_pos(*args)]
 
 
 class NativeServiceTest(unittest.TestCase):
@@ -235,6 +244,9 @@ class NativeServiceTest(unittest.TestCase):
         from tradfi.mt5_adapter import MT5Broker
         from tradfi.native_fixture import capture_chain
         broker=MT5Broker(self.config,api=self.api,clock=lambda:self.api.now,monotonic=lambda:self.api.now)
+        # This capture test exercises legacy history, with its legacy market encoding.
+        original_tick=self.api.symbol_info_tick
+        self.api.symbol_info_tick=lambda symbol: original_tick(symbol)._replace(time=int(self.api.now+offset_at(self.api.now)),time_msc=int((self.api.now+offset_at(self.api.now))*1000))
         broker.connect(); self.addCleanup(broker.close)
         before=(len(self.api.sends),len(self.api.checks)); self.api.calls=[]
         result=capture_chain(broker,ticket)

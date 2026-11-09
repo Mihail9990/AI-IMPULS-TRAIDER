@@ -20,7 +20,7 @@ class SeparateInstallerTest(unittest.TestCase):
     def paper_state(self):
         from tradfi.paper import PaperSession
         path=tool.state_path(self.root,self.manager.config('paper'))
-        session=PaperSession(path,Mock(),clock=lambda:1,monotonic=lambda:1)
+        session=PaperSession(path,Mock(_expected_account='123@Bybit-Live-6', market_time_offset_seconds=0),clock=lambda:1,monotonic=lambda:1)
         session.exchange.p['paused_gap']=True
         session.exchange.p['order_history']=[{'test':'preserved'}]
         session.exchange.persist();identity=session.exchange.account
@@ -35,12 +35,18 @@ class SeparateInstallerTest(unittest.TestCase):
     def test_paper_config_allowlist_no_secrets_and_preserves_live(self):
         self.install()
         self.manager.path_for('paper').unlink()
-        live=self.manager.config();live.update(expected_login=123,password='never-copy',token='secret')
+        live=self.manager.config();live.update(expected_login=123,password='never-copy',token='secret',market_time_offset_seconds=7200)
         live['web']['password']='live-secret';tool.atomic_json(self.manager.config_path,live)
         before=self.manager.config_path.read_bytes();self.manager.prepare_settings('paper')
         paper=self.manager.config('paper')
         self.assertEqual(self.manager.config_path.read_bytes(),before)
         self.assertEqual(paper['expected_login'],123)
+        self.assertEqual(paper['market_time_offset_seconds'],7200)
+        paper['market_time_offset_seconds']=0
+        tool.atomic_json(self.manager.path_for('paper'),paper)
+        self.manager.prepare_paper()
+        self.assertEqual(self.manager.config('paper')['market_time_offset_seconds'],0)
+        self.assertEqual(self.manager.config()['market_time_offset_seconds'],7200)
         self.assertNotIn('password',paper);self.assertNotIn('token',paper)
         self.assertEqual(paper['web'],dict(enabled=True,host='127.0.0.1',port=8766,password=''))
         self.assertEqual(paper['backend'],'paper_mt5_quotes_v1');self.assertFalse(paper['enable_trading'])

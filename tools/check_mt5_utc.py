@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from tradfi.evidence_broker import MT5EvidenceBroker
-from tradfi.time_profile import offset_at
+from tradfi.time_profile import validate_market_time_offset
 
 def main():
     parser=argparse.ArgumentParser(description='Проверка UTC tick/M1 без торговли')
@@ -23,8 +23,10 @@ def main():
         reason=safety.check();verified=reason is None
         utc=safety.trusted_utc()
         result=dict(status='UTC_VERIFIED' if verified else 'WAIT_OR_REVIEW',reason=reason,
-            sdk_epoch_contract='UTC_NO_OFFSET',trading=False,
-            server_display_offset_seconds=offset_at(utc) if utc is not None else None)
+            market_time_contract='FIXED_OFFSET_V1',trading=False,
+            market_time_offset_seconds=validate_market_time_offset(config),
+            trusted_utc=utc,
+            observation=getattr(safety.semantics_verifier,'observation',None))
         print(json.dumps(result,ensure_ascii=False))
         return 0 if verified else 2
     except Exception as exc:

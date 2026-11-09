@@ -10,6 +10,7 @@ import time
 from .runtime import owner_lock
 from .paper_market import MarketReader
 from .paper import PaperSession
+from .time_profile import validate_market_time_offset
 
 
 def paper_state_path(config):
@@ -23,6 +24,7 @@ def paper_state_path(config):
 def _run_paper(config, *, api=None, stop_event=None, clock=time.time,
                monotonic=time.monotonic, panel_factory=None, reader_factory=None):
     config = dict(config)
+    market_offset = validate_market_time_offset(config)
     if config.get('backend', 'paper_mt5_quotes_v1') != 'paper_mt5_quotes_v1':
         raise ValueError('Independent paper backend config is required')
     if config.get('enable_trading', False) is not False:
@@ -57,7 +59,7 @@ def _run_paper(config, *, api=None, stop_event=None, clock=time.time,
         resources.callback(api.shutdown)
         if not api.initialize(path,timeout=10000):raise OSError('MT5 initialize failed')
         reader=(reader_factory or MarketReader)(api,symbol=config['symbol'],clock=clock,monotonic=monotonic,
-            expected_account=str(login)+'@'+config['expected_server'])
+            expected_account=str(login)+'@'+config['expected_server'],market_time_offset_seconds=market_offset)
         paper=PaperSession(state,reader,clock=clock,monotonic=monotonic)
         paper.log_file=config.get("log_file")
         resources.callback(paper.close)

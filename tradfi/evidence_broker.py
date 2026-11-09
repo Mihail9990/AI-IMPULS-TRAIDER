@@ -4,15 +4,19 @@ from types import ModuleType
 
 from .mt5_adapter import MT5Broker, QuoteFreshnessError, NotSent, dec
 from .settings import number
-from .time_profile import TEST_PROFILE, BYBIT_PROFILE, HistoryTimeUnverified, TimeProfileError, server_to_utc, offset_at
+from .time_profile import TEST_PROFILE, BYBIT_PROFILE, HistoryTimeUnverified, TimeProfileError, market_timestamp_to_utc, validate_market_time_offset
 
 
 class MT5EvidenceBroker(MT5Broker):
     evidence_contract='per_obligation_v1'
 
     def __init__(self, config, store=None, *, api=None, time_safety=None, **kwargs):
+        self.market_time_offset_seconds=validate_market_time_offset(config)
         if config.get('time_profile')==TEST_PROFILE and (api is None or isinstance(api,ModuleType)):
             raise HistoryTimeUnverified()
+        if store is not None and config.get('time_profile') == BYBIT_PROFILE:
+            from .market_time_state import bind_market_time_state
+            bind_market_time_state(store,config)
         super().__init__(config,store=store,api=api,**kwargs)
         self.read_only=not self.enable_trading
         from .time_safety import TimeSafety
@@ -26,10 +30,7 @@ class MT5EvidenceBroker(MT5Broker):
                 self.time_safety.semantics_verifier=NativeUTCVerifier(self,self.time_safety)
 
     def market_time_to_utc(self,stamp):
-        from .native_time import NativeUTCVerifier
-        if isinstance(getattr(self.time_safety,'semantics_verifier',None),NativeUTCVerifier):
-            return float(stamp)  # Official MT5 SDK contract: already UTC, never −2h/−3h.
-        return super().market_time_to_utc(stamp)
+        return market_timestamp_to_utc(stamp,self.market_time_offset_seconds)
 
     def _timestamp_semantics_verified(self):
         if self.time_profile == TEST_PROFILE:
@@ -54,7 +55,14 @@ class MT5EvidenceBroker(MT5Broker):
                 raise NotSent('MT5_TIMESTAMP_SEMANTICS_UNVERIFIED')
             return None  # observation only: never interpret raw broker wall time as UTC
         try:
-            return super()._check_quote_time(tick,stage)
+            quote=super()._check_quote_time(tick,stage)
+            # The supplied tick may differ from the verifier's independent read.
+            # Enforce the same future tolerance on this exact observation too.
+            if quote['age_s'] < -2:
+                raise QuoteFreshnessError(stage,'TICK_AHEAD_OF_PC',
+                    quote['utc_time']+quote['age_s'],quote['utc_time'],self.max_age,
+                    raw_time_msc=quote['raw_time_msc'],time_profile=self.time_profile)
+            return quote
         except (QuoteFreshnessError, TimeProfileError):
             if not getattr(self, '_strict_quote', False) and not getattr(self, '_require_fresh', False):
                 return None  # identity evidence remains usable; mutations revalidate quote time
@@ -204,7 +212,7 @@ class MT5EvidenceBroker(MT5Broker):
                     mt5_timestamp_semantics='VERIFIED' if semantics_verified else 'UNVERIFIED',
                     mt5_display_time=dict(tick_time_msc=getattr(tick,'time_msc',None),
                         candle_time=rates[0]['time'].item() if hasattr(rates[0]['time'],'item') else rates[0]['time'],
-                        server_display_utc_offset_seconds=offset_at(quote_time['utc_time']) if quote_time else None),
+                        server_display_utc_offset_seconds=self.market_time_offset_seconds if quote_time else None),
                     now=self.clock(),spec=spec,quote=dict(bid=dec(tick.bid),ask=dec(tick.ask),
                         utc_time=quote_time['utc_time'] if quote_time else None),
                     candle=dict(id=int(candle_time),open=dec(rates[0]['open']),close=dec(rates[0]['close'])),

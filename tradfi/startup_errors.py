@@ -21,6 +21,7 @@ REASONS = {
  'MT5_CURRENCY_MODE': 'Счёт не удовлетворяет требованиям валюты UST/режима позиций. Проверьте тип счёта.',
  'MT5_SYMBOL': 'XAUUSD.s отсутствует или не показан в Обзоре рынка MT5.',
  'MT5_QUOTE': 'Котировка отсутствует или некорректна.',
+ 'MARKET_TIME_STATE': 'Профиль времени или ожидаемый счёт/сервер отличается от сохранённой базы. Запуск остановлен даже без открытых позиций: команды, долг, история и курсор сохранены. Для старой базы без привязки допустим только offset 0. Верните прежний профиль; не удаляйте базу и не сдвигайте сохранённые метки времени.',
  'TIME_PROFILE': 'Не выполнены требования профиля времени. Диагностика не меняет часы или допуски.',
  'PORT_BUSY': 'Порт панели занят. Не запускайте второй сервис; проверьте уже работающий процесс.',
  'LOCK_BUSY': 'Сервис, обновление или другая диагностика уже использует установку/счёт/состояние.',
@@ -56,8 +57,10 @@ def reason(exc):
     from .web_auth import WebAuthError
     from .time_profile import TimeProfileError
     from .storage import DurabilityError
+    from .market_time_state import MarketTimeStateError
     if isinstance(exc,json.JSONDecodeError): return 'CONFIG_JSON'
     if isinstance(exc,WebAuthError): return 'WEB_PASSWORD'
+    if isinstance(exc,MarketTimeStateError): return 'MARKET_TIME_STATE'
     if isinstance(exc,TimeProfileError): return 'TIME_PROFILE'
     if isinstance(exc,DurabilityError): return 'STATE_GUARD'
     if isinstance(exc,OSError) and (exc.errno in (98,10048) or getattr(exc,'winerror',None)==10048): return 'PORT_BUSY'

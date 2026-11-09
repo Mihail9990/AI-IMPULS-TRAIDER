@@ -106,6 +106,8 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
         resources.enter_context(owner_lock(account_lock_path(config)))
         store = Store(state_file)
         resources.callback(store.close)
+        from .market_time_state import bind_market_time_state
+        bind_market_time_state(store, config)
         bind_state(state_file, instance="live")
         from .evidence_broker import MT5EvidenceBroker
         broker = MT5EvidenceBroker(config, store=store,api=api,clock=clock,monotonic=monotonic)

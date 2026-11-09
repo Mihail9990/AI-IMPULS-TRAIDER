@@ -85,7 +85,7 @@ class LauncherTest(unittest.TestCase):
             self.assertNotIn(forbidden,text)
         self.assertIn('pause',text); self.assertIn('CreateNew',text)
     def test_actual_inspect_entrypoint_is_stateless_and_never_sends(self):
-        from test_tradfi_native_service import NativeAPI
+        from test_tradfi_native_service import LegacyNativeAPI as NativeAPI
         from tradfi.runtime import _run_mt5
         api=NativeAPI(); current=int(api.now//60)*60
         api.rates=[dict(time=t,open=3999.,close=4000.) for t in (current-120,current-60,current)]

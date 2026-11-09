@@ -15,8 +15,15 @@ from .engine import TERMINAL
 
 
 class ControlledRecoveryController(LatestCloseBasketController):
-    def __init__(self,*args,**kwargs):
-        super().__init__(*args,**kwargs)
+    def __init__(self,store,broker,**kwargs):
+        # Direct construction must enforce the same persisted clock contract as
+        # runtime startup, before inherited code can save/reconcile any state.
+        from .time_profile import BYBIT_PROFILE
+        config=getattr(broker,'config',None)
+        if isinstance(config,dict) and config.get('time_profile')==BYBIT_PROFILE:
+            from .market_time_state import bind_market_time_state
+            bind_market_time_state(store,config)
+        super().__init__(store,broker,**kwargs)
         self.state.setdefault('v3_settings',dict(entry_distance='1.00',count_presets=[4,6,10]))
         c=self.state.get('cycle')
         legacy=bool(c and (c.get('recovery_mode')!='V3' or c.get('manual_close') or c.get('range_override')))
