@@ -175,7 +175,8 @@ class NativePaperIsolationTest(unittest.TestCase):
         self.reader.safety.anchor=(self.api.now,self.api.now);self.reader.safety.result=dict(ok=True,checked_monotonic=self.api.now)
     def test_capability_has_no_trade_or_live_cycle_access_and_accepts_netting_data(self):
         self.assertFalse(hasattr(self.reader,'api'));self.assertFalse(hasattr(self.reader,'order_send'));self.assertFalse(hasattr(self.reader,'broker'))
-        market=self.reader.read();self.assertEqual(market['symbol'],'XAUUSD.s');self.assertEqual(market['quote']['utc_time'],self.api.now);self.assertFalse(self.writes)
+        self.assertEqual(self.reader.view()['timestamp_semantics'],'UNVERIFIED')
+        market=self.reader.read();self.assertEqual(market['timestamp_semantics'],'VERIFIED');self.assertEqual(market['symbol'],'XAUUSD.s');self.assertEqual(market['quote']['utc_time'],self.api.now);self.assertFalse(self.writes)
     def test_market_source_identity_change_does_not_rebind_or_relabel_currency(self):
         self.reader.read();self.api.account=self.api.account._replace(login=222222222)
         with self.assertRaises(OSError):self.reader.read()

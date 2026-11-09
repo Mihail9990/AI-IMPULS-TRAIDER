@@ -195,13 +195,15 @@ class MT5EvidenceBroker(MT5Broker):
         quote_time = self._check_quote_time(tick,'evidence_snapshot_return')
         if quote_time is None:
             candle_time = 0
+        # Native rates use NumPy int64. Normalize display metadata only; raw
+        # epoch value and the independently verified UTC contract stay unchanged.
         return dict(protocol=1,backend=self.backend_id,account=self.account,connected=True,hedging=True,
                     reconciliation_contract=self.evidence_contract,history_complete=False,
                     observations_usable=usable,obligations=obligations,ledger_facts=facts['deal'],
                     history_time_status='UNVERIFIED',settlement_basis='cycle_scoped_identity_v1',
                     mt5_timestamp_semantics='VERIFIED' if semantics_verified else 'UNVERIFIED',
                     mt5_display_time=dict(tick_time_msc=getattr(tick,'time_msc',None),
-                        candle_time=rates[0]['time'],
+                        candle_time=rates[0]['time'].item() if hasattr(rates[0]['time'],'item') else rates[0]['time'],
                         server_display_utc_offset_seconds=offset_at(quote_time['utc_time']) if quote_time else None),
                     now=self.clock(),spec=spec,quote=dict(bid=dec(tick.bid),ask=dec(tick.ask),
                         utc_time=quote_time['utc_time'] if quote_time else None),

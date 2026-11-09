@@ -49,12 +49,12 @@ class MarketReader:
             candles.append(row)
         candles.sort(key=lambda b:b['utc_time']);current=int(float(stamp)//60)*60
         if len({b['utc_time'] for b in candles})!=len(candles) or [b['utc_time'] for b in candles[-2:]]!=[current-60,current]:raise OSError('WAIT_FRESH_M1')
-        self.last=dict(source='MT5_READ_ONLY',symbol=self.symbol,status='FRESH',timestamp=float(stamp),tick_msc=int(tick.time_msc),
+        self.last=dict(source='MT5_READ_ONLY',symbol=self.symbol,timestamp_semantics='VERIFIED',status='FRESH',timestamp=float(stamp),tick_msc=int(tick.time_msc),
             quote=dict(bid=str(bid),ask=str(ask),utc_time=float(stamp)),candles=candles,spec=spec,
             candle=dict(id=int(candles[-2]['utc_time']),open=candles[-2]['open'],close=candles[-2]['close']))
         self.reason=None;return deepcopy(self.last)
     def view(self):
-        result=deepcopy(self.last) if self.last else dict(source='MT5_READ_ONLY',symbol=self.symbol,quote={},candles=[],timestamp=None,status='WAITING')
+        result=deepcopy(self.last) if self.last else dict(source='MT5_READ_ONLY',symbol=self.symbol,timestamp_semantics='UNVERIFIED',quote={},candles=[],timestamp=None,status='WAITING')
         age=None if result['timestamp'] is None else self.clock()-result['timestamp']
         result.update(age_seconds=age,status='FRESH' if self.reason is None and age is not None and -2<=age<=5 else 'WAITING',reason=self.reason)
         return result

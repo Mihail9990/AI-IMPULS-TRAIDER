@@ -38,6 +38,19 @@
  $('login-button').onclick=async()=>{const password=$('password').value;$('password').value='';try{const r=await fetch('/api/login',{method:'POST',headers:{...headers(),'Content-Type':'application/json'},body:JSON.stringify({password}),signal:AbortSignal.timeout(3000)});if(!r.ok)throw Error('Вход отклонён');$('login-error').textContent='';await poll();}catch(e){$('login-error').textContent=e.message;}};
  $('logout').onclick=async()=>{await fetch('/api/logout',{method:'POST',headers:{...headers(),'Content-Type':'application/json'},body:'{}'});location.reload();};
  // V3 reuses scoped receipts and snapshot revisions; no live execution is enabled here.
+ // Display-only helpers: timestamp labels never establish a trading time contract.
+ const feedUtcVerified=()=>view?.feed?.timestamp_semantics==='VERIFIED';
+ function utcLabel(timestamp,short=false){
+  if(!feedUtcVerified()||timestamp===null||timestamp===undefined||timestamp==='')return '';
+  const date=new Date(Number(timestamp)*1000);
+  return Number.isFinite(date.getTime())?(short?date.toISOString().slice(11,16):date.toISOString()):'';
+ }
+ function timeSafetyText(){
+  if(!view?.time_block)return '';
+  const reason=view.time_status?.current_reason??view.time_status?.latched_reason??view.time_block.reason;
+  const message={MT5_UTC_WAIT_FRESH_DATA:'ожидание свежего тика и M1.',MT5_UTC_WAIT_REFERENCE:'ожидание независимой проверки UTC.',MT5_UTC_CONTRACT_MISMATCH:'метки MT5 не соответствуют UTC; запустите read-only диагностику.',MT5_UTC_READ_TIMEOUT:'чтение MT5 заняло слишком долго.'}[reason]??'нужна повторная проверка времени.';
+  return 'Время: '+message+(reason?' ['+reason+']':'')+' Блокировка сохранена; нажмите «Проверить время» для повторной проверки.';
+ }
  let v3Fresh=false,v3PresetKey='';
  const v3Enabled=()=>view?.recovery_mode==='V3';
  const v3Blocked=()=>!view||!v3Fresh||busy||!!pending||view.read_only||!!view.manual_reason||!!view.migration_block||!!view.time_block;
@@ -67,7 +80,7 @@
   $('v3-submit-entry').disabled=blocked||!enabled||controls.can_enter!==true;
   $('v3-cancel-request').hidden=!view?.v3_request;
   $('v3-cancel-request').disabled=blocked||!enabled||!view?.v3_request;
-  const request=view?.v3_request;const targetTime=request&&Number.isFinite(Number(request.bar_id))?new Date((Number(request.bar_id)+60)*1000).toISOString().slice(11,19)+' UTC':'выбранной свечи';
+  const request=view?.v3_request;const targetTime=request&&Number.isFinite(Number(request.bar_id))?(utcLabel(Number(request.bar_id)+60)?utcLabel(Number(request.bar_id)+60).slice(11,19)+' UTC':'выбранной свечи (время не проверено)'):'выбранной свечи';
   $('v3-request-status').textContent=request?'Ожидается закрытие '+targetTime+': '+request.order_type+', '+request.count+' × 0.01. Направление по цвету свечи; doji — пропуск.':'Нет запланированного входа. Для следующей попытки RECOVERY дождитесь закрытия всей корзины.';
   const linked=!!view?.v3_link,canCancel=controls.can_cancel_link===true;
   $('v3-link-toggle').textContent=linked?'Отменить триггеры на SL':'Выставить триггеры на SL…';
@@ -108,8 +121,9 @@
   for(let i=0;i<=6;i++){const price=d.min+(d.max-d.min)*i/6,py=y(price);svg.append(node('line',{x1:0,x2:895,y1:py,y2:py,stroke:colors.grid}),node('text',{x:904,y:py+5,fill:'#afc0d2','font-size':labelSize},price.toFixed(2)));}
   const candles=(view.feed.candles??[]).slice(-80),w=880/Math.max(1,candles.length);candles.forEach((c,i)=>{const x=10+i*w,green=Number(c.close)>=Number(c.open),color=green?colors.up:colors.down;svg.append(node('line',{x1:x,x2:x,y1:y(Number(c.high)),y2:y(Number(c.low)),stroke:color}),node('rect',{x:x-w*.3,y:Math.min(y(Number(c.open)),y(Number(c.close))),width:Math.max(2,w*.6),height:Math.max(1,Math.abs(y(Number(c.open))-y(Number(c.close)))),fill:color}));});
   for(const l of lines){const py=y(l.price);if(py<0||py>frameHeight)continue;const g=node('g',{'data-line':l.key,visibility:prefs.mainCycle?'visible':'hidden'});g.append(node('line',{x1:0,x2:895,y1:py,y2:py,stroke:l.color,'stroke-width':2,'stroke-dasharray':'none'}),node('line',{x1:0,x2:895,y1:py,y2:py,stroke:'transparent','stroke-width':18}));g.append(node('title',{},l.label+' '+l.price.toFixed(2)));if(!labelRows.some(row=>Math.abs(row-py)<labelSize)){g.append(node('text',{x:902,y:py-5,fill:l.color,'font-size':labelSize-2},l.price.toFixed(2)));labelRows.push(py);}svg.append(g);}
-  candles.forEach((c,i)=>{if(i%Math.max(1,Math.floor(candles.length/5))===0&&c.utc_time){const label=new Date(c.utc_time*1000).toISOString().slice(11,16);svg.append(node('text',{x:10+i*w,y:frameHeight-10,fill:'#969ba6','font-size':labelSize},label));}});
-  svg.append(node('text',{x:900,y:frameHeight-10,fill:'#969ba6','font-size':labelSize},'UTC'));
+  candles.forEach((c,i)=>{if(i%Math.max(1,Math.floor(candles.length/5))===0&&utcLabel(c.utc_time,true)){const label=utcLabel(c.utc_time,true);svg.append(node('text',{x:10+i*w,y:frameHeight-10,fill:'#969ba6','font-size':labelSize},label));}});
+  svg.append(node('text',{x:900,y:frameHeight-10,fill:'#969ba6','font-size':labelSize},feedUtcVerified()?'UTC':'RAW'));
+  if(!feedUtcVerified())svg.append(node('title',{},'Время MT5 не проверено; часовые метки скрыты.'));
   if(!candles.length)svg.append(node('text',{x:300,y:250,fill:'#969ba6','font-size':20},'Ожидание данных MT5'));
   if(preview){const py=y(preview.value);svg.append(node('line',{x1:0,x2:895,y1:py,y2:py,stroke:'#fff','stroke-width':3,'stroke-dasharray':'none'}));}
   drawAnalysis();
@@ -125,10 +139,10 @@
  $('apply-level').onclick=async()=>{if(!preview)return;const p=preview,value=Number($('new-price').value);if(!Number.isFinite(value)||value<=0){error('Цена должна быть положительным числом.');return;}let action;if(p.line.kind==='trigger'){action={type:'basket_levels',cycle_id:p.backend.cycle_id,expected_orders:p.backend.orders.map(o=>o.id),expected:p.backend.levels,levels:{...p.backend.levels,[p.line.side]:String(value)}};}else{const position=p.backend.positions.find(x=>x.id===p.line.pid);action={type:'protection',cycle_id:p.backend.cycle_id,position_id:position.id,old:{sl:position.sl,tp:position.tp},new:{sl:position.sl,tp:position.tp,[p.line.kind]:String(value)}};}if(!confirm('Подтвердить '+p.line.label+' → '+value+'? SL меняется для всех живых билетов этой корзины, TP выбранного билета фиксируется вручную; незаданные TP пересчитываются для покрытия долга. Другие ручные TP сохраняются. Недопустимая сетка отклоняется.'))return;try{await send(action,p.backend.revision,p.backend.scope);preview=null;$('preview').hidden=true;}catch(e){error(e.message);}draw();};
  function render(){
   $('phase').textContent=view.phase;$('cycle').textContent=view.cycle_id??'Ожидание цикла';$('debt').textContent=view.debt+' UST';$('realized').textContent=(mode==='paper'?'Net модели: ':'Фактический net: ')+view.realized+' UST';$('feed-status').textContent=view.feed.status;$('mode').textContent=mode==='paper'?'PAPER · без реальных сделок':view.read_only?'READ_ONLY':view.stopped?'Новые входы остановлены':'EXECUTION';
-  $('safety').textContent=view.migration_block??view.manual_reason??(view.time_block?'Время: '+({MT5_UTC_WAIT_FRESH_DATA:'ожидание свежего тика и M1; после открытия рынка нажмите «Проверить время».',MT5_UTC_WAIT_REFERENCE:'ожидание независимой проверки UTC; нажмите «Проверить время».',MT5_UTC_CONTRACT_MISMATCH:'метки MT5 не соответствуют UTC; запустите read-only диагностику.',MT5_UTC_READ_TIMEOUT:'чтение MT5 заняло слишком долго; повторите проверку времени.'}[view.time_block.reason]??'нужна повторная проверка времени'):'');$('quote').textContent='Bid '+(view.feed.quote?.bid??'—')+' / Ask '+(view.feed.quote?.ask??'—')+' · возраст '+(view.feed.age_seconds??'—')+' сек.';
+  $('safety').textContent=view.migration_block??view.manual_reason??timeSafetyText();$('quote').textContent='Bid '+(view.feed.quote?.bid??'—')+' / Ask '+(view.feed.quote?.ask??'—')+' · возраст '+(view.feed.age_seconds??'—')+' сек.';
   $('state-heading').textContent=mode==='paper'?'Бумажные билеты и ордера':'Брокерское состояние';
   $('execution-note').textContent=mode==='paper'?'Это только модель. Нет реальных ордеров и брокерских SL/TP. Закрытие браузера не останавливает симуляцию.':'Открытые билеты сохраняют брокерские SL/TP. Закрытие браузера не останавливает сервис.';
-  $('source-label').textContent=(mode==='paper'?'Источник: MT5 read-only / бумажные исполнения':'Источник: MT5 / торговый контур')+' · '+(view.feed.timestamp?new Date(view.feed.timestamp*1000).toISOString():'нет свежего времени');
+  $('source-label').textContent=(mode==='paper'?'Источник: MT5 read-only / бумажные исполнения':'Источник: MT5 / торговый контур')+' · '+(utcLabel(view.feed.timestamp)||'время MT5 не проверено');
   $('paper-controls').hidden=mode!=='paper';$('paper-history').hidden=mode!=='paper';$('paper-deals').replaceChildren();
   if(mode==='paper')for(const deal of [...(view.paper?.history??[])].reverse()){const row=document.createElement('tr');const net=['profit','commission','swap','fee'].reduce((sum,k)=>sum+Number(deal[k]??0),0);for(const text of [new Date(deal.time*1000).toISOString(),deal.entry+' / '+deal.reason,deal.side+' / '+deal.volume,deal.price,net.toFixed(4)]){const cell=document.createElement('td');cell.textContent=text;row.append(cell);}$('paper-deals').append(row);}
   if(mode==='paper'){$('paper-status').textContent=view.paper?.paused_gap?'Перерыв данных или перезапуск. Пропущенные исполнения не восстанавливаются; подтвердите продолжение.':'Моделируются только наблюдаемые свежие тики. Пропущенный путь цены неизвестен.';if(document.activeElement!==$('paper-cost'))$('paper-cost').value=view.paper?.commission_per_lot_side??'0';}

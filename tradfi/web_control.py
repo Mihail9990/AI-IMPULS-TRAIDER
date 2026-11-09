@@ -104,6 +104,18 @@ class NativePanel:
         self.mailbox.drain(self.gateway,self.view)
         self.logs.capture('live',self.controller.store,self.controller.state,self.clock(),self.view())
         if self.paper_session:self.logs.capture('paper',self.paper_session.controller.store,self.paper_session.controller.state,self.clock(),self.paper_session.view())
+    def time_status(self):
+        # Presentation only: use cached diagnostics, never probe MT5/network or
+        # replace/clear the latched execution guard while rendering a view.
+        state=self.controller.state
+        safety=getattr(self.controller.broker,'time_safety',None)
+        verifier=getattr(safety,'semantics_verifier',None)
+        current=getattr(verifier,'reason',None)
+        result=getattr(safety,'result',None)
+        if current is None and isinstance(result,dict) and not result.get('ok'):
+            current=result.get('reason')
+        return dict(latched_reason=(state.get('time_block') or {}).get('reason'),current_reason=current)
+
     def view(self):
         s=self.controller.state;c=s.get('cycle') or {};snap=self.snapshot or {}
         feed=self.feed.view()
@@ -114,7 +126,7 @@ class NativePanel:
             settings=deepcopy(s['settings']),read_only=bool(getattr(self.controller.broker,'read_only',False)),
             legacy_recovery=c.get('recovery'),cycle_engine=c.get('engine'),stopped=s['stop'],
             modules=deepcopy(s['modules']),cycle_id=c.get('id'),recovery=deepcopy(c.get('fixed_recovery') or (s.get('fixed_recovery_carry') or {}).get('fixed_recovery')),
-            time_block=deepcopy(s.get('time_block')),feed=feed,quote=feed.get('quote'),timestamp=feed.get('timestamp'),
+            time_block=deepcopy(s.get('time_block')),time_status=self.time_status(),feed=feed,quote=feed.get('quote'),timestamp=feed.get('timestamp'),
             orders=deepcopy(snap.get('orders',[])),positions=deepcopy(snap.get('positions',[])),
             journal=[n['text'] for n in s['notifications'][-30:]],
             action_results={key:{'status':r['status'],'revision':r['revision'],'reason':r.get('reason')} for key,r in s.get('control_receipts',{}).items()})
@@ -135,7 +147,7 @@ class NativePanel:
             phase=s['phase'],read_only=bool(getattr(self.controller.broker,'read_only',False)),stopped=s['stop'],settings=deepcopy(s['basket_settings']),
             reverse_controls=self.controller.reverse_controls(snap) if hasattr(self.controller,'reverse_controls') else dict(can_enable=False,can_disable=False,reason='Нет поддержки обратной лестницы'),reverse_ladders=[dict(group=g['id'],**deepcopy(g['reverse_ladder'])) for g in c.get('groups',[]) if g.get('reverse_ladder') and not g.get('retired')],manual_close=deepcopy(c.get('manual_close')),range_override=deepcopy(c.get('range_override')),manual_close_settings=deepcopy(s.get('manual_close_settings',dict(mode='from_close',duration='once',same_distance='1',opposite_distance='2'))),tp_distances=deepcopy(s.get('tp_distances')),active_tp_distances=deepcopy(c.get('tp_distances')),range_policy=c.get('range_policy'),active_settings=deepcopy(c.get('cfg')),cycle_id=c.get('id'),debt=c.get('recovery',s.get('basket_carry','0')),realized=c.get('realized','0'),
             main_range=deepcopy(c.get('main_range')),frozen_levels=deepcopy(c.get('expanded')),levels=self.controller.levels(),edit=deepcopy(c.get('edit')),projection=projection,
-            recovery_writeoffs=deepcopy(s.get('recovery_writeoffs',[])[-20:]),migration_block=s.get('migration_block'),manual_reason=c.get('manual_reason'),time_block=deepcopy(s.get('time_block')),feed=feed,
+            recovery_writeoffs=deepcopy(s.get('recovery_writeoffs',[])[-20:]),migration_block=s.get('migration_block'),manual_reason=c.get('manual_reason'),time_block=deepcopy(s.get('time_block')),time_status=self.time_status(),feed=feed,
             tickets=deepcopy(list(c.get('tickets',{}).values())),orders=deepcopy(snap.get('orders',[])),positions=deepcopy(snap.get('positions',[])),
             journal=[n['text'] for n in s['notifications'][-50:]],
             action_results={key:{'status':r['status'],'revision':r['revision'],'reason':r.get('reason')} for key,r in s.get('control_receipts',{}).items()})

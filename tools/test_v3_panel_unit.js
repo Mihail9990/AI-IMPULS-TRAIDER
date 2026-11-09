@@ -4,8 +4,8 @@ const fs=require('fs'),vm=require('vm'),assert=require('assert'),path=require('p
 const root=path.resolve(__dirname,'../web/basket-panel'),src=fs.readFileSync(path.join(root,'panel.js'),'utf8'),html=fs.readFileSync(path.join(root,'index.html'),'utf8');
 const ids=[...html.matchAll(/id="([^"]+)"/g)].map(x=>x[1]);assert.equal(new Set(ids).size,ids.length,'unique HTML IDs');
 class Element{
- constructor(){this.value='';this.textContent='';this.disabled=false;this.hidden=false;this.open=true;this.dataset={};this.children=[];this.classList={toggle:()=>{}};this.events={};}
- append(x){this.children.push(x);}replaceChildren(...xs){this.children=xs;}querySelector(){return this.now??=new Element();}addEventListener(type,fn){this.events[type]=fn;}
+ constructor(){this.value='';this.textContent='';this.disabled=false;this.hidden=false;this.open=true;this.dataset={};this.children=[];this.classList={toggle:()=>{}};this.events={};this.attributes={};this.style={};this.clientHeight=520;this.clientWidth=1000;}
+ append(...xs){this.children.push(...xs);}setAttribute(k,v){this.attributes[k]=v;}replaceChildren(...xs){this.children=xs;}querySelector(){return this.now??=new Element();}addEventListener(type,fn){this.events[type]=fn;}
 }
 const elements=Object.fromEntries(ids.map(id=>[id,new Element()]));
 const $=id=>{assert(elements[id],'known element '+id);return elements[id];};
@@ -16,6 +16,43 @@ const ctx=vm.createContext({$,document:{createElement:()=>new Element()},view:st
 const part=src.slice(src.indexOf(' // V3 reuses scoped receipts'),src.indexOf(' function fields(){'));
 vm.runInContext(part,ctx);vm.runInContext('v3Fresh=true;v3FillSettings();v3Render()',ctx);
 async function main(){
+ // Execute actual chart rendering with verified, unverified and missing semantics.
+ ctx.svg=$('chart');ctx.ns='http://www.w3.org/2000/svg';ctx.document.createElementNS=()=>new Element();
+ Object.assign(ctx,{lines:[],zoom:1,pan:0,frameHeight:520,plotBottom:480,plotHeight:450,innerWidth:1000,preview:null,prefs:{colors:{}},drawAnalysis:()=>{}});
+ vm.runInContext(src.slice(src.indexOf(' function node('),src.indexOf(' function openPreview(')),ctx);
+ const stamp=1804800000;
+ const chartView={...structuredClone(base),levels:{},positions:[],orders:[],feed:{timestamp_semantics:'VERIFIED',timestamp:stamp,candles:[{utc_time:stamp,raw_time:stamp,open:1,close:2,low:1,high:2}],quote:{}}};
+ ctx.view=chartView;vm.runInContext('draw()',ctx);
+ assert($('chart').children.some(x=>x.textContent==='UTC'));
+ assert($('chart').children.some(x=>x.textContent===new Date(stamp*1000).toISOString().slice(11,16)));
+ for(const semantics of ['UNVERIFIED',undefined]){
+  ctx.view.feed.timestamp_semantics=semantics;vm.runInContext('draw()',ctx);
+  assert(!$('chart').children.some(x=>x.textContent==='UTC'),'unverified axis has no UTC claim');
+  assert(!$('chart').children.some(x=>/^\d\d:\d\d$/.test(x.textContent)),'unverified clock ticks hidden, even if utc_time is supplied');
+  assert($('chart').children.some(x=>x.textContent==='RAW'));
+  assert.equal(vm.runInContext('utcLabel(view.feed.timestamp)',ctx),'');
+ }
+ ctx.view.v3_request={bar_id:stamp,order_type:'STOP',count:6};vm.runInContext('v3Render()',ctx);
+ assert(!$('v3-request-status').textContent.includes('UTC'));
+ ctx.view.feed.timestamp_semantics='VERIFIED';vm.runInContext('v3Render()',ctx);
+ assert($('v3-request-status').textContent.includes('UTC'));
+ for(const timestamp of [null,undefined,'','not a timestamp',1e30])assert.equal(vm.runInContext('utcLabel('+JSON.stringify(timestamp)+')',ctx),'');
+ // Latest diagnostic is presentation-only; the original latch still blocks controls.
+ ctx.view=structuredClone(base);ctx.view.time_block={reason:'MT5_UTC_WAIT_REFERENCE'};
+ ctx.view.time_status={latched_reason:'MT5_UTC_WAIT_REFERENCE',current_reason:'MT5_UTC_CONTRACT_MISMATCH'};
+ const safetyLine=src.split('\n').find(line=>line.includes("$('safety').textContent="));ctx.view.feed={};
+ vm.runInContext(safetyLine+'v3Render()',ctx);
+ assert($('safety').textContent.includes('MT5_UTC_CONTRACT_MISMATCH'));
+ assert(!$('safety').textContent.includes('WAIT_REFERENCE'));
+ assert($('safety').textContent.includes('Блокировка сохранена'));
+ assert($('safety').textContent.includes('Проверить время'));
+ assert.equal($('v3-submit-entry').disabled,true);
+ assert.equal(ctx.view.time_block.reason,'MT5_UTC_WAIT_REFERENCE');
+ delete ctx.view.time_status;vm.runInContext(safetyLine,ctx);assert($('safety').textContent.includes('MT5_UTC_WAIT_REFERENCE'),'legacy snapshot fallback');
+ ctx.view.time_status={latched_reason:'MT5_UTC_WAIT_REFERENCE',current_reason:null};
+ vm.runInContext(safetyLine+'v3Render()',ctx);assert.equal($('v3-submit-entry').disabled,true,'null current reason cannot clear latch');
+ ctx.view.time_block=null;vm.runInContext(safetyLine,ctx);assert.equal($('safety').textContent,'','presentation status cannot establish latch');
+ ctx.view=structuredClone(base);vm.runInContext('v3Render()',ctx);
  // Execute the actual existing-button render assignment, retaining all legacy guards.
  const ownEntryLine=src.split('\n').find(line=>line.includes("$('own-entry-sl').disabled="));
  const renderOwn=()=>vm.runInContext(ownEntryLine,ctx);
