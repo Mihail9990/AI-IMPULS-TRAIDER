@@ -21,7 +21,7 @@ SOURCE=Path(__file__).resolve().parents[1]
 def archive(sha, extra=None):
     out=io.BytesIO()
     with zipfile.ZipFile(out,'w') as z:
-        for name in ['managed_release.json','requirements-tradfi-mt5.txt','tradfi_main.py','tradfi/runtime.py','tradfi/managed.py','tradfi_config.example.json']:
+        for name in ['managed_release.json','requirements-tradfi-mt5.txt','tradfi_main.py','tradfi/runtime.py','tradfi/managed.py','tradfi/paper_runtime.py','tradfi_config.example.json']:
             z.writestr('AI-IMPULS-TRAIDER-'+sha+'/'+name,(SOURCE/name).read_bytes())
         for name,data in (extra or []): z.writestr(name,data)
     return out.getvalue()

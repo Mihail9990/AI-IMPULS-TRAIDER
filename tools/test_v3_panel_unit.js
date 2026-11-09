@@ -2,6 +2,14 @@
 // Node-only DOM doubles: validates actual V3 handler code, not browser layout.
 const fs=require('fs'),vm=require('vm'),assert=require('assert'),path=require('path');
 const root=path.resolve(__dirname,'../web/basket-panel'),src=fs.readFileSync(path.join(root,'panel.js'),'utf8'),html=fs.readFileSync(path.join(root,'index.html'),'utf8');
+assert(!html.includes('tab-live')&&!html.includes('tab-paper'),'no mode tabs');
+assert(!src.includes('switchMode'),'role cannot switch');
+for(const role of ['live','paper']){
+ const c=vm.createContext({document:{body:{dataset:{role}}}});
+ vm.runInContext(src.slice(src.indexOf(' const mode='),src.indexOf(' let view=')),c);
+ assert.equal(vm.runInContext("apiPath('action')",c),role==='paper'?'/api/paper/action':'/api/action');
+ assert.throws(()=>vm.runInContext("mode='other'",c));
+}
 const ids=[...html.matchAll(/id="([^"]+)"/g)].map(x=>x[1]);assert.equal(new Set(ids).size,ids.length,'unique HTML IDs');
 class Element{
  constructor(){this.value='';this.textContent='';this.disabled=false;this.hidden=false;this.open=true;this.dataset={};this.children=[];this.classList={toggle:()=>{}};this.events={};this.attributes={};this.style={};this.clientHeight=520;this.clientWidth=1000;}

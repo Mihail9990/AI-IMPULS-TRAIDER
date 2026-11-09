@@ -98,22 +98,22 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
     # Both locks precede Store construction and ANY MT5 initialize/connect call.
     with ExitStack() as resources:
         from .managed import runtime_guard, stop_request, bind_state
-        resources.enter_context(runtime_guard(state_file))
+        resources.enter_context(runtime_guard(state_file, instance="live"))
         if stop_event is None:
-            stop_event = stop_request()
+            stop_event = stop_request(instance="live")
         state_file.parent.mkdir(parents=True, exist_ok=True)
         resources.enter_context(owner_lock(str(state_file)+'.lock'))
         resources.enter_context(owner_lock(account_lock_path(config)))
         store = Store(state_file)
         resources.callback(store.close)
-        bind_state(state_file)
+        bind_state(state_file, instance="live")
         from .evidence_broker import MT5EvidenceBroker
         broker = MT5EvidenceBroker(config, store=store,api=api,clock=clock,monotonic=monotonic)
         resources.callback(broker.close)
         broker.connect()
         from .recovery_v3 import ControlledRecoveryController
         controller = ControlledRecoveryController(store, broker,clock=clock,monotonic=monotonic)
-        panel=None;paper=None
+        panel=None
         web_config=config.get('web',{})
         if not isinstance(web_config,dict):raise ValueError('web must be a configuration object')
         if not isinstance(web_config.get('enabled',True),bool):raise ValueError('web.enabled must be boolean')
@@ -121,16 +121,9 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
             if web_config.get('host','127.0.0.1') not in {'127.0.0.1','::1'}:raise ValueError('Web server requires loopback')
             port=web_config.get('port',8765)
             if isinstance(port,bool) or not isinstance(port,int) or not 1024<=port<=65535:raise ValueError('Invalid loopback port')
-            from .paper_market import MarketReader
-            from .paper import PaperSession
-            paper_path=state_file.with_name(state_file.stem+'.paper.sqlite3')
-            if paper_path.resolve()==state_file:raise ValueError('Paper and live databases must be separate')
-            resources.enter_context(owner_lock(str(paper_path)+'.lock'))
-            paper=PaperSession(paper_path,MarketReader(broker.api,symbol=broker.symbol,clock=clock,monotonic=monotonic,expected_account=broker.account),clock=clock,monotonic=monotonic)
-            resources.callback(paper.close)
             from .web_control import NativePanel
             authority=('[::1]' if web_config.get('host')=='::1' else '127.0.0.1')+':'+str(port)
-            panel=(panel_factory or NativePanel)(controller,authority=authority,password=web_password if panel_factory is None else os.environ.get('TRADFI_WEB_PASSWORD'),clock=clock,monotonic=monotonic,public_origin=web_config.get('public_origin'),paper_session=paper)
+            panel=(panel_factory or NativePanel)(controller,authority=authority,password=web_password if panel_factory is None else os.environ.get('TRADFI_WEB_PASSWORD'),clock=clock,monotonic=monotonic,public_origin=web_config.get('public_origin'))
             resources.callback(panel.close)
             panel.start()
             controller.panel_url='http://'+authority+'/?controller=native'
@@ -152,7 +145,6 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
             if safety is not None and monotonic() >= next_time_check:
                 controller.refresh_time()
                 next_time_check = monotonic() + 30.
-            if paper is not None:paper.step()
             try:
                 controller.tick()
                 if panel is not None:panel.step()
@@ -165,7 +157,7 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description='TradFi MT5 runner')
-    parser.add_argument('--mode', choices=('simulate', 'mt5', 'gateway'), default='simulate')
+    parser.add_argument('--mode', choices=('simulate', 'mt5', 'paper', 'gateway'), default='simulate')
     parser.add_argument('--config', default='tradfi_config.json')
     parser.add_argument('--inspect', action='store_true', help='Read-only MT5 preflight; no SQLite/web/trading')
     parser.add_argument('--inspect-evidence', action='store_true', help='Read-only obligation evidence summary; never execute')
@@ -173,11 +165,16 @@ def main(argv=None):
     parser.add_argument('--service',action='store_true',help='Native MT5 + web service; trading disabled by default')
     parser.add_argument('--execute',action='store_true',help='Explicit execution activation; requires --service and config opt-ins')
     args = parser.parse_args(argv)
-    if (args.service and (args.mode!='mt5' or args.inspect or args.inspect_evidence)
+    if (args.service and (args.mode not in {'mt5','paper'} or args.inspect or args.inspect_evidence)
             or args.execute and not args.service):
         parser.error('--service requires --mode mt5 without inspect; --execute requires --service')
     if (args.inspect_evidence and args.mode != 'mt5') or (args.journal_snapshot and not args.inspect_evidence):
         parser.error('Evidence inspection requires --mode mt5 --inspect-evidence')
+    if args.mode == 'paper':
+        if args.execute or args.inspect or args.inspect_evidence or args.journal_snapshot:
+            parser.error('Paper cannot enable execution or live inspection')
+        from .paper_runtime import main as paper_main
+        return paper_main(['--config', args.config if args.config!='tradfi_config.json' else 'tradfi_paper_config.json'])
     if args.mode == 'simulate':
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:

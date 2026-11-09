@@ -32,7 +32,7 @@ class LogsTest(unittest.TestCase):
         self.assertEqual(code,200);self.assertIn('basket_stop',data['text'])
         code,body,headers=self.web.request('GET','/api/logs/download?scope=live',self.headers)
         self.assertEqual(code,200);self.assertIn('Логи',body.decode());self.assertIn('attachment;',headers['Content-Disposition']);self.assertLessEqual(len(body),1048576)
-        self.assertEqual(self.web.request('GET','/api/logs?scope=paper',self.headers)[0],200)
+        self.assertEqual(self.web.request('GET','/api/logs?scope=paper',self.headers)[0],400)
         self.headers['Origin']='https://evil.invalid';self.assertEqual(self.web.request('GET','/api/logs?scope=live',self.headers)[0],403)
     def test_reject_path_and_removed_demo_scope(self):
         self.login()

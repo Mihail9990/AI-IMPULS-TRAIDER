@@ -160,7 +160,8 @@ class NativeServiceTest(unittest.TestCase):
         config=dict(self.config,enable_trading=True,execution_contract='cycle_scoped_identity_v1',
                     legacy_ea_removed=True,legacy_state_reconciled=True)
         real_import=importlib.import_module
-        with patch.dict('os.environ',{'LOCALAPPDATA':str(self.root)}), \
+        with patch('tradfi.paper.PaperSession',side_effect=AssertionError('Live must never construct paper')), \
+             patch.dict('os.environ',{'LOCALAPPDATA':str(self.root)}), \
              patch('tradfi.mt5_adapter.importlib.import_module',side_effect=lambda name,*a,**kw: self.api.module() if name=='MetaTrader5' else real_import(name,*a,**kw)):
             _run_mt5(config,False,service=True,execute=True,panel_factory=PanelDouble,
                 stop_event=stopped,clock=lambda:self.api.now,monotonic=lambda:self.api.now)
@@ -262,10 +263,14 @@ class NativeServiceTest(unittest.TestCase):
         self_test=self
         # A stale enable_trading=true config cannot activate without --execute.
         real_import=importlib.import_module
-        with patch.dict('os.environ',{'LOCALAPPDATA':str(self.root)}), \
+        with patch('tradfi.paper.PaperSession',side_effect=AssertionError('Live must never construct paper')), \
+             patch.dict('os.environ',{'LOCALAPPDATA':str(self.root)}), \
              patch('tradfi.mt5_adapter.importlib.import_module',side_effect=lambda name,*a,**kw: self.api.module() if name=='MetaTrader5' else real_import(name,*a,**kw)):
             _run_mt5(dict(self.config,enable_trading=True),False,service=True,
                 panel_factory=PanelDouble,stop_event=stopped,clock=lambda:self.api.now,monotonic=lambda:self.api.now)
+        self.assertNotIn('paper_session', observed[0])
+        state_path=Path(self.config['state_file'])
+        self.assertFalse(state_path.with_name(state_path.stem+'.paper.sqlite3').exists())
         self.assertIn('READ_ONLY',observed[1]); self.assertEqual(self.api.initialized,1)
         self.assertFalse(self.api.sends); self.assertFalse(self.api.checks)
         with StoreContext(self.config['state_file']) as store:

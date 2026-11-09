@@ -12,7 +12,7 @@ from tradfi.web_control import WebTransport
 class Reader:
     def __init__(self):
         self.now=1793620830.;self.ms=int(self.now*1000);self.reason=None;self.safety=SimpleNamespace(check=lambda:None)
-        self.data=dict(symbol='XAUUSD.s',source='MT5_READ_ONLY',status='FRESH',timestamp=self.now,tick_msc=self.ms,
+        self.data=dict(symbol='XAUUSD.s',source='MT5_READ_ONLY',status='FRESH',timestamp_semantics='VERIFIED',timestamp=self.now,tick_msc=self.ms,
             quote=dict(bid='4000',ask='4000.10',utc_time=self.now),candle=dict(id=int(self.now//60)*60-60,open='3999',close='4000'),
             spec=dict(ARTIFICIAL_SPEC,volume_min='.01',volume_step='.01',contract_size='100',tick_value_profit='1',tick_value_loss='1'),candles=[])
     def read(self):
@@ -149,14 +149,14 @@ class PaperTest(unittest.TestCase):
         self.assertFalse(any(cmd['kind']=='MARKET' for cmd in self.session.controller.state['commands'].values()))
     def test_authenticated_route_namespaces_cannot_cross_live_scope(self):
         live=OwnerMailbox();live._view=dict(scope='LIVE',revision=0)
-        t=WebTransport(live,password='x'*32,paper_mailbox=self.session.mailbox);self.step()
-        h={'Host':'127.0.0.1:8765','X-Local-Control':'1','Content-Type':'application/json'}
+        t=WebTransport(self.session.mailbox,role='paper',authority='127.0.0.1:8766',password='x'*32);self.step()
+        h={'Host':'127.0.0.1:8766','X-Local-Control':'1','Content-Type':'application/json'}
         self.assertEqual(t.request('GET','/api/paper/state',h)[0],401)
         code,_,extra=t.request('POST','/api/login',h,json.dumps({'password':'x'*32}).encode());h['Cookie']=extra['Set-Cookie'].split(';')[0]
         self.assertEqual(t.request('GET','/api/paper/state',h)[1]['mode'],'PAPER')
         req=json.dumps(dict(id='same-id-001',revision=0,action=dict(type='command',text='/stop'))).encode()
         h['X-Controller-Scope']='LIVE';self.assertEqual(t.request('POST','/api/paper/action',h,req)[0],409)
-        h['X-Controller-Scope']=self.session.scope;self.assertEqual(t.request('POST','/api/action',h,req)[0],409)
+        h['X-Controller-Scope']=self.session.scope;self.assertEqual(t.request('POST','/api/action',h,req)[0],404)
         self.assertEqual(t.request('POST','/api/paper/action',h,req)[0],202);self.step();self.assertEqual(live.view(),dict(scope='LIVE',revision=0))
 
 class NativePaperIsolationTest(unittest.TestCase):
@@ -194,13 +194,13 @@ class NativePaperIsolationTest(unittest.TestCase):
         from tradfi.storage import Store
         from tradfi.basket import BasketController
         from tradfi.interactive_simulator import InteractiveSimulator
-        from tradfi.web_control import NativePanel
+        from tradfi.web_control import PaperPanel
         live_store=Store(Path(self.tmp.name)/'live.db');self.addCleanup(live_store.close)
         live=BasketController(live_store,InteractiveSimulator());live.broker.account='LIVE';live.broker.symbol='XAUUSD.s'
         paper=PaperSession(Path(self.tmp.name)/'paper.db',self.reader,clock=lambda:self.api.now,monotonic=lambda:self.api.now);self.addCleanup(paper.close)
-        panel=NativePanel(live,password='x'*32,paper_session=paper);paper.step()
+        panel=PaperPanel(paper,password='x'*32);paper.step()
         before=list(live_store.db.iterdump())
-        h={'Host':'127.0.0.1:8765','X-Local-Control':'1','Content-Type':'application/json'}
+        h={'Host':'127.0.0.1:8766','X-Local-Control':'1','Content-Type':'application/json'}
         _,_,extra=panel.transport.request('POST','/api/login',h,json.dumps({'password':'x'*32}).encode());h['Cookie']=extra['Set-Cookie'].split(';')[0];h['X-Controller-Scope']=paper.scope
         actions=[dict(type='tp_distances',cycle_id=None,distances=['.20']+[None]*19),dict(type='paper_costs',commission_per_lot_side='2'),dict(type='command',text='/start'),dict(type='command',text='/stop'),dict(type='paper_resume'),dict(type='paper_flatten',confirmed=True),dict(type='command',text='/reset_manual')]
         for i,a in enumerate(actions):
@@ -209,30 +209,75 @@ class NativePaperIsolationTest(unittest.TestCase):
         self.assertEqual(list(live_store.db.iterdump()),before);self.assertFalse(self.writes)
         paper.close();paper=PaperSession(Path(self.tmp.name)/'paper.db',self.reader,clock=lambda:self.api.now,monotonic=lambda:self.api.now);paper.step();paper.close()
         self.assertEqual(list(live_store.db.iterdump()),before)
-    def _run_runtime(self,execute):
+    def _run_runtime(self,hedging):
         from unittest.mock import patch
-        from tradfi.runtime import _run_mt5
-        from tradfi.web_control import NativePanel
-        from time_fixtures import verified_time
-        self.api.account=self.api.account._replace(margin_mode=self.api.ACCOUNT_MARGIN_MODE_RETAIL_HEDGING if execute else 0)
-        config=dict(terminal_path='C:/Program Files/MetaTrader 5/terminal64.exe',backend='mt5_direct_v1',time_profile='bybit_live6_time_v1',expected_server='Bybit-Live-6',expected_login=111111111,symbol='XAUUSD.s',magic=25101102,enable_trading=True,execution_contract='cycle_scoped_identity_v1',legacy_ea_removed=True,legacy_state_reconciled=True,state_file=str(Path(self.tmp.name)/'live.db'),log_file=str(Path(self.tmp.name)/'run.log'))
+        from tradfi.paper_runtime import _run_paper
+        from tradfi.web_control import PaperPanel
+        self.api.account=self.api.account._replace(margin_mode=self.api.ACCOUNT_MARGIN_MODE_RETAIL_HEDGING if hedging else 0)
+        config=dict(terminal_path='C:/Program Files/MetaTrader 5/terminal64.exe',backend='paper_mt5_quotes_v1',expected_server='Bybit-Live-6',expected_login=111111111,symbol='XAUUSD.s',state_file=str(Path(self.tmp.name)/'paper.db'))
         observed=[];outer=self
-        class Panel(NativePanel):
+        class Panel(PaperPanel):
             def start(self):observed.append(self)
             def close(self):pass
         class Stop:
             count=0
             def is_set(self):return self.count>=5
             def wait(self,seconds):
-                panel=observed[0];paper=panel.paper_session
+                paper=observed[0].paper_session
                 if self.count==0:
                     paper.action(dict(type='tp_distances',cycle_id=None,distances=['.20']+[None]*19))
                     paper.action(dict(type='command',text='/start'))
                 if self.count==3:paper.action(dict(type='command',text='/stop'))
                 outer.api.now+=1;self.count+=1
-        with patch('tradfi.runtime.account_lock_path',return_value=str(Path(self.tmp.name)/'account.lock')),patch('tradfi.paper_market.MarketReader',return_value=self.reader),patch('tradfi.time_safety.TimeSafety',side_effect=verified_time):
-            _run_mt5(config,False,service=True,execute=execute,api=self.api,panel_factory=Panel,stop_event=Stop(),clock=lambda:self.api.now,monotonic=lambda:self.api.now)
-        self.assertFalse(self.writes);self.assertEqual(observed[0].controller.state['phase'],'IDLE')
+        def forbidden(*a,**kw):raise AssertionError('No live account execution lock or login allowed')
+        self.api.login=forbidden
+        with patch('tradfi.runtime.account_lock_path',side_effect=forbidden):
+            _run_paper(config,api=self.api,panel_factory=Panel,reader_factory=lambda *a,**k:self.reader,stop_event=Stop(),clock=lambda:self.api.now,monotonic=lambda:self.api.now)
+        self.assertFalse(self.writes)
+        self.assertEqual(observed[0].authority,'127.0.0.1:8766')
+        self.assertFalse((Path(self.tmp.name)/'live.db').exists())
 
-    def test_runtime_assembly_with_execute_enabled_never_writes_from_paper(self):self._run_runtime(True)
-    def test_runtime_netting_account_with_live_disabled_still_serves_paper(self):self._run_runtime(False)
+    def test_independent_runtime_hedging_market_source(self):self._run_runtime(True)
+    def test_independent_runtime_netting_market_source(self):self._run_runtime(False)
+
+    def test_unverified_raw_chart_is_display_only(self):
+        self.reader.safety.result=None
+        paper=PaperSession(Path(self.tmp.name)/'unverified.db',self.reader,clock=lambda:self.api.now,monotonic=lambda:self.api.now)
+        self.addCleanup(paper.close)
+        paper.step()
+        raw=self.reader.view()
+        self.assertEqual(raw['timestamp_semantics'],'UNVERIFIED')
+        self.assertTrue(raw['candles']);self.assertTrue(raw['quote'])
+        self.assertIsNone(raw['quote']['utc_time']);self.assertIsNone(raw['age_seconds']);self.assertIsNone(raw['timestamp'])
+        self.assertTrue(all(c['utc_time'] is None and c['raw_time']>0 for c in raw['candles']))
+        self.assertIsNone(paper.exchange.market);self.assertFalse(paper.exchange.available)
+        with self.assertRaises(ActionRejected):paper.action(dict(type='command',text='/start'))
+        with self.assertRaises(ValueError):paper.exchange.observe(dict(raw,status='FRESH'))
+        self.assertFalse(self.writes)
+
+class IndependentPaperConfigurationTest(unittest.TestCase):
+    def test_default_state_preserves_former_embedded_identity_path(self):
+        from tradfi.paper_runtime import paper_state_path
+        with tempfile.TemporaryDirectory() as tmp:
+            live=Path(tmp)/'account.sqlite3'
+            self.assertEqual(paper_state_path({'live_state_file':str(live)}),live.with_name('account.paper.sqlite3'))
+            self.assertEqual(paper_state_path({'state_file':str(Path(tmp)/'custom.sqlite3')}),Path(tmp)/'custom.sqlite3')
+
+    def test_live_state_collision_rejected_before_mt5_initialize(self):
+        from tradfi.paper_runtime import _run_paper
+        from unittest.mock import Mock
+        api=Mock()
+        config=dict(terminal_path='terminal.exe',expected_login=1,expected_server='Bybit-Live-6',symbol='XAUUSD.s',state_file='same.sqlite3',live_state_file='same.sqlite3')
+        with self.assertRaisesRegex(ValueError,'separate'):_run_paper(config,api=api)
+        api.initialize.assert_not_called()
+
+    def test_paper_cli_alias_never_accepts_execution(self):
+        from tradfi.runtime import main
+        from unittest.mock import patch
+        import contextlib,io
+        with patch('tradfi.paper_runtime.main') as run:
+            main(['--mode','paper','--service','--config','paper.json'])
+            run.assert_called_once_with(['--config','paper.json'])
+        with patch('tradfi.paper_runtime.main') as run,contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):main(['--mode','paper','--service','--execute'])
+            run.assert_not_called()

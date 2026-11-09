@@ -1,3 +1,13 @@
+"""ARCHIVED legacy combined-panel diagnostic, not a production regression test.
+
+This historical script targets removed live/paper tabs and retired V1 manual-close
+controls. It must not run against separate-role V3 panels. Use test_v3_panel.py
+for the prepared V3 browser scenario, test_v3_panel_unit.js for Node handlers,
+and tests/test_tradfi_panel_isolation.py for actual transport/auth isolation.
+The historical body is retained below for reference only.
+"""
+raise SystemExit('Archived combined-panel diagnostic: use tools/test_v3_panel.py for separate-role V3 UI.')
+
 """Chromium on actual authenticated route handlers + two independent controllers. Offline."""
 from pathlib import Path
 import sys,json,time,secrets

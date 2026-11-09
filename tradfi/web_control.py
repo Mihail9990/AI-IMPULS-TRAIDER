@@ -16,11 +16,23 @@ from .control import OwnerMailbox,ActionGateway
 from .chart_feed import ChartFeed
 
 
+def panel_html(body,role):
+    """Render a fixed server role, never a client-selected execution target."""
+    import re
+    if role not in {'live','paper'}:raise ValueError('Invalid panel role')
+    body=body.replace(b'<body>',('<body data-controller="native" data-role="'+role+'">').encode())
+    body=body.replace(b'__PANEL_ROLE__',('PAPER · Симулятор' if role=='paper' else 'LIVE · Торговля').encode())
+    other='live' if role=='paper' else 'paper'
+    return re.sub(('<option value="'+other+'">[^<]*</option>').encode(),b'',body)
+
+
 class WebTransport:
-    def __init__(self,mailbox,*,authority='127.0.0.1:8765',password=None,clock=time.monotonic,public_origin=None,paper_mailbox=None,logs=None):
+    def __init__(self,mailbox,*,authority='127.0.0.1:8765',password=None,clock=time.monotonic,public_origin=None,role='live',logs=None):
         if urlsplit('http://'+authority).hostname not in {'127.0.0.1','::1'}:raise ValueError('Web server must bind loopback')
         self.logs=logs
-        self.mailbox=mailbox;self.paper_mailbox=paper_mailbox;self.authority=authority;self.password=password;self.clock=clock
+        if role not in {'live','paper'}:raise ValueError('Invalid panel role')
+        self._role=role;self.cookie_name='tradfi_'+role+'_session'
+        self.mailbox=mailbox;self.authority=authority;self.password=password;self.clock=clock
         self.origin=public_origin or 'http://'+authority
         parsed=urlsplit(self.origin)
         if public_origin and (parsed.scheme!='https' or not parsed.hostname or parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment):
@@ -28,6 +40,8 @@ class WebTransport:
         self.secure=bool(public_origin)
         self.sessions={};self.attempts=[];self.lock=threading.Lock()
         if password is not None:validate_password(password,host=urlsplit('http://'+authority).hostname,public_origin=public_origin)
+    @property
+    def role(self):return self._role
     def request(self,method,path,headers,body=b''):
         headers={k.lower():v for k,v in headers.items()};origin=self.origin
         def reply(code,value,cookie=None):return code,value,({'Set-Cookie':cookie} if cookie else {})
@@ -51,9 +65,9 @@ class WebTransport:
                 self.sessions={k:v for k,v in self.sessions.items() if v>now}
                 if len(self.sessions)>=32:return reply(429,{'error':'SESSION_LIMIT'})
                 sid=secrets.token_urlsafe(32);self.sessions[sid]=now+3600
-            return reply(200,{'status':'AUTHENTICATED'},'tradfi_session='+sid+'; HttpOnly; SameSite=Strict; Path=/; Max-Age=3600'+('; Secure' if self.secure else ''))
+            return reply(200,{'status':'AUTHENTICATED'},self.cookie_name+'='+sid+'; HttpOnly; SameSite=Strict; Path=/; Max-Age=3600'+('; Secure' if self.secure else ''))
         cookie=SimpleCookie()
-        try:cookie.load(headers.get('cookie',''));sid=cookie['tradfi_session'].value
+        try:cookie.load(headers.get('cookie',''));sid=cookie[self.cookie_name].value
         except (KeyError,ValueError,CookieError):return reply(401,{'error':'AUTH_REQUIRED'})
         with self.lock:
             if self.sessions.get(sid,0)<=self.clock():return reply(401,{'error':'SESSION_EXPIRED'})
@@ -62,18 +76,19 @@ class WebTransport:
             try:
                 query=parse_qs(urlsplit(path).query,strict_parsing=True)
                 if set(query)-{'scope','page'} or any(len(v)!=1 for v in query.values()):raise ValueError()
-                scope=query.get('scope',['live'])[0];page=int(query.get('page',['0'])[0])
+                scope=query.get('scope',[self.role])[0];page=int(query.get('page',['0'])[0])
+                if scope not in {self.role,'runtime'}:raise ValueError()
                 value=self.logs.response(scope,page,download=route.endswith('/download'))
                 if isinstance(value,bytes):return 200,value,{'Content-Disposition':'attachment; filename="tradfi-'+scope+'-logs.txt"'}
                 return reply(200,value)
             except ValueError:return reply(400,{'error':'INVALID_LOG_REQUEST'})
-        mailbox=self.paper_mailbox if route.startswith('/api/paper/') else self.mailbox
-        if route.startswith('/api/paper/') and mailbox is None:return reply(404,{'error':'PAPER_UNAVAILABLE'})
-        if method=='GET' and route in {'/api/state','/api/paper/state'}:return reply(200,mailbox.view())
+        mailbox=self.mailbox
+        prefix='/api/paper/' if self.role=='paper' else '/api/'
+        if method=='GET' and route==prefix+'state':return reply(200,mailbox.view())
         if method=='POST' and route=='/api/logout':
             with self.lock:self.sessions.pop(sid,None)
-            return reply(200,{'status':'SIGNED_OUT'},'tradfi_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0')
-        if method=='POST' and route in {'/api/action','/api/paper/action'}:
+            return reply(200,{'status':'SIGNED_OUT'},self.cookie_name+'=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0')
+        if method=='POST' and route==prefix+'action':
             view=mailbox.view()
             if not view.get('scope') or headers.get('x-controller-scope')!=view['scope']:return reply(409,{'error':'SCOPE_CHANGED'})
             try:return reply(202,mailbox.submit(json.loads(body)))
@@ -83,13 +98,13 @@ class WebTransport:
 
 
 class NativePanel:
-    def __init__(self,controller,*,authority='127.0.0.1:8765',password=None,clock=time.time,monotonic=time.monotonic,public_origin=None,paper_session=None):
-        self.controller=controller;self.clock=clock;self.monotonic=monotonic;self.paper_session=paper_session
+    def __init__(self,controller,*,authority='127.0.0.1:8765',password=None,clock=time.time,monotonic=time.monotonic,public_origin=None):
+        self.controller=controller;self.clock=clock;self.monotonic=monotonic
         self.mailbox=OwnerMailbox();self.gateway=ActionGateway(controller,execute=controller.action)
         self.feed=ChartFeed(controller.broker,clock=clock,monotonic=monotonic)
         from .web_logs import DiagnosticLogs
         self.logs=DiagnosticLogs(controller.broker.config.get('log_file','tradfi_mt5.log') if hasattr(controller.broker,'config') else None)
-        self.transport=WebTransport(self.mailbox,authority=authority,password=password,clock=monotonic,public_origin=public_origin,paper_mailbox=paper_session.mailbox if paper_session else None,logs=self.logs)
+        self.transport=WebTransport(self.mailbox,authority=authority,password=password,clock=monotonic,public_origin=public_origin,logs=self.logs)
         self.authority=authority;self.next_feed=0;self.snapshot=None;self.server=None
         if 'web_store_id' not in controller.state:
             controller.state['web_store_id']=uuid.uuid4().hex
@@ -103,7 +118,6 @@ class NativePanel:
             self.next_feed=self.monotonic()+1
         self.mailbox.drain(self.gateway,self.view)
         self.logs.capture('live',self.controller.store,self.controller.state,self.clock(),self.view())
-        if self.paper_session:self.logs.capture('paper',self.paper_session.controller.store,self.paper_session.controller.state,self.clock(),self.paper_session.view())
     def time_status(self):
         # Presentation only: use cached diagnostics, never probe MT5/network or
         # replace/clear the latched execution guard while rendering a view.
@@ -166,7 +180,7 @@ class NativePanel:
                 static={'/':('index.html','text/html'),'/panel.js':('panel.js','text/javascript'),'/panel.css':('panel.css','text/css')}
                 if self.command=='GET' and route in static and self.headers.get('Host')==authority:
                     filename,mime=static[route];body=(ROOT/filename).read_bytes()
-                    if filename=='index.html':body=body.replace(b'<body>',b'<body data-controller="native">')
+                    if filename=='index.html':body=panel_html(body,transport.role)
                     self.reply(200,body,mime,{});return
                 try:size=int(self.headers.get('Content-Length','0'))
                 except ValueError:size=-1
@@ -196,3 +210,18 @@ class NativePanel:
     def close(self):
         self.logs.close()
         if self.server:self.server.shutdown();self.server.server_close()
+
+
+class PaperPanel:
+    """Paper-only HTTP owner; uses PaperSession presentation, never native feeds."""
+    def __init__(self,paper_session,*,authority='127.0.0.1:8766',password=None,clock=time.time,monotonic=time.monotonic,public_origin=None):
+        from .web_logs import DiagnosticLogs
+        self.paper_session=paper_session;self.controller=paper_session.controller
+        self.mailbox=paper_session.mailbox;self.clock=clock;self.authority=authority;self.server=None
+        self.logs=DiagnosticLogs(getattr(paper_session,'log_file',None))
+        self.transport=WebTransport(self.mailbox,authority=authority,password=password,clock=monotonic,public_origin=public_origin,role='paper',logs=self.logs)
+    def view(self):return self.paper_session.view()
+    def step(self):
+        self.logs.capture('paper',self.controller.store,self.controller.state,self.clock(),self.view())
+    start=NativePanel.start
+    close=NativePanel.close

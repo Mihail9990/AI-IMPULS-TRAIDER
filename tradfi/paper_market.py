@@ -17,8 +17,37 @@ class MarketReader:
         proxy=SimpleNamespace(symbol_info_tick=self._tick,copy_rates_from_pos=self._bars,TIMEFRAME_M1=self.tf)
         self.verifier=NativeUTCVerifier(SimpleNamespace(api=proxy,symbol=symbol,monotonic=monotonic,max_age=5),self.safety)
         self.safety.semantics_verifier=self.verifier
-        self.next_check=0;self.last=None;self.reason='WAIT_FRESH_MT5'
+        self.next_check=0;self.last=None;self.raw=None;self.reason='WAIT_FRESH_MT5'
+    def read_raw(self):
+        """Display-only native timestamps. Never an exchange observation or a UTC claim."""
+        self.raw=None
+        account=self._account_info()
+        if account is None:raise OSError('MT5_SOURCE_UNAVAILABLE')
+        identity=str(account.login)+'@'+account.server
+        if account.currency!='UST' or account.server!='Bybit-Live-6':raise ValueError('Unsupported source currency/server')
+        if self._expected_account is None:self._expected_account=identity
+        if identity!=self._expected_account:raise OSError('MT5_SOURCE_IDENTITY_CHANGED')
+        tick=self._tick(self.symbol);bars=self._bars(self.symbol,self.tf,0,120)
+        if tick is None or bars is None:raise OSError('WAIT_FRESH_MT5')
+        bid=number(tick.bid);ask=number(tick.ask);stamp=number(tick.time_msc)/1000
+        if bid<=0 or ask<bid:raise ValueError('Invalid quote')
+        candles=[]
+        for b in bars:
+            t=number(b['time']);row=dict(utc_time=None,raw_time=float(t),**{k:str(number(b[k])) for k in ('open','high','low','close')})
+            if t<=0 or number(row['low'])<=0 or number(row['low'])>min(number(row['open']),number(row['close'])) or number(row['high'])<max(number(row['open']),number(row['close'])):raise ValueError('Invalid OHLC')
+            candles.append(row)
+        candles.sort(key=lambda b:b['raw_time'])
+        self.raw=dict(source='MT5_READ_ONLY',symbol=self.symbol,timestamp_semantics='UNVERIFIED',status='WAITING',timestamp=None,observed_local_wall_time=self.clock(),display_time=dict(tick_time_msc=int(tick.time_msc)),
+            quote=dict(bid=str(bid),ask=str(ask),utc_time=None),candles=candles)
+        return deepcopy(self.raw)
     def read(self):
+        try:
+            return self._read_verified()
+        except Exception:
+            self.reason=self.reason or 'WAIT_FRESH_MT5'
+            raise
+    def _read_verified(self):
+        self.read_raw()
         self.safety.poll_refresh()
         if self.monotonic()>=self.next_check:self.safety.request_refresh();self.next_check=self.monotonic()+30
         reason=self.safety.check()
@@ -54,7 +83,7 @@ class MarketReader:
             candle=dict(id=int(candles[-2]['utc_time']),open=candles[-2]['open'],close=candles[-2]['close']))
         self.reason=None;return deepcopy(self.last)
     def view(self):
-        result=deepcopy(self.last) if self.last else dict(source='MT5_READ_ONLY',symbol=self.symbol,timestamp_semantics='UNVERIFIED',quote={},candles=[],timestamp=None,status='WAITING')
+        result=deepcopy(self.last if self.reason is None else self.raw) if (self.last if self.reason is None else self.raw) else dict(source='MT5_READ_ONLY',symbol=self.symbol,timestamp_semantics='UNVERIFIED',quote={},candles=[],timestamp=None,status='WAITING')
         age=None if result['timestamp'] is None else self.clock()-result['timestamp']
         result.update(age_seconds=age,status='FRESH' if self.reason is None and age is not None and -2<=age<=5 else 'WAITING',reason=self.reason)
         return result

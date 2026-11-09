@@ -149,7 +149,9 @@ def run(root,output,*,api=None,busy=port_busy,exists=None,clock=time.time):
     from install_tradfi import lock,account_lock,state_lock
     try:
         with ExitStack() as stack:
-            try:stack.enter_context(lock(root/'operation.lock'))
+            try:
+                stack.enter_context(lock(root/'operation.lock'))
+                for instance in ('live','paper'):stack.enter_context(lock(root/('instance-'+instance+'.lock')))
             except Exception:report.add('ERROR','LOCK_BUSY');return False
             previous=root/'data'/'startup-error.txt'
             try:

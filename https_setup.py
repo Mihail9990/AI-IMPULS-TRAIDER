@@ -604,7 +604,7 @@ def wizard(manager):
         if job.busy:return
         def work():
             if not locked:return action()
-            with lock(manager.root/'operation.lock'),account_lock(manager.root,manager.config()),state_lock(manager.root,manager.config()):return action()
+            with lock(manager.root/'operation.lock'),lock(manager.root/'instance-live.lock'),lock(manager.root/'instance-paper.lock'),account_lock(manager.root,manager.config()),state_lock(manager.root,manager.config()):return action()
         pending=done
         if job.start(work):status.set('Выполняется. Окно остаётся доступным; дождитесь результата.');refresh()
     def poll():

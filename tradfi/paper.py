@@ -41,6 +41,9 @@ class PaperExchange:
         self.p['positions'].append(dict(id=pid,side=o['side'],entry=str(price),size=o['size'],sl=o['sl'],tp=o['tp'],owned=True))
         self.p['deals'].append(dict(id='in-'+pid,position_id=pid,order_id=o['id'],command_id=o['command_id'],entry='IN',side=o['side'],volume=o['size'],price=str(price),reason='EXPERT',profit='0',commission=self._fee(o['size']),swap='0',fee='0',time=self.clock()))
     def observe(self,market):
+        if market.get('timestamp_semantics')!='VERIFIED':
+            self.available=False
+            raise ValueError('Paper requires verified timestamp semantics')
         if market['symbol']!=self.symbol:raise ValueError('Wrong paper symbol')
         Spec.load(market['spec'])
         if self.p['cursor'] is not None and market['tick_msc']<self.p['cursor']:return
@@ -162,6 +165,7 @@ class PaperSession:
             market=self.reader.read();self.exchange.observe(market)
             if not self.exchange.p['paused_gap']:self.controller.tick()
             self.snapshot=self.exchange.snapshot()
+        except DurabilityError:raise
         except Exception:self.exchange.available=False;self.reader.reason=self.reader.reason or 'WAIT_FRESH_MT5'
         self.mailbox.drain(self.gateway,self.view)
     def view(self):
