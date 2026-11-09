@@ -13,6 +13,7 @@ for(const role of ['live','paper']){
 const ids=[...html.matchAll(/id="([^"]+)"/g)].map(x=>x[1]);assert.equal(new Set(ids).size,ids.length,'unique HTML IDs');
 class Element{
  constructor(){this.value='';this.textContent='';this.disabled=false;this.hidden=false;this.open=true;this.dataset={};this.children=[];this.classList={toggle:()=>{}};this.events={};this.attributes={};this.style={};this.clientHeight=520;this.clientWidth=1000;}
+ focus(){}
  append(...xs){this.children.push(...xs);}setAttribute(k,v){this.attributes[k]=v;}replaceChildren(...xs){this.children=xs;}querySelector(){return this.now??=new Element();}addEventListener(type,fn){this.events[type]=fn;}
 }
 const elements=Object.fromEntries(ids.map(id=>[id,new Element()]));
@@ -26,7 +27,7 @@ vm.runInContext(part,ctx);vm.runInContext('v3Fresh=true;v3FillSettings();v3Rende
 async function main(){
  // Execute actual chart rendering with verified, unverified and missing semantics.
  ctx.svg=$('chart');ctx.ns='http://www.w3.org/2000/svg';ctx.document.createElementNS=()=>new Element();
- Object.assign(ctx,{lines:[],zoom:1,pan:0,frameHeight:520,plotBottom:480,plotHeight:450,innerWidth:1000,preview:null,prefs:{colors:{}},drawAnalysis:()=>{}});
+ Object.assign(ctx,{lines:[],zoom:1,pan:0,timeOffset:0,visibleCount:60,frameHeight:520,plotBottom:480,plotHeight:450,innerWidth:1000,preview:null,previewFocus:null,previewWasOpen:false,prefs:{colors:{}},drawAnalysis:()=>{}});
  vm.runInContext(src.slice(src.indexOf(' function node('),src.indexOf(' function openPreview(')),ctx);
  const stamp=1804800000;
  const chartView={...structuredClone(base),levels:{},positions:[],orders:[],feed:{timestamp_semantics:'VERIFIED',timestamp:stamp,candles:[{utc_time:stamp,raw_time:stamp,open:1,close:2,low:1,high:2}],quote:{}}};
@@ -113,6 +114,38 @@ async function main(){
  assert.equal(actions.at(-1).a.settings.INITIAL_SIZE,'0.02');assert.equal(actions.at(-1).a.settings.BASKET_COUNT,8);
  assert(!dialogs.at(-1).includes('EXPANSION_DISTANCE'));assert(!dialogs.at(-1).includes('TICKET_SIZE'));
  $('v3-sl-panel').open=false;$('v3-sl-panel').events.toggle();assert.equal(store.get('v3-sl-panel-open'),'false');assert.equal($('v3-entry-panel').open,true);
+ // Actual viewport, quote rendering and navigation code; no action requests allowed.
+ ctx.view={...structuredClone(chartView),feed:{...chartView.feed,timestamp_semantics:'VERIFIED',quote:{bid:'1.50',ask:'1.55'},candles:Array.from({length:180},(_,i)=>({utc_time:stamp+i*60,open:1,close:2,low:1,high:2}))}};
+ ctx.visibleCount=60;ctx.timeOffset=0;vm.runInContext('draw()',ctx);
+ assert.equal($('chart').dataset.firstCandle,String(stamp+120*60));
+ assert.equal($('chart').children.filter(x=>x.attributes['data-quote']).length,2,'Bid/Ask rendered independently of positions');
+ $('chart').setPointerCapture=()=>{};$('chart').getBoundingClientRect=()=>({left:0,top:0,width:390,height:600});
+ ctx.hold=null;ctx.gesture=null;ctx.setTimeout=()=>123;ctx.clearTimeout=()=>{};
+ vm.runInContext(src.slice(src.indexOf(' const pointers=new Map()'),src.indexOf(" $('cancel-level').onclick")),ctx);
+ const event=(id,x,y)=>({pointerId:id,clientX:x,clientY:y,target:{closest:()=>null},preventDefault:()=>{},type:'pointerup'});
+ before=actions.length;
+ $('chart').events.pointerdown(event(1,80,300));$('chart').events.pointermove(event(1,180,300));$('chart').events.pointerup(event(1,180,300));
+ assert(Number($('chart').dataset.firstCandle)<stamp+120*60,'drag right reveals older candles');
+ const first=Number($('chart').dataset.firstCandle);
+ $('chart').events.pointerdown(event(2,150,400));$('chart').events.pointermove(event(2,150,200));$('chart').events.pointerup(event(2,150,200));
+ assert(Number($('chart').dataset.firstCandle)<first,'forward swipe reveals older candles');
+ const count=ctx.visibleCount;
+ $('chart').events.pointerdown(event(3,100,200));$('chart').events.pointerdown(event(4,200,200));$('chart').events.pointermove(event(4,300,200));
+ assert(ctx.visibleCount<count,'pinch out zooms candles');$('chart').events.pointerup(event(3,100,200));$('chart').events.pointerup(event(4,300,200));
+ $('chart-reset').onclick();assert.equal(ctx.timeOffset,0);assert.equal(ctx.visibleCount,60);
+ ctx.requestAnimationFrame=fn=>fn();ctx.document.addEventListener=()=>{};
+ for(const e of Object.values(elements))e.focus=()=>{};
+ vm.runInContext(src.slice(src.indexOf(' // Presentation-only navigation:'),src.indexOf(' layout();window.addEventListener')),ctx);
+ $('tab-settings').onclick();assert.equal($('chart-page').hidden,true);assert.equal($('settings-page').hidden,false);assert.equal($('tab-settings').attributes['aria-selected'],'true');
+ $('tab-chart').onclick();assert.equal($('chart-page').hidden,false);
+ $('drawer-toggle').onclick();assert.equal($('drawer-content').hidden,false);$('drawer-toggle').onclick();assert.equal($('drawer-content').hidden,true);
+ ctx.preview={line:{},value:1};$('tab-settings').onclick();assert.equal($('settings-page').hidden,true,'active edit preview cannot disappear behind settings');ctx.preview=null;
+ ctx.view.feed.status='FRESH';vm.runInContext('v3Fresh=true;connectionLabel()',ctx);assert.equal($('chart').dataset.feedFresh,'true');
+ vm.runInContext('v3Fresh=false;connectionLabel()',ctx);assert($('drawer-toggle').textContent.includes('нет свежего снимка'));assert.equal($('chart').dataset.feedFresh,'false');
+ ctx.view.feed.timestamp_semantics='UNVERIFIED';vm.runInContext('v3Fresh=true;connectionLabel()',ctx);assert($('drawer-toggle').textContent.includes('время не проверено'));
+ ctx.preview={value:1.5};vm.runInContext('draw()',ctx);assert.equal($('preview-backdrop').hidden,false);assert.equal($('command-drawer').inert,true);assert.equal($('bottom-tabs').inert,true);
+ ctx.preview=null;vm.runInContext('draw()',ctx);assert.equal($('preview-backdrop').hidden,true);assert.equal($('command-drawer').inert,false);
+ assert.equal(actions.length,before,'all gestures and navigation are display-only');
  console.log('PASS Node V3 handler tests: actual source, DOM doubles, inputs/actions/revisions, V3-only controls, legacy migration guard, confirmation/cancel, controls, stale/read-only/UNKNOWN guards. Browser layout NOT verified.');
 }
 main().catch(e=>{console.error(e);process.exit(1);});

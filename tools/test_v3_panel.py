@@ -66,7 +66,9 @@ def main():
             p.on('dialog',dialog)
             def wait(js):p.wait_for_function(js,timeout=7000)
             p.goto('http://127.0.0.1:8765/');p.locator('#workspace').wait_for(state='visible')
-            p.locator('#v3-panels').wait_for(state='visible');assert p.locator('#v3-settings').is_visible()
+            assert p.locator('#chart-page').is_visible();assert not p.locator('#settings-page').is_visible()
+            assert not p.locator('#start').is_visible();assert p.locator('#chart [data-quote]').count()==2
+            p.locator('#drawer-toggle').click();p.locator('#v3-panels').wait_for(state='visible');assert not p.locator('#v3-settings').is_visible()
             for removed in ('manual-close-controls','manual-close-submit','recovery-mode','save-recovery-mode'):
                 assert p.locator('#'+removed).count()==0
             assert p.locator('#v3-side').is_disabled()
@@ -88,14 +90,14 @@ def main():
             assert requests[-1]['action']['type']=='v3_cancel_link'
             # Each side panel collapses independently, persists after reload, never sends a command.
             before=len(requests);p.locator('#v3-sl-panel > summary').click();assert not p.locator('#v3-sl-panel').evaluate('(x)=>x.open');assert p.locator('#v3-entry-panel').evaluate('(x)=>x.open')
-            p.reload();p.locator('#workspace').wait_for(state='visible');assert not p.locator('#v3-sl-panel').evaluate('(x)=>x.open');assert len(requests)==before
+            p.reload();p.locator('#workspace').wait_for(state='visible');p.locator('#drawer-toggle').click();assert not p.locator('#v3-sl-panel').evaluate('(x)=>x.open');assert len(requests)==before
             p.locator('#v3-sl-panel > summary').click()
-            for w in (360,390,412,768,1280):
+            for w in (320,360,390,430,768,900,1280):
                 p.set_viewport_size(dict(width=w,height=900));assert p.evaluate('document.documentElement.scrollWidth<=innerWidth'),w
             p.set_viewport_size(dict(width=390,height=844))
             # Separate addresses and fixed roles share a host cookie jar, not controllers.
             pp=context.new_page();pp.on('pageerror',lambda e:errors.append(str(e)));pp.on('dialog',dialog)
-            pp.goto('http://127.0.0.1:8766/');pp.locator('#workspace').wait_for(state='visible')
+            pp.goto('http://127.0.0.1:8766/');pp.locator('#workspace').wait_for(state='visible');pp.locator('#drawer-toggle').click()
             assert p.locator('body').get_attribute('data-role')=='live'
             assert pp.locator('body').get_attribute('data-role')=='paper'
             for page in (p,pp):assert page.locator('#tab-live, #tab-paper').count()==0
@@ -104,11 +106,32 @@ def main():
             assert p.locator('#v3-sl-value').inner_text()=='1.50'
             for page,path in [(p,'/api/paper/state'),(pp,'/api/state')]:
                 assert page.evaluate("async path => (await fetch(path,{headers:{'X-Local-Control':'1'}})).status",path)==404
-            p.locator('#logout').click();p.locator('#login').wait_for(state='visible')
+            p.locator('#tab-settings').click();p.locator('#logout').click();p.locator('#login').wait_for(state='visible')
             assert pp.evaluate("async () => (await fetch('/api/paper/state',{headers:{'X-Local-Control':'1'}})).status")==200
             assert {c['name'] for c in context.cookies()}=={'tradfi_paper_session'}
-            p.locator('#password').fill('offline-live');p.locator('#login-button').click();p.locator('#workspace').wait_for(state='visible')
+            p.locator('#password').fill('offline-live');p.locator('#login-button').click();p.locator('#workspace').wait_for(state='visible');p.locator('#drawer-toggle').click()
             pp.close()
+            # Chart-first shell; all supported mobile widths and landscape, no action side effects.
+            before=len(requests)
+            for width,height in ((320,640),(360,780),(390,844),(430,932),(768,1024),(900,650),(1280,800),(844,390)):
+                p.set_viewport_size(dict(width=width,height=height))
+                p.locator('#tab-chart').click()
+                if p.locator('#drawer-toggle').get_attribute('aria-expanded')=='true':p.locator('#drawer-toggle').click()
+                chart=p.locator('#chart').bounding_box();nav=p.locator('#bottom-tabs').bounding_box()
+                assert chart['y']<3 and chart['height']>150,(width,height,chart)
+                assert nav['y']+nav['height']<=height+1
+                assert p.evaluate('document.documentElement.scrollWidth<=innerWidth'),width
+                p.locator('#drawer-toggle').click()
+                assert p.locator('#chart').bounding_box()['height']>80
+                assert p.locator('#drawer-content').bounding_box()['y']>=p.locator('#chart').bounding_box()['y']
+                p.locator('#tab-settings').click();assert p.locator('#start').is_visible();assert not p.locator('#chart').is_visible()
+                assert p.evaluate('document.documentElement.scrollWidth<=innerWidth'),width
+            assert len(requests)==before,'view navigation never sends commands'
+            p.set_viewport_size(dict(width=390,height=844));p.locator('#tab-chart').click()
+            p.screenshot(path='/tmp/trader-command-drawer.png')
+            p.locator('#drawer-toggle').click();p.screenshot(path='/tmp/trader-clean-chart.png')
+            p.locator('#tab-settings').click();p.screenshot(path='/tmp/trader-settings.png')
+            p.locator('#tab-chart').click();p.locator('#drawer-toggle').click()
             # Legacy active snapshots remain visible but fail closed with a reason.
             state['recovery_mode']='V1';state['migration_block']='Legacy active cycle needs reconciliation'
             wait("document.querySelector('#safety').textContent.includes('Legacy active cycle')")

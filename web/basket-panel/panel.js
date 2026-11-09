@@ -5,10 +5,10 @@
  let plotBottom=480,plotHeight=450,frameHeight=520;
  const storageKey=k=>'basket-'+k+(mode==='paper'?'-paper':'');
  const apiPath=kind=>'/api/'+(mode==='paper'?'paper/':'')+kind;
- let view=null,pending=localStorage.getItem(storageKey('request')),pendingScope=localStorage.getItem(storageKey('scope')),busy=false,polling=false,loadedScope=null,preview=null,lines=[],zoom=1,pan=0,gesture=null,hold=null;
+ let view=null,pending=localStorage.getItem(storageKey('request')),pendingScope=localStorage.getItem(storageKey('scope')),busy=false,polling=false,loadedScope=null,preview=null,lines=[],zoom=1,pan=0,gesture=null,hold=null,timeOffset=0,visibleCount=60,previewFocus=null,previewWasOpen=false;
  const names={INITIAL_SIZE:'Объём начальной позиции',INITIAL_ENTRY_DISTANCE:'STOP от Close M1',INITIAL_SL_DISTANCE:'Начальный SL',INITIAL_TP_DISTANCE:'Начальный TP',BASKET_COUNT:'Число билетов корзины',TICKET_SIZE:'Объём одного билета',RECOVERY_SL_DISTANCE:'Фиксированный SL корзины',COST_RESERVE:'Резерв будущих расходов, валюта счёта',TP_STEP_MULTIPLIER:'Множитель шага TP (не меньше 1)',CYCLE_COOLDOWN_SECONDS:'Пауза после цикла, секунды'};
  const headers=()=>({'X-Local-Control':'1','X-Controller-Scope':view?.scope??''});
- function error(text){$('action-error').textContent=text;}
+ function error(text){$('action-error').textContent=text;if(preview)$('preview-error').textContent=text;}
  function clearPending(){pending=null;pendingScope=null;localStorage.removeItem(storageKey('request'));localStorage.removeItem(storageKey('scope'));}
  async function send(action,revision=view?.revision,scope=view?.scope){
   if(busy||pending)throw Error('Предыдущий исход не сверён. Повтор запрещён.');
@@ -55,6 +55,14 @@
  let v3Fresh=false,v3PresetKey='';
  const v3Enabled=()=>view?.recovery_mode==='V3';
  const v3Blocked=()=>!view||!v3Fresh||busy||!!pending||view.read_only||!!view.manual_reason||!!view.migration_block||!!view.time_block;
+ function connectionLabel(){
+  const status=view?.feed?.status,verified=feedUtcVerified(),fresh=v3Fresh&&status==='FRESH'&&verified;
+  const role=mode==='paper'?'PAPER':view?.read_only?'LIVE · READ ONLY':'LIVE';
+  const warning=!v3Fresh?'нет свежего снимка':!verified?'время не проверено':status!=='FRESH'?'котировки не свежие':'';
+  $('drawer-toggle').textContent='Команды · '+role+(warning?' · '+warning:'');
+  $('drawer-toggle').dataset.warning=String(!fresh);$('drawer-toggle').title=role+' · '+(warning||'Свежие данные')+' · возраст котировки: '+(view?.feed?.age_seconds??'—')+' сек.';
+  svg.dataset.feedFresh=String(fresh);
+ }
  const v3Count=()=>{const n=Number($('v3-count').value);if(!Number.isInteger(n)||n<1||n>20)throw Error('Количество ступеней: целое число от 1 до 20.');return n;};
  function v3InputMode(){
   const stop=$('v3-order-type').value==='STOP';
@@ -110,35 +118,80 @@
  $('writeoff-recovery').onclick=async()=>{if(!view)return;const v=view,revision=v.revision,scope=v.scope;const action={type:'writeoff_recovery',cycle_id:v.cycle_id,expected_debt:v.debt,confirmed:true};if(!confirm((mode==='paper'?'СИМУЛЯТОР':'ТОРГОВЛЯ')+' — списать RECOVERY '+v.debt+' UST? Фактическая доходность не изменится: убыток уже учтён. Позиции и ордера не закрываются. После сверки начнётся ожидание новой M1.'))return;try{await send(action,revision,scope);}catch(e){error(e.message);}};
  $('save-tp-grid').onclick=async()=>{if(!view?.tp_distances)return;const values=[...view.tp_distances],scope=view.scope,revision=view.revision,cycle_id=view.cycle_id;for(let i=0;i<Number(view.settings.BASKET_COUNT);i++){const raw=$('tp-distance-'+i).value.trim();if((i===0&&!raw)||(raw&&(!Number.isFinite(Number(raw))||Number(raw)<=0))){error('Задайте положительное расстояние TP '+(i+1));return;}values[i]=raw||null;}if(!confirm('Применить расстояния TP? SL остаются на фактических текущих уровнях.\n'+values.slice(0,Number(view.settings.BASKET_COUNT)).map((v,i)=>'TP '+(i+1)+': '+(v??'авто')).join('\n')))return;try{await send({type:'tp_distances',cycle_id,distances:values},revision,scope);}catch(e){error(e.message);}};
  function node(tag,attrs,text){const n=document.createElementNS(ns,tag);for(const[k,v]of Object.entries(attrs))n.setAttribute(k,v);if(text!==undefined)n.textContent=text;return n;}
- function domain(){const prices=[...lines.map(l=>l.price),...(view?.feed?.candles??[]).flatMap(c=>[Number(c.low),Number(c.high)]),Number(view?.feed?.quote?.bid),Number(view?.feed?.quote?.ask)].filter(x=>Number.isFinite(x)&&x>0);let lo=Math.min(...prices),hi=Math.max(...prices);if(!prices.length){lo=0;hi=1;}const mid=(lo+hi)/2+pan,span=Math.max(1,hi-lo)*1.25/zoom;return{min:mid-span/2,max:mid+span/2};}
+ // Viewport changes only: never request or alter orders while navigating history.
+ function visibleCandles(){const all=view?.feed?.candles??[];const count=Math.max(10,Math.min(240,Math.round(visibleCount)));timeOffset=Math.max(0,Math.min(timeOffset,Math.max(0,all.length-count)));const end=all.length-Math.round(timeOffset);return all.slice(Math.max(0,end-count),end);}
+ function domain(){const prices=[...lines.map(l=>l.price),...visibleCandles().flatMap(c=>[Number(c.low),Number(c.high)]),Number(view?.feed?.quote?.bid),Number(view?.feed?.quote?.ask)].filter(x=>Number.isFinite(x)&&x>0);let lo=Math.min(...prices),hi=Math.max(...prices);if(!prices.length){lo=0;hi=1;}const mid=(lo+hi)/2+pan,span=Math.max(1,hi-lo)*1.25/zoom;return{min:mid-span/2,max:mid+span/2};}
+ function syncPreviewDialog(){
+  const open=!!preview;$('preview-backdrop').hidden=!open;
+  for(const id of ['command-drawer','settings-page','bottom-tabs','analysis-pane'])$(id).inert=open;
+  if(open&&!previewWasOpen){previewFocus=document.activeElement;$('cancel-level').focus({preventScroll:true});}
+  if(!open&&previewWasOpen)(previewFocus?.isConnected?previewFocus:$('drawer-toggle')).focus({preventScroll:true});
+  previewWasOpen=open;
+ }
  function draw(){
+  syncPreviewDialog();
   if(!view)return;lines=[];const colors=prefs.colors;
   for(const [side,price] of Object.entries(view.levels)){const pendingOrder=view.orders.some(o=>o.side===side&&Number(o.price)===Number(price));if(pendingOrder||view.frozen_levels)lines.push({key:'trigger-'+side,kind:'trigger',side,price:Number(price),label:side+(pendingOrder?' STOP':' · уровень цикла'),color:colors[side]});}
   for(const p of view.positions)for(const key of ['entry','tp','sl'])lines.push({key:p.id+'-'+key,kind:key,pid:p.id,price:Number(p[key]),label:key.toUpperCase()+' #'+(p.ticket??p.id).slice(-6),color:colors[key]});
   if(!lines.length&&!(view.feed.candles??[]).length&&!Number(view.feed.quote?.bid)){svg.replaceChildren(node('text',{x:230,y:250,fill:'#969ba6','font-size':28},'Ожидание реальных данных MT5'));$('level-buttons').replaceChildren();drawAnalysis();return;}
   frameHeight=Math.max(240,svg.clientHeight/Math.max(1,svg.clientWidth)*1000);plotBottom=frameHeight-45;plotHeight=plotBottom-20;svg.setAttribute('viewBox','0 0 1000 '+frameHeight);
-  const labelSize=innerWidth<680?26:17;const labelRows=[];
+  const labelSize=innerWidth<680?32:17;const labelRows=[];
   const d=domain(),y=p=>plotBottom-(p-d.min)/(d.max-d.min)*plotHeight;svg.replaceChildren();
-  for(let i=0;i<=6;i++){const price=d.min+(d.max-d.min)*i/6,py=y(price);svg.append(node('line',{x1:0,x2:895,y1:py,y2:py,stroke:colors.grid}),node('text',{x:904,y:py+5,fill:'#afc0d2','font-size':labelSize},price.toFixed(2)));}
-  const candles=(view.feed.candles??[]).slice(-80),w=880/Math.max(1,candles.length);candles.forEach((c,i)=>{const x=10+i*w,green=Number(c.close)>=Number(c.open),color=green?colors.up:colors.down;svg.append(node('line',{x1:x,x2:x,y1:y(Number(c.high)),y2:y(Number(c.low)),stroke:color}),node('rect',{x:x-w*.3,y:Math.min(y(Number(c.open)),y(Number(c.close))),width:Math.max(2,w*.6),height:Math.max(1,Math.abs(y(Number(c.open))-y(Number(c.close)))),fill:color}));});
-  for(const l of lines){const py=y(l.price);if(py<0||py>frameHeight)continue;const g=node('g',{'data-line':l.key,visibility:prefs.mainCycle?'visible':'hidden'});g.append(node('line',{x1:0,x2:895,y1:py,y2:py,stroke:l.color,'stroke-width':2,'stroke-dasharray':'none'}),node('line',{x1:0,x2:895,y1:py,y2:py,stroke:'transparent','stroke-width':18}));g.append(node('title',{},l.label+' '+l.price.toFixed(2)));if(!labelRows.some(row=>Math.abs(row-py)<labelSize)){g.append(node('text',{x:902,y:py-5,fill:l.color,'font-size':labelSize-2},l.price.toFixed(2)));labelRows.push(py);}svg.append(g);}
+  for(let i=0;i<=6;i++){const price=d.min+(d.max-d.min)*i/6,py=y(price);svg.append(node('line',{x1:0,x2:855,y1:py,y2:py,stroke:colors.grid}),node('text',{x:868,y:py+5,fill:'#afc0d2','font-size':labelSize},price.toFixed(2)));}
+  const candles=visibleCandles(),w=840/Math.max(1,candles.length);svg.dataset.firstCandle=String(candles[0]?.utc_time??'');svg.dataset.visibleCount=String(candles.length);candles.forEach((c,i)=>{const x=10+i*w,green=Number(c.close)>=Number(c.open),color=green?colors.up:colors.down;svg.append(node('line',{x1:x,x2:x,y1:y(Number(c.high)),y2:y(Number(c.low)),stroke:color}),node('rect',{x:x-w*.3,y:Math.min(y(Number(c.open)),y(Number(c.close))),width:Math.max(2,w*.6),height:Math.max(1,Math.abs(y(Number(c.open))-y(Number(c.close)))),fill:color}));});
+  for(const l of lines){const py=y(l.price);if(py<0||py>frameHeight)continue;const g=node('g',{'data-line':l.key,visibility:prefs.mainCycle?'visible':'hidden'});g.append(node('line',{x1:0,x2:855,y1:py,y2:py,stroke:l.color,'stroke-width':2,'stroke-dasharray':'none'}),node('line',{x1:0,x2:855,y1:py,y2:py,stroke:'transparent','stroke-width':18}));g.append(node('title',{},l.label+' '+l.price.toFixed(2)));if(!labelRows.some(row=>Math.abs(row-py)<labelSize)){g.append(node('text',{x:868,y:py-5,fill:l.color,'font-size':labelSize-2},l.price.toFixed(2)));labelRows.push(py);}svg.append(g);}
+  // Bid/Ask are display-only live quote lines, never draggable trading levels.
+  const quoteLabels=[];
+  for(const [key,color] of [['ask','#ff5b63'],['bid','#24d99a']]){
+   const price=Number(view.feed.quote?.[key]);if(!Number.isFinite(price)||price<=0)continue;
+   const py=y(price);if(py<20||py>plotBottom)continue;
+   let ly=py;for(const previous of quoteLabels)if(Math.abs(ly-previous)<labelSize+8)ly=previous+labelSize+8;
+   ly=Math.max(20+labelSize/2,Math.min(plotBottom-labelSize/2,ly));if(quoteLabels.some(previous=>Math.abs(ly-previous)<labelSize+8))ly=Math.max(20+labelSize/2,quoteLabels[0]-labelSize-8);quoteLabels.push(ly);
+   const badgeX=innerWidth<680?798:845;
+   const g=node('g',{'data-quote':key,'pointer-events':'none'});
+   g.append(node('line',{x1:0,x2:badgeX-5,y1:py,y2:py,stroke:color,'stroke-width':1.5,'stroke-dasharray':'3 4'}),node('line',{x1:badgeX-5,x2:badgeX,y1:py,y2:ly,stroke:color}),node('rect',{x:badgeX,y:ly-labelSize/2-5,width:998-badgeX,height:labelSize+10,rx:7,fill:'#08090b',stroke:color}),node('text',{x:badgeX+7,y:ly+labelSize/3,fill:'#f1f3f5','font-size':labelSize*.9},key.toUpperCase()+' '+price.toFixed(2)));svg.append(g);
+  }
   candles.forEach((c,i)=>{if(i%Math.max(1,Math.floor(candles.length/5))===0&&utcLabel(c.utc_time,true)){const label=utcLabel(c.utc_time,true);svg.append(node('text',{x:10+i*w,y:frameHeight-10,fill:'#969ba6','font-size':labelSize},label));}});
-  svg.append(node('text',{x:900,y:frameHeight-10,fill:'#969ba6','font-size':labelSize},feedUtcVerified()?'UTC':'RAW'));
+  svg.append(node('text',{x:868,y:frameHeight-10,fill:'#969ba6','font-size':labelSize},feedUtcVerified()?'UTC':'RAW'));
   if(!feedUtcVerified())svg.append(node('title',{},'Время MT5 не проверено; часовые метки скрыты.'));
   if(!candles.length)svg.append(node('text',{x:300,y:250,fill:'#969ba6','font-size':20},'Ожидание данных MT5'));
-  if(preview){const py=y(preview.value);svg.append(node('line',{x1:0,x2:895,y1:py,y2:py,stroke:'#fff','stroke-width':3,'stroke-dasharray':'none'}));}
+  if(preview){const py=y(preview.value);svg.append(node('line',{x1:0,x2:855,y1:py,y2:py,stroke:'#fff','stroke-width':3,'stroke-dasharray':'none'}));}
   drawAnalysis();
   $('level-buttons').replaceChildren();for(const l of lines){const b=document.createElement('button');b.textContent=l.label+' '+l.price.toFixed(2);b.style.borderColor=l.color;b.disabled=l.kind==='entry';b.onclick=()=>openPreview(l,l.price);$('level-buttons').append(b);}
  }
- function openPreview(line,value){if(!view||pending)return;preview={line:{...line},value,backend:structuredClone(view)};$('preview').hidden=false;$('new-price').value=value.toFixed(2);$('preview-text').textContent=line.label+': '+line.price.toFixed(2)+' → '+value.toFixed(2);draw();}
+ function openPreview(line,value){if(!view||pending)return;$('preview-error').textContent='';preview={line:{...line},value,backend:structuredClone(view)};$('preview').hidden=false;$('new-price').value=value.toFixed(2);$('preview-text').textContent=line.label+': '+line.price.toFixed(2)+' → '+value.toFixed(2);draw();}
  function priceAt(clientY){const r=svg.getBoundingClientRect(),d=domain(),point=svg.createSVGPoint();point.x=r.left;point.y=clientY;const local=point.matrixTransform(svg.getScreenCTM().inverse());return Math.round((d.min+(plotBottom-local.y)/plotHeight*(d.max-d.min))*100)/100;}
- svg.addEventListener('pointerdown',e=>{if(gesture){clearTimeout(hold);gesture=null;return;}svg.setPointerCapture(e.pointerId);const l=lines.find(l=>l.key===e.target.closest('[data-line]')?.dataset.line);gesture={id:e.pointerId,start:e.clientY,pan,line:l,drag:false};if(l&&l.kind!=='entry')hold=setTimeout(()=>{if(gesture&&gesture.id===e.pointerId){gesture.drag=true;openPreview(l,l.price);}},500);});
- svg.addEventListener('pointermove',e=>{if(!gesture||gesture.id!==e.pointerId)return;if(gesture.drag){preview.value=priceAt(e.clientY);$('new-price').value=preview.value.toFixed(2);$('preview-text').textContent=preview.line.label+': '+preview.line.price.toFixed(2)+' → '+preview.value.toFixed(2);draw();}else if(Math.abs(e.clientY-gesture.start)>8){clearTimeout(hold);const r=svg.getBoundingClientRect(),d=domain();pan=gesture.pan+(e.clientY-gesture.start)/svg.getScreenCTM().d/plotHeight*(d.max-d.min);draw();}});
- const end=e=>{clearTimeout(hold);if(gesture&&gesture.id===e.pointerId){if(e.type==='pointercancel'){preview=null;$('preview').hidden=true;}gesture=null;draw();}};svg.addEventListener('pointerup',end);svg.addEventListener('pointercancel',end);
- $('zoom-in').onclick=()=>{zoom=Math.min(8,zoom*1.3);draw();};$('zoom-out').onclick=()=>{zoom=Math.max(.3,zoom/1.3);draw();};$('chart-reset').onclick=()=>{zoom=1;pan=0;draw();};
+ const pointers=new Map();let pinch=null;
+ const distanceBetween=points=>Math.hypot(points[0].x-points[1].x,points[0].y-points[1].y);
+ function cancelGesture(){clearTimeout(hold);pointers.clear();pinch=null;gesture=null;}
+ svg.addEventListener('pointerdown',e=>{
+  if(preview)return;svg.setPointerCapture(e.pointerId);pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  if(pointers.size>1){clearTimeout(hold);gesture=null;pinch={distance:distanceBetween([...pointers.values()]),count:visibleCount,zoom};return;}
+  const l=lines.find(l=>l.key===e.target.closest('[data-line]')?.dataset.line);
+  gesture={id:e.pointerId,start:e.clientY,startX:e.clientX,pan,offset:timeOffset,span:domain().max-domain().min,line:l,drag:false,moved:false};
+  if(l&&l.kind!=='entry')hold=setTimeout(()=>{if(gesture&&!gesture.moved&&gesture.id===e.pointerId){gesture.drag=true;openPreview(l,l.price);}},500);
+ });
+ svg.addEventListener('pointermove',e=>{
+  if(!pointers.has(e.pointerId))return;pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  if(pinch&&pointers.size===2){const ratio=distanceBetween([...pointers.values()])/Math.max(1,pinch.distance);visibleCount=Math.max(10,Math.min(240,pinch.count/ratio));draw();return;}
+  if(!gesture||gesture.id!==e.pointerId)return;
+  if(gesture.drag&&preview){preview.value=priceAt(e.clientY);$('new-price').value=preview.value.toFixed(2);$('preview-text').textContent=preview.line.label+': '+preview.line.price.toFixed(2)+' → '+preview.value.toFixed(2);draw();return;}
+  const dx=e.clientX-gesture.startX,dy=e.clientY-gesture.start;if(Math.hypot(dx,dy)<=8&&!gesture.moved)return;
+  clearTimeout(hold);gesture.moved=true;const r=svg.getBoundingClientRect();
+  // Drag candles to the right to reveal earlier data. Forward vertical swipes also reveal history.
+  if(Math.abs(dx)>=Math.abs(dy))timeOffset=gesture.offset+dx/Math.max(1,r.width*.84)*visibleCount;
+  else if(e.clientX-r.left>r.width*.855)pan=gesture.pan+dy/Math.max(1,r.height)*gesture.span;
+  else timeOffset=gesture.offset-dy/Math.max(1,r.height)*visibleCount;
+  draw();
+ });
+ const end=e=>{clearTimeout(hold);pointers.delete(e.pointerId);if(e.type==='pointercancel'&&gesture?.drag){preview=null;$('preview').hidden=true;}gesture=null;if(pointers.size<2)pinch=null;draw();};
+ svg.addEventListener('pointerup',end);svg.addEventListener('pointercancel',end);svg.addEventListener('lostpointercapture',end);
+ svg.addEventListener('wheel',e=>{e.preventDefault();if(preview)return;visibleCount=Math.max(10,Math.min(240,visibleCount*(e.deltaY>0?1.12:1/1.12)));draw();},{passive:false});
+ $('zoom-in').onclick=()=>{visibleCount=Math.max(10,visibleCount/1.3);draw();};$('zoom-out').onclick=()=>{visibleCount=Math.min(240,visibleCount*1.3);draw();};$('chart-reset').onclick=()=>{zoom=1;pan=0;timeOffset=0;visibleCount=60;draw();};
  $('cancel-level').onclick=()=>{preview=null;$('preview').hidden=true;draw();};
  $('apply-level').onclick=async()=>{if(!preview)return;const p=preview,value=Number($('new-price').value);if(!Number.isFinite(value)||value<=0){error('Цена должна быть положительным числом.');return;}let action;if(p.line.kind==='trigger'){action={type:'basket_levels',cycle_id:p.backend.cycle_id,expected_orders:p.backend.orders.map(o=>o.id),expected:p.backend.levels,levels:{...p.backend.levels,[p.line.side]:String(value)}};}else{const position=p.backend.positions.find(x=>x.id===p.line.pid);action={type:'protection',cycle_id:p.backend.cycle_id,position_id:position.id,old:{sl:position.sl,tp:position.tp},new:{sl:position.sl,tp:position.tp,[p.line.kind]:String(value)}};}if(!confirm('Подтвердить '+p.line.label+' → '+value+'? SL меняется для всех живых билетов этой корзины, TP выбранного билета фиксируется вручную; незаданные TP пересчитываются для покрытия долга. Другие ручные TP сохраняются. Недопустимая сетка отклоняется.'))return;try{await send(action,p.backend.revision,p.backend.scope);preview=null;$('preview').hidden=true;}catch(e){error(e.message);}draw();};
  function render(){
+  connectionLabel();
   $('phase').textContent=view.phase;$('cycle').textContent=view.cycle_id??'Ожидание цикла';$('debt').textContent=view.debt+' UST';$('realized').textContent=(mode==='paper'?'Net модели: ':'Фактический net: ')+view.realized+' UST';$('feed-status').textContent=view.feed.status;$('mode').textContent=mode==='paper'?'PAPER · без реальных сделок':view.read_only?'READ_ONLY':view.stopped?'Новые входы остановлены':'EXECUTION';
   $('safety').textContent=view.migration_block??view.manual_reason??timeSafetyText();$('quote').textContent='Bid '+(view.feed.quote?.bid??'—')+' / Ask '+(view.feed.quote?.ask??'—')+' · возраст '+(view.feed.age_seconds??'—')+' сек.';
   $('state-heading').textContent=mode==='paper'?'Бумажные билеты и ордера':'Брокерское состояние';
@@ -161,7 +214,7 @@
   $('reverse-enable').title=view.reverse_controls?.reason??'';$('reverse-disable').title=view.reverse_controls?.reason??'';
   if(loadedScope!==view.scope){fields();loadedScope=view.scope;}v3Render();draw();
  }
- async function poll(){if(polling||busy)return;polling=true;try{const r=await fetch(apiPath('state'),{headers:headers(),signal:AbortSignal.timeout(2500)});if(!r.ok){if([401,403].includes(r.status)){$('login').hidden=false;$('workspace').hidden=true;}throw Error('Нет авторизованного снимка');}const v=await r.json();if(v.contract!=='ticket_basket_v1'||(mode==='paper'?v.mode!=='PAPER':v.mode==='PAPER'))throw Error('Несовместимая версия контроллера');view=v;v3Fresh=true;const status=pending&&pendingScope===v.scope?v.action_results[pending]?.status:null;if(['APPLIED','REJECTED','CONFLICT'].includes(status)){if(status!=='APPLIED')error(status==='CONFLICT'?'Снимок устарел; создайте новый предпросмотр.':(v.action_results[pending]?.reason??'Команда отклонена до исполнения. Проверьте параметры; очередь разблокирована.'));clearPending();}$('login').hidden=true;$('workspace').hidden=false;render();}catch(e){v3Fresh=false;if(view)v3Render();$('feed-status').textContent='Нет свежего снимка';}finally{polling=false;}}
+ async function poll(){if(polling||busy)return;polling=true;try{const r=await fetch(apiPath('state'),{headers:headers(),signal:AbortSignal.timeout(2500)});if(!r.ok){if([401,403].includes(r.status)){$('login').hidden=false;$('workspace').hidden=true;}throw Error('Нет авторизованного снимка');}const v=await r.json();if(v.contract!=='ticket_basket_v1'||(mode==='paper'?v.mode!=='PAPER':v.mode==='PAPER'))throw Error('Несовместимая версия контроллера');view=v;v3Fresh=true;const status=pending&&pendingScope===v.scope?v.action_results[pending]?.status:null;if(['APPLIED','REJECTED','CONFLICT'].includes(status)){if(status!=='APPLIED')error(status==='CONFLICT'?'Снимок устарел; создайте новый предпросмотр.':(v.action_results[pending]?.reason??'Команда отклонена до исполнения. Проверьте параметры; очередь разблокирована.'));clearPending();}$('login').hidden=true;$('workspace').hidden=false;render();}catch(e){v3Fresh=false;if(view){v3Render();connectionLabel();}$('feed-status').textContent='Нет свежего снимка';}finally{polling=false;}}
  const defaultPrefs={mainTrend:false,mainCycle:true,pane:null,pattern:{trend:false,cycle:true},figure:{trend:false,cycle:true},liquidity:false,opacity:20,colors:{BUY:'#26a69a',SELL:'#ef5350',sl:'#ef5350',tp:'#26a69a',entry:'#e0b565',up:'#26a69a',down:'#ef5350',grid:'#25282e',zone:'#e0b565'}};
  let prefs=structuredClone(defaultPrefs);try{const saved=JSON.parse(localStorage.getItem('chart-preferences-v1')??'null');if(saved){for(const k of ['mainTrend','mainCycle','liquidity'])if(typeof saved[k]==='boolean')prefs[k]=saved[k];if(['pattern','figure',null].includes(saved.pane))prefs.pane=saved.pane;for(const pane of ['pattern','figure'])for(const k of ['trend','cycle'])if(typeof saved[pane]?.[k]==='boolean')prefs[pane][k]=saved[pane][k];if(Number.isFinite(saved.opacity))prefs.opacity=Math.max(0,Math.min(100,saved.opacity));for(const k of Object.keys(prefs.colors))if(/^#[0-9a-f]{6}$/i.test(saved.colors?.[k]))prefs.colors[k]=saved.colors[k];}}catch{}
  const savePrefs=()=>{localStorage.setItem('chart-preferences-v1',JSON.stringify(prefs));layout();draw();};
@@ -181,6 +234,21 @@
  async function showLogs(){const scope=$('log-scope').value;try{const r=await fetch('/api/logs?scope='+encodeURIComponent(scope)+'&page='+logPage,{headers:{'X-Local-Control':'1'},signal:AbortSignal.timeout(4000)});if(!r.ok)throw Error('Логи недоступны: '+r.status);const v=await r.json();if(scope!==$('log-scope').value)return;$('logs-view').textContent=v.text;$('logs-status').textContent='Страница '+(v.page+1)+' · ограниченная выгрузка';$('logs-prev').disabled=v.page===0;$('logs-next').disabled=!v.has_more;}catch(e){$('logs-status').textContent=e.message;}}
  $('logs-refresh').onclick=()=>{logPage=0;showLogs();};$('log-scope').onchange=()=>{logPage=0;showLogs();};$('logs-prev').onclick=()=>{logPage=Math.max(0,logPage-1);showLogs();};$('logs-next').onclick=()=>{logPage++;showLogs();};
  $('logs-download').onclick=async()=>{const scope=$('log-scope').value;try{const r=await fetch('/api/logs/download?scope='+encodeURIComponent(scope),{headers:{'X-Local-Control':'1'},signal:AbortSignal.timeout(5000)});if(!r.ok)throw Error('Скачивание отклонено: '+r.status);const blob=await r.blob();if(blob.size>1048576)throw Error('Файл превысил лимит');const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='tradfi-'+scope+'-logs.txt';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);$('logs-status').textContent='Подготовлен файл UTF-8: '+a.download;}catch(e){$('logs-status').textContent=e.message;}};
+ // Presentation-only navigation: the LIVE/PAPER role and API paths never change.
+ let activeTab='chart';
+ function setTab(tab){if(preview)return;cancelGesture();activeTab=tab==='settings'?'settings':'chart';for(const name of ['chart','settings']){$(name+'-page').hidden=activeTab!==name;$('tab-'+name).setAttribute('aria-selected',String(activeTab===name));}requestAnimationFrame(draw);}
+ $('tab-chart').onclick=()=>setTab('chart');$('tab-settings').onclick=()=>setTab('settings');
+ for(const name of ['chart','settings'])$('tab-'+name).addEventListener('keydown',e=>{if(['ArrowLeft','ArrowRight'].includes(e.key)){e.preventDefault();const other=name==='chart'?'settings':'chart';setTab(other);$('tab-'+other).focus();}});
+ function setDrawer(open){$('command-drawer').dataset.open=String(open);$('drawer-toggle').setAttribute('aria-expanded',String(open));$('drawer-content').hidden=!open;requestAnimationFrame(draw);}
+ $('drawer-toggle').onclick=()=>setDrawer($('command-drawer').dataset.open!=='true');
+ let drawerY=null,drawerSwiped=false;
+ $('drawer-toggle').addEventListener('pointerdown',e=>{drawerY=e.clientY;drawerSwiped=false;$('drawer-toggle').setPointerCapture(e.pointerId);});
+ $('drawer-toggle').addEventListener('pointerup',e=>{if(drawerY!==null&&Math.abs(e.clientY-drawerY)>22){drawerSwiped=true;setDrawer(e.clientY<drawerY);}drawerY=null;});
+ $('drawer-toggle').addEventListener('click',e=>{if(drawerSwiped){e.stopImmediatePropagation();drawerSwiped=false;}},true);
+ $('drawer-toggle').addEventListener('pointercancel',()=>{drawerY=null;drawerSwiped=false;});
+ document.addEventListener('keydown',e=>{if(preview&&e.key==='Tab'){const controls=[...$('preview').querySelectorAll('input,button')].filter(x=>!x.disabled),current=controls.indexOf(document.activeElement),next=e.shiftKey?(current<=0?controls.length-1:current-1):(current+1)%controls.length;e.preventDefault();controls[next]?.focus();return;}if(e.key==='Escape'){if(preview){$('cancel-level').click();}else if($('command-drawer').dataset.open==='true'){setDrawer(false);$('drawer-toggle').focus();}else setTab('chart');}});
+ // Reflow the SVG after drawer resizing and device rotation without affecting its data.
+ if(typeof ResizeObserver!=='undefined')new ResizeObserver(()=>requestAnimationFrame(draw)).observe($('chart-workspace'));
  layout();window.addEventListener('resize',()=>requestAnimationFrame(draw));
  setInterval(poll,1000);poll();
 })();
