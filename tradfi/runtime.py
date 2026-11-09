@@ -8,8 +8,7 @@ import os
 from pathlib import Path
 import time
 
-from .engine import Controller
-from .simulator import Simulator
+from .interactive_simulator import InteractiveSimulator
 from .storage import Store, DurabilityError
 
 
@@ -184,12 +183,16 @@ def main(argv=None):
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp)/'state.sqlite3')
             try:
-                broker = Simulator(); bot = Controller(store, broker)
-                bot.command('/start'); broker.candle(60); bot.tick()
+                from .recovery_v3 import ControlledRecoveryController
+                from .simulator import ARTIFICIAL_SPEC
+                broker=InteractiveSimulator(dict(ARTIFICIAL_SPEC,volume_min='0.01',volume_step='0.01'))
+                bot=ControlledRecoveryController(store,broker)
+                bot.state['tp_distances']=['0.25']+[None]*19
+                bot.command('/start');broker.data.update(now=120,candle=dict(id=60,open='3999',close='4000'));bot.tick()
                 broker.fill('BUY'); broker.quote('4003', '4003.10')
                 for _ in range(4): bot.tick()
                 broker.close('TP'); bot.tick()
-                print(json.dumps({'mode': 'OFFLINE_SIMULATOR', 'state': bot.status(),
+                print(json.dumps({'mode': 'OFFLINE_SIMULATOR', 'recovery_mode':'V3', 'state': bot.status(),
                                   'completed': bot.state['completed'], 'commands': len(broker.commands)}, indent=2))
             finally:
                 store.close()

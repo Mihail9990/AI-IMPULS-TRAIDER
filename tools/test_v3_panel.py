@@ -8,8 +8,8 @@ def main():
     base=dict(contract='ticket_basket_v1',scope='live-ui',revision=1,cycle_id=None,phase='WAIT_START',debt='0',realized='0',stopped=True,read_only=False,migration_block=None,manual_reason=None,time_block=None,
         settings=dict(INITIAL_SIZE='0.09',INITIAL_ENTRY_DISTANCE='1',INITIAL_SL_DISTANCE='3',INITIAL_TP_DISTANCE='.25',BASKET_COUNT=6,TICKET_SIZE='.01',RECOVERY_SL_DISTANCE='1.5',EXPANSION_DISTANCE='1',CYCLE_COOLDOWN_SECONDS='0'),
         feed=dict(status='FRESH',quote=dict(bid='4000',ask='4000.23'),age_seconds=0,candles=[dict(open='3999',close='4000',high='4001',low='3998',utc_time=1804800000+i*60) for i in range(20)]),levels={},positions=[],orders=[],journal=[],action_results={},projection=None,
-        recovery_mode='V1',v3_settings=dict(entry_distance='1',count_presets=[4,6,10]),v3_request=None,v3_link=None,v3_sl_distance='1.50',v3_controls=dict(can_enter=True,can_link=True,can_cancel_link=False,can_adjust_sl=True,reason=''))
-    state=copy.deepcopy(base);paper=copy.deepcopy(base);paper.update(scope='paper-ui',mode='PAPER',recovery_mode='V1')
+        recovery_mode='V3',v3_settings=dict(entry_distance='1',count_presets=[4,6,10]),v3_request=None,v3_link=None,v3_sl_distance='1.50',v3_controls=dict(can_enter=True,can_link=True,can_cancel_link=False,can_adjust_sl=True,reason=''))
+    state=copy.deepcopy(base);paper=copy.deepcopy(base);paper.update(scope='paper-ui',mode='PAPER',recovery_mode='V3')
     requests=[];errors=[];dialogs=[];auth=True;fail_state=False;unknown=False;dismiss=False
     def route(r):
         nonlocal auth
@@ -21,7 +21,7 @@ def main():
             r.fulfill(status=200 if auth else 401,json=state if path=='/api/state' else paper);return
         if path in ('/api/action','/api/paper/action'):
             req=r.request.post_data_json;requests.append(req);s=state if path=='/api/action' else paper;a=req['action']
-            if a['type']=='recovery_mode':s['recovery_mode']=a['mode']
+            assert a['type'] not in ('recovery_mode','manual_close'), 'Retired action must not be sent'
             if a['type']=='v3_settings':s['v3_settings']=dict(entry_distance=a['entry_distance'],count_presets=a['count_presets'])
             if a['type']=='v3_link':s['v3_link']=dict(stage='ARMED',count=a['count']);s['v3_controls']['can_cancel_link']=True
             if a['type']=='v3_cancel_link':s['v3_link']=None;s['v3_controls']['can_cancel_link']=False
@@ -44,9 +44,10 @@ def main():
             p.on('dialog',dialog)
             def wait(js):p.wait_for_function(js,timeout=7000)
             p.goto('http://127.0.0.1:8765/');p.locator('#workspace').wait_for(state='visible')
-            assert p.locator('#v3-panels').is_hidden();assert p.locator('#manual-close-controls').is_visible()
-            p.locator('#recovery-mode').select_option('V3');p.locator('#save-recovery-mode').click();p.locator('#v3-panels').wait_for(state='visible')
-            assert p.locator('#manual-close-controls').is_hidden();assert p.locator('#v3-side').is_disabled()
+            p.locator('#v3-panels').wait_for(state='visible');assert p.locator('#v3-settings').is_visible()
+            for removed in ('manual-close-controls','manual-close-submit','recovery-mode','save-recovery-mode'):
+                assert p.locator('#'+removed).count()==0
+            assert p.locator('#v3-side').is_disabled()
             assert p.locator('#v3-timing option[value=now]').is_disabled()
             assert p.locator('#v3-presets button').count()==3
             p.locator('#v3-presets button').nth(2).click();assert p.locator('#v3-count').input_value()=='10'
@@ -70,9 +71,16 @@ def main():
             for w in (360,390,412,768,1280):
                 p.set_viewport_size(dict(width=w,height=900));assert p.evaluate('document.documentElement.scrollWidth<=innerWidth'),w
             p.set_viewport_size(dict(width=390,height=844))
-            # Mode isolation and draft clearing.
-            p.locator('#tab-paper').click();wait("document.querySelector('#tab-paper').getAttribute('aria-selected')==='true' && document.querySelector('#v3-panels').hidden")
-            p.locator('#tab-live').click();p.locator('#v3-panels').wait_for(state='visible')
+            # Both scopes use V3; paper actions must not mutate live state.
+            p.locator('#tab-paper').click();wait("document.querySelector('#tab-paper').getAttribute('aria-selected')==='true' && !document.querySelector('#v3-panels').hidden")
+            p.locator('#v3-sl-plus').click();wait("document.querySelector('#v3-sl-value').textContent==='1.60'")
+            assert paper['v3_sl_distance']=='1.60';assert state['v3_sl_distance']=='1.50'
+            p.locator('#tab-live').click();wait("document.querySelector('#v3-sl-value').textContent==='1.50'")
+            # Legacy active snapshots remain visible but fail closed with a reason.
+            state['recovery_mode']='V1';state['migration_block']='Legacy active cycle needs reconciliation'
+            wait("document.querySelector('#safety').textContent.includes('Legacy active cycle')")
+            assert p.locator('#v3-panels').is_visible();assert p.locator('#v3-submit-entry').is_disabled();assert p.locator('#save-v3-settings').is_disabled()
+            state['recovery_mode']='V3';state['migration_block']=None;wait("!document.querySelector('#v3-submit-entry').disabled")
             # Read-only and stale snapshots block V3 commands.
             state['read_only']=True;wait("document.querySelector('#v3-submit-entry').disabled");assert p.locator('#v3-link-toggle').is_disabled()
             state['read_only']=False;wait("!document.querySelector('#v3-submit-entry').disabled")
@@ -83,6 +91,6 @@ def main():
             p.reload();p.locator('#workspace').wait_for(state='visible');assert p.locator('#v3-link-toggle').is_disabled();assert len(requests)==n
             assert not errors,errors
             p.screenshot(path='/tmp/v3-panel-mobile.png',full_page=True)
-            print('PASS V3 UI: V1 visibility, mode/settings, STOP/MARKET timing, count validation/presets, cancel preview, SL confirmation, immediate linked cancellation, independent collapse/reload, mobile widths, live/paper, read-only/stale/UNKNOWN. All HTTP mocked; no real trading.')
+            print('PASS V3 UI: V3-only defaults, retired controls absent, legacy migration block, STOP/MARKET timing, count validation/presets, cancel preview, SL confirmation, immediate linked cancellation, independent collapse/reload, mobile widths, live/paper, read-only/stale/UNKNOWN. All HTTP mocked; no real trading.')
         finally:b.close()
 if __name__=='__main__':main()

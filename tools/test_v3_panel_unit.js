@@ -28,9 +28,9 @@ async function main(){
  ctx.busy=true;renderOwn();assert.equal($('own-entry-sl').disabled,true);ctx.busy=false;
  ctx.pending='unknown';renderOwn();assert.equal($('own-entry-sl').disabled,true);ctx.pending=null;
  ctx.view.recovery_mode='V1';renderOwn();assert.equal($('own-entry-sl').disabled,true,'V1 pending behavior unchanged');
- ctx.view.orders=[];renderOwn();assert.equal($('own-entry-sl').disabled,false,'V1 no pending behavior unchanged');
+ ctx.view.orders=[];renderOwn();assert.equal($('own-entry-sl').disabled,true,'legacy state never permits V3 actions');
  ctx.view=structuredClone(base);
- assert.equal($('v3-panels').hidden,false);assert.equal($('manual-close-controls').hidden,true);assert.equal($('v3-side').disabled,true);assert.equal($('v3-presets').children.length,3);
+ assert.equal($('v3-panels').hidden,false);assert(!elements['manual-close-controls']);assert.equal($('v3-side').disabled,true);assert.equal($('v3-presets').children.length,3);
  $('v3-presets').children[2].onclick();assert.equal($('v3-count').value,'10');
  let before=actions.length;$('v3-count').value='1.5';await $('v3-submit-entry').onclick();assert.equal(actions.length,before);assert(errors.at(-1).includes('целое'));
  $('v3-count').value='8';$('v3-order-type').value='MARKET';$('v3-timing').value='now';$('v3-side').value='SELL';$('v3-timing').onchange();assert.equal($('v3-side').disabled,false);
@@ -48,9 +48,26 @@ async function main(){
   ctx.busy=block==='busy';ctx.pending=block==='pending'?'req':null;ctx.view.read_only=block==='read_only';vm.runInContext('v3Fresh='+String(block!=='stale')+';v3Render()',ctx);
   before=actions.length;await $('v3-link-toggle').onclick();await $('v3-submit-entry').onclick();await $('v3-sl-plus').onclick();assert.equal(actions.length,before,block);assert.equal($('v3-link-toggle').disabled,true);
  }
- ctx.busy=false;ctx.pending=null;ctx.view.read_only=false;vm.runInContext('v3Fresh=true',ctx);ctx.view.recovery_mode='V1';vm.runInContext('v3Render()',ctx);assert.equal($('v3-panels').hidden,true);assert.equal($('manual-close-controls').hidden,false);before=actions.length;await $('v3-submit-entry').onclick();assert.equal(actions.length,before);
- ctx.view.recovery_mode='V3';ctx.view.positions=[];ctx.view.cycle_id=null;vm.runInContext('v3Render()',ctx);$('recovery-mode').value='V1';await $('save-recovery-mode').onclick();assert.equal(actions.at(-1).a.mode,'V1');
+ ctx.busy=false;ctx.pending=null;ctx.view.read_only=false;vm.runInContext('v3Fresh=true',ctx);
+ ctx.view.recovery_mode='V1';ctx.view.migration_block='Legacy active cycle needs reconciliation';vm.runInContext('v3Render()',ctx);
+ assert.equal($('v3-panels').hidden,false,'V3 remains the only panel even for blocked legacy state');assert.equal($('v3-submit-entry').disabled,true);
+ before=actions.length;await $('v3-submit-entry').onclick();await $('save-v3-settings').onclick();assert.equal(actions.length,before);
+ assert(!elements['recovery-mode']);assert(!elements['save-recovery-mode']);assert(!elements['manual-close-submit']);
+ assert(!src.includes("type:'recovery_mode'"));assert(!src.includes("type:'manual_close'"));
+ assert(!html.includes('value="V1"'));assert(!html.includes('V3.3'));
+ for(const id of ['start','stop','resume','reset','cancel-initial','own-entry-sl','reverse-enable','reverse-disable','save-settings','save-tp-grid','writeoff-recovery','paper-flatten','logs-download'])assert(elements[id],'retained control '+id);
+ ctx.view=structuredClone(base);vm.runInContext('v3Render()',ctx);
+ // Settings still submit the full server schema without exposing retired range/lot inputs.
+ ctx.view.settings={EXPANSION_DISTANCE:'2',TICKET_SIZE:'0.03',INITIAL_SIZE:'0.01',BASKET_COUNT:6};
+ elements['setting-INITIAL_SIZE']=new Element();elements['setting-INITIAL_SIZE'].value='0.02';
+ elements['setting-BASKET_COUNT']=new Element();elements['setting-BASKET_COUNT'].value='8';
+ ctx.names={};
+ vm.runInContext(src.split('\n').find(line=>line.includes("$('save-settings').onclick=")),ctx);
+ await $('save-settings').onclick();assert.equal(actions.at(-1).a.type,'basket_settings');
+ assert.equal(actions.at(-1).a.settings.EXPANSION_DISTANCE,'2');assert.equal(actions.at(-1).a.settings.TICKET_SIZE,'0.03');
+ assert.equal(actions.at(-1).a.settings.INITIAL_SIZE,'0.02');assert.equal(actions.at(-1).a.settings.BASKET_COUNT,8);
+ assert(!dialogs.at(-1).includes('EXPANSION_DISTANCE'));assert(!dialogs.at(-1).includes('TICKET_SIZE'));
  $('v3-sl-panel').open=false;$('v3-sl-panel').events.toggle();assert.equal(store.get('v3-sl-panel-open'),'false');assert.equal($('v3-entry-panel').open,true);
- console.log('PASS Node V3 handler tests: actual source, DOM doubles, inputs/actions/revisions, V1 isolation, confirmation/cancel, controls, stale/read-only/UNKNOWN guards. Browser layout NOT verified.');
+ console.log('PASS Node V3 handler tests: actual source, DOM doubles, inputs/actions/revisions, V3-only controls, legacy migration guard, confirmation/cancel, controls, stale/read-only/UNKNOWN guards. Browser layout NOT verified.');
 }
 main().catch(e=>{console.error(e);process.exit(1);});

@@ -1,4 +1,4 @@
-"""Opt-in, owner-directed V3 recovery. V1 is delegated unchanged.
+"""Owner-directed V3 recovery, the only supported active strategy.
 
 All orders use the existing durable intent/evidence gateway. No manual MT5
 positions are adopted, no missed candle is replayed, and no STOP becomes MARKET.
@@ -17,19 +17,37 @@ from .engine import TERMINAL
 class ControlledRecoveryController(LatestCloseBasketController):
     def __init__(self,*args,**kwargs):
         super().__init__(*args,**kwargs)
-        self.state.setdefault('recovery_mode','V1')
         self.state.setdefault('v3_settings',dict(entry_distance='1.00',count_presets=[4,6,10]))
         c=self.state.get('cycle')
-        if c and c.get('recovery_mode','V1')=='V3' and c.get('v3_request'):
+        legacy=bool(c and (c.get('recovery_mode')!='V3' or c.get('manual_close') or c.get('range_override')))
+        orphan=not c and any(cmd['status'] not in TERMINAL for cmd in self.state['commands'].values())
+        if legacy or orphan:
+            self.state.setdefault('v3_migration_snapshot',deepcopy(self.state))
+            self.state['migration_block']='Обнаружен незавершённый прежний цикл или несверенные ордера. Долг, позиции и ордера сохранены; автоматического переноса в V3 нет. Нужна сверка прежней версией перед обновлением.'
+            self.state['phase']='MIGRATION_BLOCK';self.state['stop']=True
+        # Only idle state is upgraded; a live legacy cycle keeps its own label.
+        self.state['recovery_mode']='V3'
+        if c and not self.state.get('migration_block') and c.get('v3_request'):
             c.pop('v3_request');self.notify('Запланированный V3 вход отменён после перезапуска; выберите новую свечу.')
-        self.save('recovery_mode_loaded')
+        self.save('primary_v3_loaded')
 
-    def _v3(self):return (self.state.get('cycle') or {}).get('recovery_mode',self.state['recovery_mode'])=='V3'
+    def _v3(self):return not self.state.get('migration_block') and (self.state.get('cycle') or {}).get('recovery_mode','V3')=='V3'
 
     def _new(self,snap):
         super()._new(snap)
-        self.state['cycle']['recovery_mode']=self.state['recovery_mode']
+        self.state['cycle']['recovery_mode']='V3'
         self.save('recovery_mode_bound')
+
+    def _mutation_allowed(self,kind=None):
+        if self.state.get('migration_block'):return False
+        return super()._mutation_allowed(kind)
+
+    def dispatch(self,kinds=None):
+        if self.state.get('migration_block'):return
+        return super().dispatch(kinds)
+
+    def request_manual_close(self,a):
+        raise ActionRejected('Закрытие с выбором диапазонов больше не используется')
 
     def command(self,text,update_id=None):
         if self._v3() and text.strip().lower()=='/stop':
@@ -57,12 +75,7 @@ class ControlledRecoveryController(LatestCloseBasketController):
     def action(self,a):
         if not isinstance(a,dict):raise ActionRejected('Неверная команда')
         kind=a.get('type')
-        if kind=='recovery_mode':
-            if set(a)!={'type','mode','cycle_id'} or a['mode'] not in ('V1','V3'):raise ActionRejected('Выберите V1 или V3')
-            snap=self._guard(entry=True)
-            if a['cycle_id'] is not None or self.state.get('cycle') or snap['positions'] or snap['orders'] or self._unresolved() or number(self.state['basket_carry'])>0:
-                raise ActionRejected('Смена версии разрешена только вне цикла, без долга и обязательств')
-            self.state['recovery_mode']=a['mode'];self.save('recovery_mode_selected');return
+        if kind=='recovery_mode':raise ActionRejected('V3 — основная логика; переключение версий удалено')
         if kind=='v3_settings':
             if set(a)!={'type','cycle_id','entry_distance','count_presets'} or a['cycle_id']!=(self.state.get('cycle') or {}).get('id'):raise ActionRejected('Обновите настройки V3')
             snap=self._guard(entry=True);spec=Spec.load(snap['spec'])
@@ -74,7 +87,7 @@ class ControlledRecoveryController(LatestCloseBasketController):
                 presets=[self._count(x) for x in presets]
             except (ValueError,TypeError,ArithmeticError):raise ActionRejected('Нужны положительный отступ с точностью tick и три количества 1–20')
             self.state['v3_settings']=dict(entry_distance=str(distance),count_presets=presets);self.save('v3_settings_saved');return
-        if self._v3() and kind=='manual_close':raise ActionRejected('Выбор диапазона после закрытия в V3 не используется')
+        if kind=='manual_close':raise ActionRejected('Выбор диапазона после закрытия в V3 не используется')
         if kind=='v3_entry':return self._request_entry(a)
         if kind=='v3_link':return self._request_link(a)
         if kind=='v3_cancel_link':
@@ -257,7 +270,7 @@ class ControlledRecoveryController(LatestCloseBasketController):
         return any(cmd['status'] not in TERMINAL and cid not in link.get('ids',[]) for cid,cmd in self.state['commands'].items())
 
     def _step(self,snap):
-        if not self._v3():return super()._step(snap)
+        if not self._v3():return
         c=self.state['cycle']
         if not self._observe(snap):return
         if c.get('manual'):

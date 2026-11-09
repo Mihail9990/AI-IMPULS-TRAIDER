@@ -10,7 +10,6 @@ class V3(unittest.TestCase):
         self.f=fixtures.BasketTest();self.f.setUp();self.addCleanup(self.f.doCleanups)
         f=self.f;f.bot=ControlledRecoveryController(f.store,f.b)
         f.bot.state['tp_distances']=['.20']+[None]*19
-        f.bot.action(dict(type='recovery_mode',mode='V3',cycle_id=None))
     def a(self,kind,**kw):return dict(type=kind,cycle_id=self.f.bot.state['cycle']['id'],**kw)
     def initial(self):
         f=self.f;f.start();f.b.fill('BUY');f.tick(3)
@@ -20,10 +19,12 @@ class V3(unittest.TestCase):
     def entry(self,kind='MARKET',timing='now',side='SELL',count=3):
         self.f.bot.action(self.a('v3_entry',order_type=kind,timing=timing,side=side,count=count));self.f.tick(5)
     def ids(self):return sorted(p['id'] for p in self.f.b.data['positions'])
-    def test_v1_default_unchanged_and_v33_rejected(self):
-        f=self.f;f.bot.action(dict(type='recovery_mode',mode='V1',cycle_id=None));self.initial();f.b.close('SL');f.tick(4)
-        self.assertEqual(len(f.b.data['orders']),12)
-        with self.assertRaises(ActionRejected):f.bot.action(dict(type='recovery_mode',mode='V3.3',cycle_id=None))
+    def test_v3_default_and_version_switch_removed(self):
+        f=self.f;self.assertEqual(f.bot.state['recovery_mode'],'V3')
+        for mode in ('V1','V3','V3.3'):
+            with self.assertRaises(ActionRejected):f.bot.action(dict(type='recovery_mode',mode=mode,cycle_id=None))
+        self.initial();f.b.close('SL');f.tick(4)
+        self.assertFalse(f.b.data['orders']);self.assertEqual(f.bot.state['phase'],'V3_WAIT_ENTRY')
     def test_initial_cancel_still_one_shot(self):
         f=self.f;f.start();f.bot.action(self.a('cancel_initial',expected_orders=[o['id'] for o in f.b.data['orders']]));f.tick(4)
         self.assertFalse(f.b.data['orders']);f.bar(120);f.tick(2);self.assertEqual(len(f.b.data['orders']),1)
@@ -209,8 +210,7 @@ class V3(unittest.TestCase):
 class V3Paper(unittest.TestCase):
     def setUp(self):
         from test_tradfi_paper import PaperTest
-        self.f=PaperTest();self.f.setUp();self.addCleanup(self.f.doCleanups);self.addCleanup(self.f.tearDown)
-        self.f.action(dict(type='recovery_mode',mode='V3',cycle_id=None))
+        self.f=PaperTest();self.f.primary_v3=True;self.f.setUp();self.addCleanup(self.f.doCleanups);self.addCleanup(self.f.tearDown)
     def test_real_quote_paper_market_and_recovery_wait(self):
         f=self.f;f.initial();f.reader.tick('3998','3998.1');f.step(5)
         self.assertFalse(f.p['orders']);self.assertEqual(f.session.controller.state['phase'],'V3_WAIT_ENTRY')

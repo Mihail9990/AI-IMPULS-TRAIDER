@@ -28,7 +28,16 @@ class PaperTest(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.path=Path(self.tmp.name)/'paper.db';self.reader=Reader();self.create();self.step()
         self.session.controller.state['tp_distances']=['.20']+[None]*19;self.session.controller.state['basket_settings']['INITIAL_SIZE']='.01';self.session.controller.save('fixture')
-    def create(self):self.session=PaperSession(self.path,self.reader,clock=lambda:self.reader.now,monotonic=lambda:self.reader.now)
+    def create(self):
+        # Retain historical V1 paper coverage with an explicit test-only fixture.
+        # Production PaperSession always instantiates the primary V3 controller.
+        from unittest.mock import patch
+        from tradfi.basket_latest_close import LatestCloseBasketController
+        from tradfi.recovery_v3 import ControlledRecoveryController
+        cls=ControlledRecoveryController if getattr(self,'primary_v3',False) else LatestCloseBasketController
+        with patch('tradfi.paper.ControlledRecoveryController',cls):
+            self.session=PaperSession(self.path,self.reader,clock=lambda:self.reader.now,monotonic=lambda:self.reader.now)
+
     def tearDown(self):self.session.close()
     def step(self,n=1):
         for _ in range(n):self.session.step()

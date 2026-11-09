@@ -119,6 +119,7 @@ class PaperSession:
         except OSError as exc:raise ActionRejected('Ожидание данных MT5',public_message='Ожидаются проверенные свежие котировки MT5; бумажное действие не выполнено.') from exc
     def action(self,a):
         if not isinstance(a,dict):raise ActionRejected('Неверная бумажная команда')
+        if self.controller.state.get('migration_block'):raise ActionRejected(self.controller.state['migration_block'])
         if a.get('type')=='paper_costs' and set(a)=={'type','commission_per_lot_side'}:
             try:value=number(a['commission_per_lot_side']);assert value>=0
             except (ValueError,AssertionError):raise ActionRejected('Нужна неотрицательная модель комиссии')
