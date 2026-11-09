@@ -579,4 +579,7 @@ def gui():
     app.mainloop()
 
 if __name__=='__main__':
-    gui()
+    # Preserve imports for legacy migration/diagnostics, but new user launches
+    # always select an independent application with its own installation root.
+    from independent_install import main
+    main()

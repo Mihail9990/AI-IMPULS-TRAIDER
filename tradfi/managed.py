@@ -39,14 +39,30 @@ def runtime_guard(state_file,*,instance='live'):
         with lock(root/'operation.lock'):
             owned.enter_context(lock(root/('instance-'+instance+'.lock')))
             code=Path(__file__).resolve().parent.parent
-            if read_json(root/'managed-install.json')!={'format':1} or read_json(root/'current.json')['current']!=code.parent.name:
+            installation=read_json(root/'managed-install.json')
+            independent=installation==dict(format=2,role=instance,layout='independent_roots_v1')
+            if (installation!={'format':1} and not independent) or read_json(root/'current.json')['current']!=code.parent.name:
                 raise SetupError('Managed release is not current')
+            application=root/'application.json'
+            if independent:
+                # Short admission check also serializes direct runtime starts
+                # with a migration reserving this installation directory.
+                from independent_install import migration_lock_path,own_data_directory
+                with lock(migration_lock_path(root)):pass
+                if not application.exists() or read_json(application)!={'format':1,'role':instance}:
+                    raise SetupError('This installation belongs to another application')
+                if (root/'migration-pending.json').exists():
+                    raise SetupError('Independent installation migration is not complete')
+                if not Path(state_file).resolve().is_relative_to(own_data_directory(root)):
+                    raise SetupError('Independent state must stay in its own data directory')
+            elif application.exists():
+                raise SetupError('Independent installation metadata mismatch')
             binding=binding_path(root,instance)
             value={'path':str(Path(state_file).resolve())}
             if binding.exists() and (read_json(binding)!=value or not Path(state_file).is_file()):
                 raise SetupError('Managed state missing or moved; automatic reset forbidden')
             other=binding_path(root,'paper' if instance=='live' else 'live')
-            if other.exists() and read_json(other)==value:
+            if not independent and other.exists() and read_json(other)==value:
                 raise SetupError('Live and paper state files must be separate')
         yield
 
