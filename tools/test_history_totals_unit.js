@@ -8,12 +8,14 @@ vm.runInContext(src.slice(src.indexOf(' function renderTotalsHistory(){'),src.in
 const run=()=>vm.runInContext('renderTotalsHistory()',ctx);
 run();assert.equal($('activity-recovery').textContent,'—');assert.equal($('activity-total-net').textContent,'—');assert($('position-history-empty').textContent.includes('пока нет'));
 ctx.view={metrics:{recovery_total:'12.3456',all_closed_net:'-2.3456',currency:'UST',history_complete:true},position_history:[{side:'BUY',opened_at:100,closed_at:120,entry_price:'4000',exit_price:'4003',reason:'TP',net:'2.74',currency:'UST',status:'closed',complete:true},{side:'SELL',reason:'SL',net:'-3.26',currency:'UST',status:'closed',complete:false}]};run();
+assert.equal($('activity-totals-note').hidden,true);assert.equal($('activity-totals-note').textContent,'');
 assert.equal($('activity-recovery').textContent,'-12.3456 UST');assert.equal($('activity-total-net').textContent,'-2.3456 UST');assert.equal($('activity-total-net').dataset.tone,'loss');
 const card=$('position-history-list').children[0];assert.equal(card.children[0].textContent,'BUY');assert.equal(card.children.at(-1).textContent,'TP · 2.74 UST');assert(card.children[1].textContent.includes('1970-01-01'));assert(card.children[2].textContent.includes('4000'));
 ctx.view.metrics.recovery_total='0.000';ctx.view.metrics.all_closed_net='0';run();assert.equal($('activity-recovery').textContent,'0 UST');assert.equal($('activity-total-net').textContent,'0 UST');
 assert.equal($('activity-total-net').dataset.tone,'success');
 ctx.view.metrics.all_closed_net='1.25';run();assert.equal($('activity-total-net').dataset.tone,'success');
 ctx.view.metrics.all_closed_net=null;ctx.view.metrics.history_complete=false;ctx.view.metrics.history_note='Missing opening evidence';run();assert.equal($('activity-total-net').textContent,'—');assert.equal($('position-history-note').textContent,'Missing opening evidence');
+assert.equal($('activity-totals-note').hidden,false);assert($('activity-totals-note').textContent.includes('история исполнений неполна'));
 ctx.view={debt:'999',realized:'999',position_history:[{side:'BUY',status:'open',net:null}]};run();assert.equal($('activity-recovery').textContent,'—','no invented fallback');assert.equal($('position-history-list').children[0].children.at(-1).textContent,'Итог после закрытия · —');
 assert(!$('position-history-list').children[0].children.some(x=>x.textContent.includes('RECOVERY')||x.textContent.includes('переносом')));
 vm.runInContext(src.slice(src.indexOf(" let activeTab='chart';"),src.indexOf(' function setDrawer(')),ctx);

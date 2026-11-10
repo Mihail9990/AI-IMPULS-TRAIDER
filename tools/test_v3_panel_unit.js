@@ -21,6 +21,12 @@ assert(html.includes('aria-label="Расстояние SL от входа"'));
 const compactCss=fs.readFileSync(path.join(root,'panel.css'),'utf8');
 assert(compactCss.includes('position:absolute;top:auto;bottom:60px'),'drawers anchor at chart bottom');
 assert(compactCss.includes('max-height:42%'),'order drawer leaves most chart visible');
+const commonControls=html.slice(html.indexOf('<details id="cycle-keyboard"'),html.indexOf('<details class="level-list"'));
+assert(commonControls.includes('id="v3-link-toggle"'), 'SL triggers share the position command group');
+assert(!html.includes('id="linked-trigger-commands"'), 'no separate SL trigger card');
+for(const id of ['reverse-status','execution-note','projection'])assert(!html.includes('id="'+id+'"'), 'removed highlighted explanation '+id);
+assert(!src.includes('Триггеры не выставлены. После выставления'));
+assert(!src.includes('Общий результат: закрытые позиции с комиссиями'));
 const ids=[...html.matchAll(/id="([^"]+)"/g)].map(x=>x[1]);assert.equal(new Set(ids).size,ids.length,'unique HTML IDs');
 class Element{
  constructor(){this.value='';this.textContent='';this.disabled=false;this.hidden=false;this.open=true;this.dataset={};this.children=[];this.classList={toggle:()=>{}};this.events={};this.attributes={};this.style={};this.clientHeight=520;this.clientWidth=1000;}
@@ -118,6 +124,10 @@ async function main(){
  ctx.view.v3_sl_distance='0.00';vm.runInContext('v3Render()',ctx);assert.equal($('v3-sl-value').textContent,'0.00');assert.equal($('v3-sl-minus').disabled,true);assert.equal($('v3-sl-plus').disabled,false);await $('v3-sl-plus').onclick();await $('v3-sl-confirm').onclick();assert.equal(actions.at(-1).a.distance,'0.10');
  ctx.view.v3_sl_distance='0.125';vm.runInContext('v3Render()',ctx);assert.equal($('v3-sl-value').textContent,'0.125');await $('v3-sl-plus').onclick();await $('v3-sl-confirm').onclick();assert.equal(actions.at(-1).a.distance,'0.225');await $('v3-sl-minus').onclick();await $('v3-sl-confirm').onclick();assert.equal(actions.at(-1).a.distance,'0.025');
  ctx.view.v3_sl_distance='1.50';vm.runInContext('v3Render()',ctx);
+ assert.equal($('v3-link-status').textContent,'');assert.equal($('v3-link-status').hidden,true,'no idle explanation');
+ ctx.view.v3_link={side:'SELL',price:'3998.5',cancel:true};vm.runInContext('v3Render()',ctx);assert.equal($('v3-link-status').hidden,false);assert($('v3-link-status').textContent.includes('Отмена запрошена'));
+ ctx.view.v3_link={side:'SELL',price:'3998.5',replace:true};vm.runInContext('v3Render()',ctx);assert($('v3-link-status').textContent.includes('Перенос SL'));
+ ctx.view.v3_link=null;vm.runInContext('v3Render()',ctx);
  const d=dialogs.length;await $('v3-link-toggle').onclick();assert.equal(actions.at(-1).a.type,'v3_link');assert.equal(dialogs.length,d,'trigger placement has no preview dialog');
  ctx.view.v3_link={side:'SELL',price:'3998.5',count:6};ctx.view.v3_controls.can_cancel_link=true;vm.runInContext('v3Render()',ctx);const d2=dialogs.length;await $('v3-link-toggle').onclick();assert.equal(actions.at(-1).a.type,'v3_cancel_link');assert.equal(dialogs.length,d2,'cancel no dialog');
  ctx.view.v3_request={bar_id:1804800000,order_type:'STOP',count:6};vm.runInContext('v3Render()',ctx);assert.equal($('v3-cancel-request').hidden,false);await $('v3-cancel-request').onclick();assert.equal(actions.at(-1).a.type,'v3_cancel_request');

@@ -11,7 +11,7 @@
 <main><section id="login" class="card"><h2>Вход</h2>
 <label>Пароль сервиса<input id="password" type="password" autocomplete="current-password"></label><button id="login-button">Войти</button><p id="login-error" role="alert"></p>
 <p>Пароль задаётся локально в конфигурации этого сервиса → web.password. От 5 символов только внутри VPS; для HTTPS-доступа — от 32. Короткий пароль нельзя использовать через внешний прокси.</p></section>
-<div id="workspace" hidden><section id="bot-activity" role="region" aria-label="Уведомления и состояние бота" tabindex="0"><div id="activity-totals" aria-label="Итоги RECOVERY"><div><small>RECOVERY</small><strong id="activity-recovery">—</strong></div><div><small>Общий результат</small><strong id="activity-total-net">—</strong></div></div><p id="activity-totals-note">По учтённым исполнениям, без плавающего P/L.</p><p id="bot-activity-warning" role="status"></p><p id="bot-activity-state" aria-live="polite">Ожидание снимка контроллера.</p><p id="bot-activity-action"></p><p id="action-error" role="alert"></p></section>
+<div id="workspace" hidden><section id="bot-activity" role="region" aria-label="Уведомления и состояние бота" tabindex="0"><div id="activity-totals" aria-label="Итоги RECOVERY"><div><small>RECOVERY</small><strong id="activity-recovery">—</strong></div><div><small>Общий результат</small><strong id="activity-total-net">—</strong></div></div><p id="activity-totals-note" role="status" hidden></p><p id="bot-activity-warning" role="status"></p><p id="bot-activity-state" aria-live="polite">Ожидание снимка контроллера.</p><p id="bot-activity-action"></p><p id="action-error" role="alert"></p></section>
 <section id="chart-page" role="tabpanel" aria-labelledby="tab-chart"><section class="card chart-card"><div id="chart-and-tools">
 <div id="chart-workspace">
 <div id="main-pane"><div class="chart"><svg id="chart" viewBox="0 0 1000 520" role="img" aria-label="График M1 с фактическими ордерами, входами, SL и индивидуальными TP"></svg></div></div>
@@ -48,12 +48,10 @@
 </aside>
 <section id="command-drawer" aria-label="Панель команд" data-open="false"><button id="drawer-toggle" type="button" aria-expanded="false" aria-controls="drawer-content">Команды</button><div id="drawer-content" hidden="hidden">
 <section class="card cycle-controls"><details id="cycle-keyboard"><summary>Управление позицией</summary><div class="controls">
-<button id="own-entry-sl">SL на точку входа</button><button id="reverse-enable">Обратная SL-лестница…</button><button id="reverse-disable">Отменить обратную лестницу…</button><button id="cancel-initial">Отменить начальный триггер один раз…</button>
-</div></details><p id="reverse-status"></p>
-<p id="execution-note">«SL на точку входа» отправляется одним нажатием: каждому билету его фактический вход, TP сохраняются. Результат требует подтверждения брокера. Закрытие браузера не останавливает сервис.</p></section>
-<section id="linked-trigger-commands" class="card"><h3>Триггеры на SL</h3><button id="v3-link-toggle">Выставить триггеры на SL</button><p>Ориентир — SL первой ступени. Отмена ожидающих триггеров отправляется сразу, без подтверждения; исполненные позиции не закрываются.</p>
-<p id="v3-link-status" role="status"></p>
-</section><details class="level-list"><summary>Уровни SL / TP на графике</summary><div id="level-buttons"></div></details><p id="projection"></p>
+<button id="own-entry-sl">SL на точку входа</button><button id="reverse-enable">Обратная SL-лестница…</button><button id="reverse-disable">Отменить обратную лестницу…</button><button id="cancel-initial">Отменить начальный триггер один раз…</button><button id="v3-link-toggle">Выставить триггеры на SL</button>
+</div><p id="v3-link-status" role="status" hidden></p></details>
+</section>
+<details class="level-list"><summary>Уровни SL / TP на графике</summary><div id="level-buttons"></div></details>
 </div></section><div id="preview-backdrop" hidden aria-hidden="true"></div>
 <section id="preview" class="card" hidden role="dialog" aria-modal="true" aria-labelledby="preview-title"><h2 id="preview-title">Правка уровня</h2>
 <p id="preview-text"></p><p id="preview-error" role="alert" aria-live="polite"></p>

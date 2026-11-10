@@ -197,7 +197,8 @@
   $('v3-link-toggle').dataset.cancel=String(linked);
   $('v3-link-toggle').disabled=blocked||!enabled||(linked?!canCancel:controls.can_link!==true);
   const link=view?.v3_link;
-  $('v3-link-status').textContent=linked?(link.cancel?'Отмена запрошена; ожидается сверка MT5.':link.replace?'Перенос SL и связанных триггеров; ожидается сверка.':profileSummary(link.recovery_profile)+' · '+link.side+' STOP на '+link.price+'. Якорь — SL первой ступени.'):'Триггеры не выставлены. После выставления они связаны с SL первой ступени.';
+  $('v3-link-status').textContent=linked?(link.cancel?'Отмена запрошена; ожидается сверка MT5.':link.replace?'Перенос SL и связанных триггеров; ожидается сверка.':profileSummary(link.recovery_profile)+' · '+link.side+' STOP на '+link.price+'.'):'';
+  $('v3-link-status').hidden=!linked;
   $('v3-control-reason').textContent=!v3Fresh?'Нет свежего снимка. Действия заблокированы.':friendlyReason(controls.reason);
   $('v3-cancel-entry').hidden=controls.can_cancel_entry!==true;
   $('v3-cancel-entry').disabled=blocked||!enabled||controls.can_cancel_entry!==true;
@@ -363,7 +364,8 @@
   notice('activity-recovery',money(negative,metrics?.currency),'info');
   const total=metrics?.all_closed_net;
   notice('activity-total-net',money(total,metrics?.currency),total===null||total===undefined?'info':Number(total)<0?'loss':'success');
-  $('activity-totals-note').textContent=metrics?.history_complete===true?'Общий результат: закрытые позиции с комиссиями, без плавающего P/L.':'Общий результат недоступен: история исполнений неполна.';
+  $('activity-totals-note').textContent=metrics?.history_complete===true?'':'Общий результат недоступен: история исполнений неполна.';
+  $('activity-totals-note').hidden=metrics?.history_complete===true;
   const records=Array.isArray(view?.position_history)?view.position_history:[];
   $('position-history-note').textContent=metrics?.history_note??(metrics?.history_complete===true?'':'Нет подтверждённой полной истории.');
   $('position-history-empty').textContent=records.length?'':'Исполненных позиций пока нет.';
@@ -389,10 +391,7 @@
   $('safety').textContent=''; // Safety is shown once in the colored activity area.
   $('quote').textContent='Bid '+(view.feed.quote?.bid??'—')+' / Ask '+(view.feed.quote?.ask??'—')+' · возраст '+(view.feed.age_seconds??'—')+' сек.';
   $('state-heading').textContent='Брокерское состояние';
-  $('execution-note').textContent='Открытые билеты сохраняют брокерские SL/TP. Закрытие браузера не останавливает сервис.';
   $('source-label').textContent='Источник: MT5 / торговый контур'+' · '+(utcLabel(view.feed.timestamp)||'время MT5 не проверено');
-  $('reverse-status').textContent=(view.reverse_ladders??[]).some(x=>x.enabled)?'Обратная лестница включена. Фактические SL показаны на графике; автоматического подтягивания нет.':'Обратная лестница выключена; доступна после подтверждённого переноса SL по TP1.';
-  $('projection').textContent=view.projection?'Прибыль по текущим TP: '+view.projection.gross_tp+'; резерв расходов: '+view.projection.cost_reserve+'; ожидаемое недопокрытие: '+view.projection.shortfall+' UST.'+' Будущие комиссии неизвестны до подтверждения.':'Расчёт покрытия пока недоступен.';
   $('edit-status').textContent=view.edit?'Правка '+view.edit.stage+': показываются фактические данные брокера. При частичном отказе автоматизация остановится.':'';$('journal').textContent=view.journal.join('\n');
   $('tickets').replaceChildren();for(const p of [...view.positions.map(p=>({...p,label:'Позиция'})),...view.orders.map(p=>({...p,entry:p.price,label:'STOP'}))]){const row=document.createElement('tr');for(const text of[p.ticket??p.id,p.label,p.side+' / '+p.size,p.entry,p.tp,p.sl]){const td=document.createElement('td');td.textContent=text;row.append(td);}$('tickets').append(row);}
   $('request-status').textContent=pending?'Запрос '+pending+': '+(pendingScope===view.scope?view.action_results[pending]?.status??'ожидание':'другой контекст')+'. До сверки новые команды запрещены. При UNKNOWN проверьте журнал и брокера на VPS; перезагрузка не разрешает повтор.':'';
