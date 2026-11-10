@@ -46,6 +46,9 @@ class BasketController(Controller):
         if entry and self.evidence_contract=='per_obligation_v1' and snap['quote'].get('utc_time') is None:raise ActionRejected('Нет свежей проверенной котировки')
         return snap
 
+    def _validate_cfg(self,cfg,spec):
+        cfg.validate(spec)
+
     def command(self,text,update_id=None):
         raw=text.strip().lower()
         if raw in {'/status','/settings'}:
@@ -58,7 +61,7 @@ class BasketController(Controller):
             self._cancel_ready();self.save('basket_stop');return
         if raw not in {'/start','/start auto'}:raise ActionRejected('Доступны Старт, Стоп, настройки корзины и ручная сверка')
         snap=self._guard(entry=True)
-        try:BasketSettings.load(self.state['basket_settings']).validate(Spec.load(snap['spec']))
+        try:self._validate_cfg(BasketSettings.load(self.state['basket_settings']),Spec.load(snap['spec']))
         except (ValueError,ArithmeticError) as exc:raise ActionRejected(str(exc),public_message='Параметры не соответствуют min/step/max объёма или tick/stops брокера. Округления и расширения нет.') from exc
         if self.state.get('cycle'):
             if self.state['phase']!='PAUSED_CYCLE':raise ActionRejected('Цикл уже активен')
@@ -113,7 +116,7 @@ class BasketController(Controller):
         self._cancel_ready(ids);self._cancel_pending(snap,ids);self.save('basket_cancel_pending');self.dispatch({'CANCEL'})
 
     def _new(self,snap):
-        cfg=BasketSettings.load(self.state['basket_settings']);cfg.validate(Spec.load(snap['spec']))
+        cfg=BasketSettings.load(self.state['basket_settings']);self._validate_cfg(cfg,Spec.load(snap['spec']))
         now=self.clock();bar=snap['candle']
         c=dict(id=uuid.uuid4().hex,contract=CONTRACT,engine='basket',currency=snap['spec']['currency'],settings=deepcopy(self.state['settings']),cfg=cfg.dump(),
             started_at_utc=now,deadline_utc=now+86400,max_duration_seconds=86400,last_observed_utc=now,
@@ -126,7 +129,7 @@ class BasketController(Controller):
         return ladder(self.broker,spec,side,entries,sizes,debt,reserve=cfg.COST_RESERVE,multiplier=cfg.TP_STEP_MULTIPLIER)
 
     def _plans(self,snap,role,levels,cfg=None):
-        c=self.state['cycle'];cfg=cfg or BasketSettings.load(c['cfg']);spec=Spec.load(snap['spec']);cfg.validate(spec)
+        c=self.state['cycle'];cfg=cfg or BasketSettings.load(c['cfg']);spec=Spec.load(snap['spec']);self._validate_cfg(cfg,spec)
         count=1 if role=='initial' else cfg.BASKET_COUNT;size=number(cfg.INITIAL_SIZE if role=='initial' else cfg.TICKET_SIZE)
         plans=[]
         debt=number(c['recovery'])
@@ -421,7 +424,7 @@ class BasketController(Controller):
                     if any(number(v)<=0 for v in protection[field].values()):raise ValueError('SL/TP должны быть положительными')
         except (ValueError,TypeError,KeyError,ArithmeticError) as exc:raise ActionRejected(str(exc),public_message='Неверные параметры: нужны конечные положительные числа, целое число билетов 1–20 и полный набор ключей. Резерв и пауза могут быть нулём.') from exc
         snap=self._guard(entry=True);spec=Spec.load(snap['spec']);c=self.state.get('cycle')
-        try:cfg.validate(spec)
+        try:self._validate_cfg(cfg,spec)
         except (ValueError,ArithmeticError) as exc:raise ActionRejected(str(exc),public_message='Параметры не соответствуют min/step/max объёма или tick/stops брокера. Округления и расширения нет.') from exc
         if not c:
             if levels is not None or protection is not None:raise ActionRejected('Нет активного цикла')

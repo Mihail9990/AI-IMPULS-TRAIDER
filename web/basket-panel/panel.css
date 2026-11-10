@@ -56,3 +56,12 @@ body{background:var(--bg)}main{padding:0;max-width:none}#login{max-width:480px;m
 #bot-activity p{font-size:12px;line-height:1.35;margin:0 0 3px;overflow-wrap:anywhere}#bot-activity p:empty{display:none}
 #bot-activity-state{color:#e4e8ed}#bot-activity-warning{color:#f5c988}#bot-activity-action{color:#b9ccdf}#bot-activity:focus-visible{outline:2px solid #81c4ff;outline-offset:-2px}
 @media(max-height:500px){#drawer-content{max-height:30vh;max-height:30dvh}}
+
+/* Compact, independent recovery setting groups; no horizontal mobile editor scroll. */
+.settings-group{margin:10px 0;border:1px solid #39404c;border-radius:8px;padding:10px;min-width:0}
+.settings-group>summary{cursor:pointer;font-weight:600;overflow-wrap:anywhere}
+.recovery-stage-row{display:grid;grid-template-columns:22px minmax(0,1fr) minmax(0,1fr) auto;align-items:end;gap:8px;margin:8px 0}
+.recovery-stage-row input{width:100%;min-width:0;box-sizing:border-box}
+#recovery-current-summary{white-space:pre-line;overflow-wrap:anywhere}
+#recovery-profile-select{max-width:100%;width:100%}
+@media(max-width:480px){.recovery-stage-row{grid-template-columns:18px minmax(0,1fr) minmax(0,1fr)}.recovery-stage-row>button{grid-column:2/4;justify-self:end}.settings-group{padding:8px}}

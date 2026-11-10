@@ -16,7 +16,11 @@ class V3(unittest.TestCase):
     def loss(self):
         self.initial();f=self.f;f.b.close('SL');f.tick(4)
         self.assertEqual(f.bot.state['phase'],'V3_WAIT_ENTRY');self.assertFalse(f.b.data['orders'])
+    def profile(self,count):
+        stages=[dict(volume='.01',tp_distance=str(D('.20')*(i+1))) for i in range(count)]
+        self.f.bot.action(self.a('recovery_profiles',selected_profile_id='fixture',profiles=[dict(id='fixture',name='Fixture',stages=stages)],recovery_sl_distance='1.50'))
     def entry(self,kind='MARKET',timing='now',side='SELL',count=3):
+        self.profile(count)
         self.f.bot.action(self.a('v3_entry',order_type=kind,timing=timing,side=side,count=count));self.f.tick(5)
     def ids(self):return sorted(p['id'] for p in self.f.b.data['positions'])
     def test_v3_default_and_version_switch_removed(self):
@@ -63,6 +67,7 @@ class V3(unittest.TestCase):
         with self.assertRaises(ActionRejected):self.f.bot.action(self.a('recovery_mode',mode='V1'))
         with self.assertRaises(ActionRejected):self.f.bot.action(self.a('manual_close'))
     def link(self,count=2):
+        self.profile(count)
         f=self.f;f.bot.action(self.a('v3_link',count=count,expected_positions=self.ids()));f.tick(3)
     def test_link_cancel_one_shot_restart(self):
         self.initial();self.link();f=self.f;self.assertEqual(len(f.b.data['orders']),2)
@@ -116,7 +121,7 @@ class V3(unittest.TestCase):
         self.assertTrue(f.bot.v3_view(f.bot.snapshot())['v3_controls']['can_cancel_link'])
         f.b.fill('SELL');f.tick(5)
         g=f.bot.state['cycle']['groups'][-1]
-        self.assertFalse(g['ladder_applied'])
+        self.assertTrue(g['ladder_applied'])  # Exact profile targets do not wait for source debt.
         f.b.close('SL',position_id=source)
         entry=D(next(p['entry'] for p in f.b.data['positions']));f.b.quote(entry-D('.05'),entry+D('.05'));f.tick(6)
         self.assertTrue(g['ladder_applied']);self.assertGreater(D(f.bot.state['cycle']['recovery']),0)
@@ -152,7 +157,7 @@ class V3(unittest.TestCase):
 
 
     def test_link_intents_and_source_are_one_durable_write(self):
-        self.initial();f=self.f;original=f.bot.save;seen=[]
+        self.initial();self.profile(2);f=self.f;original=f.bot.save;seen=[]
         def save(reason):
             if reason.startswith('v3_'):
                 seen.append(reason)
@@ -174,7 +179,7 @@ class V3(unittest.TestCase):
         f.bot.action(self.a('own_entry_sl',expected_positions=self.ids()));f.tick(5)
         self.assertEqual(f.b.data['orders'],before)
         # Choose an exact tick grid for the existing reverse ladder algorithm.
-        entry=D(f.b.data['positions'][0]['entry']);f.b.quote(entry-D('.50'),entry-D('.40'));f.tick(2)
+        entry=D(f.b.data['positions'][0]['entry']);f.b.quote(entry-D('.30'),entry-D('.20'));f.tick(2)
         self.assertTrue(f.bot.reverse_controls(f.bot.snapshot())['can_enable'])
         f.bot.action(self.a('reverse_ladder',enabled=True,expected_positions=self.ids()));f.tick(5)
         self.assertEqual(f.b.data['orders'],before);self.assertFalse(f.bot.state['cycle'].get('manual'))
@@ -185,7 +190,7 @@ class V3(unittest.TestCase):
         self.assertEqual(f.b.data['orders'],before);self.assertEqual(D(f.bot.state['cycle']['tp_distances'][0]),D('.30'))
 
 
-    def test_ordinary_pending_settings_rearm_same_count_and_level(self):
+    def test_ordinary_profile_pending_settings_preserve_count_and_level(self):
         self.loss();self.entry('STOP','current',count=2);f=self.f
         target=f.bot.state['cycle']['v3_request']['bar_id']
         f.b.data.update(now=target+60,candle=dict(id=target,open='4001',close='4000'));f.b.quote('3999.7','3999.8');f.tick(4)
@@ -193,7 +198,7 @@ class V3(unittest.TestCase):
         before=f.b.data['orders'][0]['price'];cfg=deepcopy(f.bot.state['cycle']['cfg']);cfg['RECOVERY_SL_DISTANCE']='1.40'
         f.bot.edit(settings=cfg);f.tick(10)
         self.assertEqual(len(f.b.data['orders']),2);self.assertEqual({p['price'] for p in f.b.data['orders']},{before})
-        self.assertTrue(all(D(p['sl'])-D(p['price'])==D('1.40') for p in f.b.data['orders']))
+        self.assertTrue(all(D(p['sl'])-D(p['price'])==D('1.50') for p in f.b.data['orders']))
         self.assertFalse(f.bot.state['cycle'].get('manual'))
 
 

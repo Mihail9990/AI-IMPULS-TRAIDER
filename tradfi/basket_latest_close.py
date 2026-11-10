@@ -48,10 +48,13 @@ class LatestCloseBasketController(OwnEntrySL,RecoveryWriteoff,ReverseLadderContr
             raise ActionRejected('Задайте TP1 и положительные возрастающие расстояния с точностью tick; пустые ступени рассчитываются автоматически')
         return result
 
+    def _validate_start_ladder(self,spec):
+        self._validate_distances(self.state['tp_distances'],spec)
+
     def command(self,text,update_id=None):
         if text.strip().lower() in {'/start','/start auto'}:
             snap=self._guard(entry=True)
-            self._validate_distances(self.state['tp_distances'],Spec.load(snap['spec']))
+            self._validate_start_ladder(Spec.load(snap['spec']))
         return super().command(text,update_id)
 
     def _recovery_tps(self,cfg,spec,side,entries,sizes,debt):
@@ -83,7 +86,7 @@ class LatestCloseBasketController(OwnEntrySL,RecoveryWriteoff,ReverseLadderContr
                 ts=sorted([t for t in c['tickets'].values() if t['group']==g['id']],key=lambda t:t['index'])
                 orders=self._pending(snap,g['commands'])
                 if ts and orders:raise ValueError('Partial fill')
-                if g['role']=='initial':continue
+                if g['role']=='initial' or g.get('recovery_profile'):continue
                 if ts and any(t['closed'] for t in ts):
                     if any(not t['closed'] for t in ts):raise ValueError('Partially closed ladder: use individual chart edits')
                     continue
@@ -213,6 +216,12 @@ class LatestCloseBasketController(OwnEntrySL,RecoveryWriteoff,ReverseLadderContr
         self.save('tp_debt_previous_main_range_confirmed')
         return True
 
+    def _group_recovery_tps(self,cfg,spec,g,tickets,debt):
+        return self._recovery_tps(cfg,spec,g['activated'],[t['entry'] for t in tickets],[t['size'] for t in tickets],debt)
+
+    def _group_indexes_valid(self,g,tickets):
+        return sorted(t['index'] for t in tickets)==list(range(len(tickets)))
+
     def _live_ladder(self,snap,g):
         c=self.state['cycle'];tickets=sorted([t for t in c['tickets'].values() if t['group']==g['id']],key=lambda t:t['index'])
         selected=[cid for cid in g['commands'] if self.state['commands'][cid]['side']==g['activated']]
@@ -222,7 +231,7 @@ class LatestCloseBasketController(OwnEntrySL,RecoveryWriteoff,ReverseLadderContr
         targets=[]
         try:
             spec=Spec.load(snap['spec']);cfg=BasketSettings.load(c['cfg'])
-            tps=self._recovery_tps(cfg,spec,g['activated'],[t['entry'] for t in tickets],[t['size'] for t in tickets],c['recovery'])
+            tps=self._group_recovery_tps(cfg,spec,g,tickets,c['recovery'])
             for t,tp in zip(tickets,tps):
                 live=next(p for p in snap['positions'] if p['id']==t['id'])
                 spec.protection(t['side'],number(t['entry']),number(live['sl']),number(tp),snap['quote'],modify=True)
@@ -279,7 +288,7 @@ class LatestCloseBasketController(OwnEntrySL,RecoveryWriteoff,ReverseLadderContr
             raise ActionRejected('TP ступени ещё не подтверждён')
         if c.get('edit') or self._uncertain() or self._blocking_protection_orders(snap):raise ActionRejected('Сначала сверка отмен, исполнений и предыдущей правки')
         group_tickets=[t for t in c['tickets'].values() if t['group']==group_id]
-        if sorted(t['index'] for t in group_tickets)!=list(range(len(group_tickets))):raise ActionRejected('Номера частей не подтверждены')
+        if not self._group_indexes_valid(g,group_tickets):raise ActionRejected('Номера частей не подтверждены')
         spec=Spec.load(snap['spec']);targets=[]
         for t in c['tickets'].values():
             if t['group']!=group_id or t['closed']:continue

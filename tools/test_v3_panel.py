@@ -13,6 +13,8 @@ def main():
         settings=dict(INITIAL_SIZE='0.09',INITIAL_ENTRY_DISTANCE='1',INITIAL_SL_DISTANCE='3',INITIAL_TP_DISTANCE='.25',BASKET_COUNT=6,TICKET_SIZE='.01',RECOVERY_SL_DISTANCE='1.5',EXPANSION_DISTANCE='1',CYCLE_COOLDOWN_SECONDS='0'),
         feed=dict(status='FRESH',quote=dict(bid='4000',ask='4000.23'),age_seconds=0,candles=[dict(open='3999',close='4000',high='4001',low='3998',utc_time=1804800000+i*60) for i in range(20)]),levels={},positions=[],orders=[],journal=[],action_results={},projection=None,
         recovery_mode='V3',v3_settings=dict(entry_distance='1',count_presets=[4,6,10]),v3_request=None,v3_link=None,v3_sl_distance='1.50',v3_controls=dict(can_enter=True,can_link=True,can_cancel_link=False,can_adjust_sl=True,reason=''))
+    profile=dict(id='six',name='Six',stages=[dict(volume='0.01',tp_distance=str((i+1)*.25)) for i in range(6)],total_volume='0.06',sl_distance='1.5')
+    base.update(recovery_profiles=dict(selected_profile_id='six',profiles=[{k:profile[k] for k in ('id','name','stages')}],recovery_sl_distance='1.5'),selected_recovery_profile=profile,current_recovery_profiles=[])
     state=copy.deepcopy(base)
     requests=[];errors=[];dialogs=[];auth={'live':True};fail_state=False;unknown=False;dismiss=False
     def route(r):
@@ -39,11 +41,11 @@ def main():
                 r.fulfill(status=409,json={});return
             requests.append(req);a=req['action']
             assert a['type'] not in ('recovery_mode','manual_close'), 'Retired action must not be sent'
-            if a['type']=='v3_settings':s['v3_settings']=dict(entry_distance=a['entry_distance'],count_presets=a['count_presets'])
-            if a['type']=='v3_link':s['v3_link']=dict(stage='ARMED',count=a['count']);s['v3_controls']['can_cancel_link']=True
+            if a['type']=='v3_settings':s['v3_settings'].update(entry_distance=a['entry_distance'])
+            if a['type']=='v3_link':s['v3_link']=dict(stage='ARMED',count=len(profile['stages']),recovery_profile=copy.deepcopy(profile),side='SELL',price='3998.5');s['v3_controls']['can_cancel_link']=True
             if a['type']=='v3_cancel_link':s['v3_link']=None;s['v3_controls']['can_cancel_link']=False
             if a['type']=='v3_adjust_sl':s['v3_sl_distance']=a['distance']
-            if a['type']=='v3_entry' and a['timing']!='now':s['v3_request']=a.copy();s['v3_controls']['can_enter']=False
+            if a['type']=='v3_entry' and a['timing']!='now':s['v3_request']=dict(a,recovery_profile=copy.deepcopy(profile));s['v3_controls']['can_enter']=False
             if a['type']=='v3_cancel_request':s['v3_request']=None;s['v3_controls']['can_enter']=True
             status='UNKNOWN' if unknown else 'APPLIED';s['action_results'][req['id']]=dict(status=status);s['revision']+=1
             r.fulfill(json=dict(status=status));return
@@ -73,13 +75,12 @@ def main():
                 assert p.locator('#'+removed).count()==0
             assert p.locator('#v3-side').is_disabled()
             assert p.locator('#v3-timing option[value=now]').is_disabled()
-            assert p.locator('#v3-presets button').count()==3
-            p.locator('#v3-presets button').nth(2).click();assert p.locator('#v3-count').input_value()=='10'
-            before=len(requests);p.locator('#v3-count').fill('1.5');p.locator('#v3-submit-entry').click();assert len(requests)==before
-            p.locator('#v3-count').fill('8');p.locator('#v3-order-type').select_option('MARKET');p.locator('#v3-timing').select_option('now');assert p.locator('#v3-side').is_enabled()
+            assert p.locator('#v3-count, #v3-presets').count()==0
+            assert '0.06' in p.locator('#recovery-selected-summary').inner_text()
+            before=len(requests);p.locator('#v3-order-type').select_option('MARKET');p.locator('#v3-timing').select_option('now');assert p.locator('#v3-side').is_enabled()
             p.locator('#v3-side').select_option('SELL');dismiss=True;p.locator('#v3-submit-entry').click();assert len(requests)==before
             dismiss=False;p.locator('#v3-submit-entry').click();wait("localStorage.getItem('basket-request')===null")
-            assert requests[-1]['action']==dict(type='v3_entry',cycle_id=None,order_type='MARKET',timing='now',side='SELL',count=8)
+            assert requests[-1]['action']==dict(type='v3_entry',cycle_id=None,order_type='MARKET',timing='now',side='SELL')
             p.locator('#v3-order-type').select_option('STOP');assert p.locator('#v3-timing').input_value()=='current';assert p.locator('#v3-side').is_disabled()
             p.locator('#v3-timing').select_option('next');p.locator('#v3-submit-entry').click();p.locator('#v3-cancel-request').wait_for(state='visible');assert requests[-1]['action']['timing']=='next'
             p.locator('#v3-cancel-request').click();wait("document.querySelector('#v3-cancel-request').hidden")
@@ -132,7 +133,7 @@ def main():
                 p.locator('#drawer-toggle').click()
                 assert p.locator('#chart').bounding_box()['height']>80
                 assert p.locator('#drawer-content').bounding_box()['y']>=p.locator('#chart').bounding_box()['y']
-                p.locator('#tab-settings').click();assert p.locator('#start').is_visible();assert not p.locator('#chart').is_visible()
+                p.locator('#tab-settings').click();p.locator('#service-controls').evaluate('(e)=>e.open=true');assert p.locator('#start').is_visible();assert not p.locator('#chart').is_visible()
                 assert p.evaluate('document.documentElement.scrollWidth<=innerWidth'),width
             assert len(requests)==before,'view navigation never sends commands'
             p.set_viewport_size(dict(width=390,height=844));p.locator('#tab-chart').click()
@@ -155,6 +156,6 @@ def main():
             p.reload();p.locator('#workspace').wait_for(state='visible');assert p.locator('#v3-link-toggle').is_disabled();assert len(requests)==n
             assert not errors,errors
             p.screenshot(path='/tmp/v3-panel-mobile.png',full_page=True)
-            print('PASS V3 UI: V3-only defaults, retired controls absent, legacy migration block, STOP/MARKET timing, count validation/presets, cancel preview, SL confirmation, immediate linked cancellation, independent collapse/reload, mobile widths, LIVE-only controls, scoped cookies/logout, removed-route rejection, read-only/stale/UNKNOWN. All HTTP mocked; no real trading.')
+            print('PASS V3 UI: V3-only defaults, retired controls absent, legacy migration block, STOP/MARKET timing, selected profile snapshot, cancel preview, SL confirmation, immediate linked cancellation, independent collapse/reload, mobile widths, LIVE-only controls, scoped cookies/logout, removed-route rejection, read-only/stale/UNKNOWN. All HTTP mocked; no real trading.')
         finally:b.close()
 if __name__=='__main__':main()

@@ -22,8 +22,10 @@ class Element{
 }
 const elements=Object.fromEntries(ids.map(id=>[id,new Element()]));
 const $=id=>{assert(elements[id],'known element '+id);return elements[id];};
-Object.assign($('v3-order-type'),{value:'STOP'});$('v3-timing').value='current';$('v3-side').value='BUY';$('v3-count').value='6';
+Object.assign($('v3-order-type'),{value:'STOP'});$('v3-timing').value='current';$('v3-side').value='BUY';
 const base={recovery_mode:'V3',cycle_id:'c1',scope:'live',revision:7,read_only:false,positions:[{id:'p1'}],orders:[],v3_sl_distance:'1.50',v3_settings:{entry_distance:'1.00',count_presets:[4,6,10]},v3_controls:{can_enter:true,can_link:true,can_cancel_link:false,can_adjust_sl:true,reason:''}};
+const profile={id:'six',name:'Six',stages:Array.from({length:6},(_,i)=>({volume:'0.01',tp_distance:String((i+1)*.25)})),total_volume:'0.06',sl_distance:'1.50'};
+base.recovery_profiles={selected_profile_id:'six',profiles:[profile,{id:'mix',name:'Mix',stages:[{volume:'0.05',tp_distance:'0.25'},{volume:'0.02',tp_distance:'0.50'},{volume:'0.01',tp_distance:'0.75'}]}],recovery_sl_distance:'1.50'};base.selected_recovery_profile=profile;base.current_recovery_profiles=[{...profile,group_id:'g1'}];
 const actions=[],dialogs=[],errors=[],store=new Map();let accept=true;
 const ctx=vm.createContext({$,document:{createElement:()=>new Element()},view:structuredClone(base),busy:false,pending:null,mode:'live',confirm:msg=>{dialogs.push(msg);return accept;},send:async(a,r,s)=>actions.push({a,r,s}),error:m=>errors.push(m),localStorage:{getItem:k=>store.get(k),setItem:(k,v)=>store.set(k,v)},fields:()=>{},console});
 const part=src.slice(src.indexOf(' // V3 reuses scoped receipts'),src.indexOf(' function fields(){'));
@@ -80,23 +82,37 @@ async function main(){
  ctx.view.recovery_mode='V1';renderOwn();assert.equal($('own-entry-sl').disabled,true,'V1 pending behavior unchanged');
  ctx.view.orders=[];renderOwn();assert.equal($('own-entry-sl').disabled,true,'legacy state never permits V3 actions');
  ctx.view=structuredClone(base);
- assert.equal($('v3-panels').hidden,false);assert(!elements['manual-close-controls']);assert.equal($('v3-side').disabled,true);assert.equal($('v3-presets').children.length,3);
- $('v3-presets').children[2].onclick();assert.equal($('v3-count').value,'10');
- let before=actions.length;$('v3-count').value='1.5';await $('v3-submit-entry').onclick();assert.equal(actions.length,before);assert(errors.at(-1).includes('целое'));
- $('v3-count').value='8';$('v3-order-type').value='MARKET';$('v3-timing').value='now';$('v3-side').value='SELL';$('v3-timing').onchange();assert.equal($('v3-side').disabled,false);
+ assert.equal($('v3-panels').hidden,false);assert(!elements['manual-close-controls']);assert.equal($('v3-side').disabled,true);assert.equal($('recovery-profile-select').children.length,2);
+ let before=actions.length;
+ $('v3-order-type').value='MARKET';$('v3-timing').value='now';$('v3-side').value='SELL';$('v3-timing').onchange();assert.equal($('v3-side').disabled,false);
  accept=false;await $('v3-submit-entry').onclick();assert.equal(actions.length,before);accept=true;
- await $('v3-submit-entry').onclick();assert.equal(actions.at(-1).a.count,8);assert.equal(actions.at(-1).a.side,'SELL');assert.equal(actions.at(-1).a.timing,'now');assert.equal(actions.at(-1).r,7);assert.equal(actions.at(-1).s,'live');
+ await $('v3-submit-entry').onclick();assert(!('count' in actions.at(-1).a));assert.equal(actions.at(-1).a.side,'SELL');assert.equal(actions.at(-1).a.timing,'now');assert.equal(actions.at(-1).r,7);assert.equal(actions.at(-1).s,'live');
  $('v3-order-type').value='STOP';$('v3-order-type').onchange();assert.equal($('v3-timing').value,'current');assert.equal($('v3-side').disabled,true);
  $('v3-timing').value='next';await $('v3-submit-entry').onclick();assert.equal(actions.at(-1).a.order_type,'STOP');assert.equal(actions.at(-1).a.timing,'next');
  await $('v3-sl-minus').onclick();assert.equal(actions.at(-1).a.distance,'1.40');await $('v3-sl-plus').onclick();assert.equal(actions.at(-1).a.distance,'1.60');
+ ctx.view.v3_sl_distance='0.00';vm.runInContext('v3Render()',ctx);assert.equal($('v3-sl-value').textContent,'0.00');assert.equal($('v3-sl-minus').disabled,true);assert.equal($('v3-sl-plus').disabled,false);await $('v3-sl-plus').onclick();assert.equal(actions.at(-1).a.distance,'0.10');
+ ctx.view.v3_sl_distance='0.125';vm.runInContext('v3Render()',ctx);assert.equal($('v3-sl-value').textContent,'0.125');await $('v3-sl-plus').onclick();assert.equal(actions.at(-1).a.distance,'0.225');await $('v3-sl-minus').onclick();assert.equal(actions.at(-1).a.distance,'0.025');
+ ctx.view.v3_sl_distance='1.50';vm.runInContext('v3Render()',ctx);
  const d=dialogs.length;await $('v3-link-toggle').onclick();assert.equal(actions.at(-1).a.type,'v3_link');assert.equal(dialogs.length,d+1);
  ctx.view.v3_link={side:'SELL',price:'3998.5',count:6};ctx.view.v3_controls.can_cancel_link=true;vm.runInContext('v3Render()',ctx);const d2=dialogs.length;await $('v3-link-toggle').onclick();assert.equal(actions.at(-1).a.type,'v3_cancel_link');assert.equal(dialogs.length,d2,'cancel no dialog');
  ctx.view.v3_request={bar_id:1804800000,order_type:'STOP',count:6};vm.runInContext('v3Render()',ctx);assert.equal($('v3-cancel-request').hidden,false);await $('v3-cancel-request').onclick();assert.equal(actions.at(-1).a.type,'v3_cancel_request');
- $('v3-setting-distance').value='2.00';$('v3-preset-0').value='3';$('v3-preset-1').value='5';$('v3-preset-2').value='9';await $('save-v3-settings').onclick();assert.equal(actions.at(-1).a.entry_distance,'2.00');assert.equal(actions.at(-1).a.count_presets.join(','),'3,5,9');
- $('v3-preset-1').value='0';before=actions.length;await $('save-v3-settings').onclick();assert.equal(actions.length,before);
+ $('v3-setting-distance').value='2.00';await $('save-v3-settings').onclick();assert.equal(actions.at(-1).a.entry_distance,'2.00');assert(!('count_presets' in actions.at(-1).a));
+ $('v3-setting-distance').value='0';before=actions.length;await $('save-v3-settings').onclick();assert.equal(actions.length,before);
+ assert.equal(vm.runInContext("profileTotal([{volume:'0.05'},{volume:'0.02'},{volume:'0.01'}])",ctx),'0.08');
+ $('recovery-profile-select').value='mix';accept=false;before=actions.length;await $('recovery-profile-apply').onclick();assert.equal(actions.length,before);accept=true;
+ await $('recovery-profile-apply').onclick();assert.equal(actions.at(-1).a.profile_id,'mix');assert.equal(actions.at(-1).r,7);
+ $('recovery-profile-edit').onclick();assert.equal($('recovery-stage-rows').children.length,3);
+ $('recovery-profile-name').value='Exact mixed';vm.runInContext("profileRows[0].volume='0.051';profileRows[0].tp_distance='0.251'",ctx);await $('recovery-profile-save').onclick();assert.equal(actions.at(-1).a.type,'recovery_profiles');assert.equal(actions.at(-1).a.profiles.at(-1).stages[0].volume,'0.051');assert.equal(actions.at(-1).a.profiles.at(-1).stages[0].tp_distance,'0.251');
+ vm.runInContext("profileRows[0].volume='0'",ctx);before=actions.length;await $('recovery-profile-save').onclick();assert.equal(actions.length,before);
+ $('recovery-profile-new').onclick();for(let i=0;i<25;i++)$('recovery-add-stage').onclick();assert.equal($('recovery-stage-rows').children.length,20);assert.equal($('recovery-add-stage').disabled,true);
+ vm.runInContext("view.recovery_profiles.recovery_sl_distance='2'",ctx);before=actions.length;await $('recovery-profile-save').onclick();assert.equal(actions.length,before);assert(errors.at(-1).includes('изменились'));
+ ctx.view=structuredClone(base);vm.runInContext('v3FillSettings();v3Render()',ctx);$('recovery-profile-select').value='six';$('recovery-profile-remove').onclick();await $('recovery-profile-save-list').onclick();assert.equal(actions.at(-1).a.profiles.length,1);assert.equal(actions.at(-1).a.selected_profile_id,'mix');assert.equal(actions.at(-1).a.profiles[0].id,'mix');$('recovery-profile-remove').onclick();
+ $('recovery-profile-new').onclick();$('recovery-profile-name').value='<img src=x onerror=alert(1)>';await $('recovery-profile-save').onclick();assert.equal(actions.at(-1).a.profiles.at(-1).name,'<img src=x onerror=alert(1)>');
+ $('recovery-sl-distance').value='2.25';await $('recovery-save-sl').onclick();assert.equal(actions.at(-1).a.recovery_sl_distance,'2.25');
+ ctx.view=structuredClone(base);vm.runInContext('v3Render()',ctx);assert($('recovery-current-summary').textContent.includes('g1'));assert($('recovery-current-summary').textContent.includes('0.06'));
  for(const block of ['busy','pending','read_only','stale']){
   ctx.busy=block==='busy';ctx.pending=block==='pending'?'req':null;ctx.view.read_only=block==='read_only';vm.runInContext('v3Fresh='+String(block!=='stale')+';v3Render()',ctx);
-  before=actions.length;await $('v3-link-toggle').onclick();await $('v3-submit-entry').onclick();await $('v3-sl-plus').onclick();assert.equal(actions.length,before,block);assert.equal($('v3-link-toggle').disabled,true);
+  before=actions.length;await $('v3-link-toggle').onclick();await $('v3-submit-entry').onclick();await $('v3-sl-plus').onclick();await $('recovery-profile-apply').onclick();await $('recovery-profile-save').onclick();await $('recovery-save-sl').onclick();assert.equal(actions.length,before,block);assert.equal($('v3-link-toggle').disabled,true);
  }
  ctx.busy=false;ctx.pending=null;ctx.view.read_only=false;vm.runInContext('v3Fresh=true',ctx);
  ctx.view.recovery_mode='V1';ctx.view.migration_block='Legacy active cycle needs reconciliation';vm.runInContext('v3Render()',ctx);
@@ -115,7 +131,7 @@ async function main(){
  vm.runInContext(src.split('\n').find(line=>line.includes("$('save-settings').onclick=")),ctx);
  await $('save-settings').onclick();assert.equal(actions.at(-1).a.type,'basket_settings');
  assert.equal(actions.at(-1).a.settings.EXPANSION_DISTANCE,'2');assert.equal(actions.at(-1).a.settings.TICKET_SIZE,'0.03');
- assert.equal(actions.at(-1).a.settings.INITIAL_SIZE,'0.02');assert.equal(actions.at(-1).a.settings.BASKET_COUNT,8);
+ assert.equal(actions.at(-1).a.settings.INITIAL_SIZE,'0.02');assert.equal(actions.at(-1).a.settings.BASKET_COUNT,6);
  assert(!dialogs.at(-1).includes('EXPANSION_DISTANCE'));assert(!dialogs.at(-1).includes('TICKET_SIZE'));
  $('v3-sl-panel').open=false;$('v3-sl-panel').events.toggle();assert.equal(store.get('v3-sl-panel-open'),'false');assert.equal($('v3-entry-panel').open,true);
  // Actual viewport, quote rendering and navigation code; no action requests allowed.

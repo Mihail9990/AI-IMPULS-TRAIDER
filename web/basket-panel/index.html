@@ -46,7 +46,7 @@
 <option value="SELL">SELL</option></select></label>
 </div>
 <p id="v3-direction-note"></p>
-<label>Количество ступеней по 0.01<input id="v3-count" type="number" inputmode="numeric" min="1" max="20" step="1" value="6"></label><div id="v3-presets" class="controls" aria-label="Пресеты количества ступеней"></div>
+<p id="recovery-selected-summary"></p><p id="recovery-current-summary"></p>
 <p id="v3-entry-distance"></p>
 <button id="v3-submit-entry">Предпросмотр входа…</button><button id="v3-cancel-request" hidden>Отменить ожидание свечи…</button><p id="v3-request-status" role="status"></p>
 <hr>
@@ -63,7 +63,7 @@
 <small>AI IMPULS / XAUUSD.s</small><h1>__PANEL_ROLE__</h1>
 </div>
 <button id="logout">Выйти</button></header>
-<details id="service-controls" class="card" open="open"><summary>Управление сервисом</summary>
+<details id="service-controls" class="card"><summary>Управление сервисом</summary>
 <div class="controls">
 <button id="start">Старт</button><button id="stop">Стоп новых входов</button><button id="resume">Проверить время…</button><button id="reset">Ручная сверка…</button>
 </div></details><details class="card"><summary>Состояние цикла и связь</summary><div class="stats">
@@ -86,18 +86,22 @@
 <p id="edit-status"></p></details>
 
 <details class="card"><summary>Параметры торговли</summary>
-<section id="v3-settings" hidden><h3>Настройки входа V3</h3>
-<div class="fields">
-<label>Отступ RECOVERY STOP от Close M1<input id="v3-setting-distance" inputmode="decimal" value="1.00"></label><label>Пресет 1 · число ступеней<input id="v3-preset-0" type="number" min="1" max="20" step="1" inputmode="numeric" value="4"></label><label>Пресет 2 · число ступеней<input id="v3-preset-1" type="number" min="1" max="20" step="1" inputmode="numeric" value="6"></label><label>Пресет 3 · число ступеней<input id="v3-preset-2" type="number" min="1" max="20" step="1" inputmode="numeric" value="10"></label>
-</div>
-<button id="save-v3-settings">Применить настройки V3…</button></section><p id="strategy-settings-note">V3: начальное следование M1 сохраняется. После SL бот ждёт ручного RECOVERY-входа; после исполнения сопровождает всю корзину. Каждая ступень RECOVERY — 0.01 лота. Число и объём не меняют уже открытые позиции.</p>
-<div id="fields" class="fields"></div>
-<button id="save-settings">Предпросмотр параметров…</button><button id="refresh-settings">Загрузить актуальные</button><section id="tp-grid-settings"><h3>Ступени RECOVERY</h3>
+<section id="v3-settings" hidden>
+<details class="settings-group" id="recovery-profile-settings"><summary id="recovery-profile-summary">Профили RECOVERY</summary>
+<p>1–20 ступеней с точным объёмом и TP каждой. TP должны возрастать по номеру ступени. Следующая корзина использует выбранный профиль. Существующие позиции, триггеры и заявки сохраняют прежний стандарт.</p>
+<label>Сохранённый профиль<select id="recovery-profile-select"></select></label>
+<div class="controls"><button id="recovery-profile-apply">Выбрать профиль…</button><button id="recovery-profile-edit">Загрузить для правки</button><button id="recovery-profile-new">Новый профиль</button><button id="recovery-profile-remove">Исключить из списка</button><button id="recovery-profile-save-list">Сохранить исключения…</button></div>
+<p id="recovery-profile-removals" role="status"></p><details class="settings-group"><summary>Редактор профиля · объёмы и TP</summary>
+<label>Название<input id="recovery-profile-name" maxlength="80"></label><div id="recovery-stage-rows"></div><p id="recovery-draft-total" role="status"></p><button id="recovery-add-stage">Добавить ступень</button><button id="recovery-profile-save">Сохранить и выбрать…</button></details></details>
+<details class="settings-group"><summary id="recovery-sl-summary">SL новых корзин RECOVERY</summary><label>Расстояние SL от входа<input id="recovery-sl-distance" inputmode="decimal"></label><p>Сохраняется в новой заявке. SL действующей корзины меняется отдельно в командах.</p><button id="recovery-save-sl">Сохранить SL…</button></details>
+<details class="settings-group"><summary id="recovery-offset-summary">Отступ STOP от M1</summary><label>Отступ RECOVERY STOP от Close M1<input id="v3-setting-distance" inputmode="decimal" value="1.00"></label><button id="save-v3-settings">Применить отступ…</button></details></section><p id="strategy-settings-note">V3: начальное следование M1 сохраняется. После SL бот ждёт ручного RECOVERY-входа; после исполнения сопровождает всю корзину. Объёмы и TP RECOVERY задаёт выбранный профиль. Число и объём не меняют уже открытые позиции.</p>
+<details class="settings-group"><summary id="initial-settings-summary">Начальный вход · следование M1</summary><div id="fields" class="fields"></div>
+<button id="save-settings">Предпросмотр параметров…</button><button id="refresh-settings">Загрузить актуальные</button></details><section id="tp-grid-settings"><h3>Ступени RECOVERY</h3>
 <p>TP1 обязателен. Расстояния — от собственного фактического входа каждой части. Пустые промежуточные ступени интерполируются; хвост рассчитывается для покрытия долга. После частичного закрытия — отдельные правки на графике.</p>
 <div id="tp-fields" class="fields"></div>
-<button id="save-tp-grid">Предпросмотр ступеней…</button></section><section><h3>Остаток RECOVERY</h3>
+<button id="save-tp-grid">Предпросмотр ступеней…</button></section><details class="settings-group"><summary id="recovery-debt-summary">Остаток RECOVERY</summary>
 <p>Сначала остановите новые входы. Списание возможно только без позиций, ордеров и неизвестных исходов. Уже учтённый убыток не вычитается повторно. После подтверждения — новый цикл с новой закрытой M1.</p>
-<button id="writeoff-recovery">Сбросить остаток RECOVERY…</button><p id="writeoff-history"></p></section><details id="logs-section"><summary>Логи</summary><label>Контур<select id="log-scope"><option value="live">Торговля · audit</option>
+<button id="writeoff-recovery">Сбросить остаток RECOVERY…</button><p id="writeoff-history"></p></details><details id="logs-section"><summary>Логи</summary><label>Контур<select id="log-scope"><option value="live">Торговля · audit</option>
 
 <option value="runtime">Файл этого сервиса · очищенный</option></select></label><button id="logs-refresh">Показать</button><button id="logs-prev">Предыдущая страница</button><button id="logs-next">Следующая страница</button><button id="logs-download">Скачать .txt</button><p id="logs-status"></p>
 <pre id="logs-view"></pre>
