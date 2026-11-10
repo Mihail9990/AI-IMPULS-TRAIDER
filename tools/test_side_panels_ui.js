@@ -45,7 +45,7 @@ state.feed.candles=Array.from({length:300},(_,i)=>({utc_time:1700000000+i*60,ope
   await page.locator('#tab-settings').click();assert(await page.locator('#v3-entry-panel').evaluate(n=>n.inert));
   await page.locator('#tab-chart').click();assert.equal(await page.locator('#v3-entry-panel').getAttribute('data-open'),'false');
   await page.setViewportSize({width,height:480});await page.locator('#toggle-entry-panel').click();
-  const bounds=await page.locator('#v3-entry-panel').boundingBox();const chartBounds=await page.locator('#chart-page').boundingBox();assert(bounds.height>0&&bounds.height<=chartBounds.height*.42+1);assert(bounds.y>chartBounds.y,'compact drawer anchors below chart top');
+  const bounds=await page.locator('#v3-entry-panel').boundingBox();const chartBounds=await page.locator('#chart-page').boundingBox();assert(bounds.height>0&&bounds.height<=chartBounds.height*.78+1);assert(bounds.y>=chartBounds.y,'drawer stays within chart');assert(bounds.width<=132+1,'narrow left column');
   assert.deepEqual(errors,[]);await page.close();console.log('PASS side drawers, direct STOP, cancel, notices, settings and landscape at '+width);
  }}finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

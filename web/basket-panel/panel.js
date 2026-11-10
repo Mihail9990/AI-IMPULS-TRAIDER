@@ -13,6 +13,8 @@
  function friendlyReason(reason){
   if(!reason)return '';
   const text=String(reason);
+  if(text.includes('V3_PARTIAL_OR_REJECTED_BATCH'))return 'Один или несколько ордеров отклонены. Проверьте выставленные ордера и позиции; новые действия приостановлены.';
+  if(text.includes('V3_LINK_EDIT_REJECTED'))return 'Изменение связанных триггеров отклонено. Проверьте ордера и SL; новые действия приостановлены.';
   if(text.includes('TP1_OWN_ENTRY_SL_UNAVAILABLE'))return 'Защитная пауза: после первого TP не удалось перенести SL на цену входа. Проверьте оставшиеся позиции и их SL в настройках.';
   if(/^[A-Z][A-Z0-9_ :.-]+$/.test(text))return 'Требуется проверка состояния. Откройте журнал в настройках: там сохранены подробности.';
   return text;
@@ -82,8 +84,7 @@
   else if(pending){action=pendingScope!==view.scope?'Ожидается сверка команды другого контекста; новые команды заблокированы.':actionReceiptText(view.action_results?.[pending]?.status,view.action_results?.[pending]?.reason);}
   else if(lastActionReceipt)action='Последняя команда: '+actionReceiptText(lastActionReceipt.status,lastActionReceipt.reason);
   write('bot-activity-action',action);$('bot-activity-action').dataset.tone=pending?'unknown':lastActionReceipt?.status==='APPLIED'?'success':lastActionReceipt?.status==='UNKNOWN'?'unknown':lastActionReceipt?.status==='REJECTED'||lastActionReceipt?.status==='CONFLICT'?'warning':'info';
-  const events=Array.isArray(view.journal)?view.journal.filter(x=>typeof x==='string'&&x.trim()):[];
-  write('bot-activity-event',events.length?'Последнее сообщение контроллера: '+friendlyReason(events[events.length-1]):'Сообщений контроллера пока нет.');
+  // Raw controller journal remains in Settings; current safety reasons and receipts stay above.
  }
  // V3 reuses scoped receipts and snapshot revisions; no live execution is enabled here.
  // Display-only helpers: timestamp labels never establish a trading time contract.
