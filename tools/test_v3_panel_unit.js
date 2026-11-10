@@ -15,6 +15,12 @@ for(const role of ['live','paper']){
  assert.equal(vm.runInContext('mode',c),'live');
  assert.throws(()=>vm.runInContext("mode='other'",c));
 }
+assert(html.includes('id="v3-sl-confirm"'),'SL has explicit commit control');
+assert(html.includes('class="entry-details"'),'order explanations remain accessible in details');
+assert(html.includes('aria-label="Расстояние SL от входа"'));
+const compactCss=fs.readFileSync(path.join(root,'panel.css'),'utf8');
+assert(compactCss.includes('position:absolute;top:auto;bottom:60px'),'drawers anchor at chart bottom');
+assert(compactCss.includes('max-height:42%'),'order drawer leaves most chart visible');
 const ids=[...html.matchAll(/id="([^"]+)"/g)].map(x=>x[1]);assert.equal(new Set(ids).size,ids.length,'unique HTML IDs');
 class Element{
  constructor(){this.value='';this.textContent='';this.disabled=false;this.hidden=false;this.open=true;this.dataset={};this.children=[];this.classList={toggle:()=>{}};this.events={};this.attributes={};this.style={};this.clientHeight=520;this.clientWidth=1000;}
@@ -98,9 +104,19 @@ async function main(){
  $('v3-order-type').value='STOP';$('v3-order-type').onchange();assert.equal($('v3-timing').value,'current');assert.equal($('v3-side').disabled,true);
  $('v3-timing').value='next';const stopDialogs=dialogs.length;accept=false;await $('v3-submit-entry').onclick();assert.equal(actions.at(-1).a.order_type,'STOP');assert.equal(actions.at(-1).a.timing,'next');assert.equal(dialogs.length,stopDialogs);accept=true;
  ctx.view.v3_controls.can_cancel_entry=true;vm.runInContext('v3Render()',ctx);await $('v3-cancel-entry').onclick();assert.equal(actions.at(-1).a.type,'v3_cancel_entry');assert.equal(dialogs.length,stopDialogs);
- await $('v3-sl-minus').onclick();assert.equal(actions.at(-1).a.distance,'1.40');await $('v3-sl-plus').onclick();assert.equal(actions.at(-1).a.distance,'1.60');
- ctx.view.v3_sl_distance='0.00';vm.runInContext('v3Render()',ctx);assert.equal($('v3-sl-value').textContent,'0.00');assert.equal($('v3-sl-minus').disabled,true);assert.equal($('v3-sl-plus').disabled,false);await $('v3-sl-plus').onclick();assert.equal(actions.at(-1).a.distance,'0.10');
- ctx.view.v3_sl_distance='0.125';vm.runInContext('v3Render()',ctx);assert.equal($('v3-sl-value').textContent,'0.125');await $('v3-sl-plus').onclick();assert.equal(actions.at(-1).a.distance,'0.225');await $('v3-sl-minus').onclick();assert.equal(actions.at(-1).a.distance,'0.025');
+ const slBefore=actions.length;
+ await $('v3-sl-minus').onclick();assert.equal(actions.length,slBefore,'minus only stages');assert.equal($('v3-sl-value').textContent,'1.40');await $('v3-sl-confirm').onclick();assert.equal(actions.at(-1).a.distance,'1.40');
+ await $('v3-sl-plus').onclick();assert.equal(actions.length,slBefore+1,'plus only stages');await $('v3-sl-confirm').onclick();assert.equal(actions.at(-1).a.distance,'1.60');
+ await $('v3-sl-confirm').onclick();assert.equal(actions.length,slBefore+2,'repeat confirm cannot resubmit draft');
+ await $('v3-sl-plus').onclick();vm.runInContext("setSidePanel('sl',false)",ctx);await $('v3-sl-confirm').onclick();assert.equal(actions.length,slBefore+2,'closing discards draft');
+ await $('v3-sl-plus').onclick();ctx.view.revision++;await $('v3-sl-confirm').onclick();assert.equal(actions.length,slBefore+2,'revision drift blocks confirm');ctx.view.revision--;
+ await $('v3-sl-plus').onclick();ctx.view.positions=[{id:'p2'}];vm.runInContext('v3Render()',ctx);assert.equal($('v3-sl-confirm').disabled,true,'snapshot position change clears draft');ctx.view.positions=[{id:'p1'}];
+ const guardedCount=actions.length;
+ ctx.view.v3_sl_distance='1.5';vm.runInContext('v3Render()',ctx);await $('v3-sl-plus').onclick();await $('v3-sl-minus').onclick();assert.equal($('v3-sl-confirm').disabled,true,'same decimal value cannot send');await $('v3-sl-confirm').onclick();assert.equal(actions.length,guardedCount);
+ for(const field of ['scope','cycle_id']){await $('v3-sl-plus').onclick();const old=ctx.view[field];ctx.view[field]='changed';await $('v3-sl-confirm').onclick();assert.equal(actions.length,guardedCount,field+' drift must not send');ctx.view[field]=old;}
+ await $('v3-sl-plus').onclick();ctx.view.positions[0].sl='123';await $('v3-sl-confirm').onclick();assert.equal(actions.length,guardedCount,'position SL drift must not send');delete ctx.view.positions[0].sl;
+ ctx.view.v3_sl_distance='0.00';vm.runInContext('v3Render()',ctx);assert.equal($('v3-sl-value').textContent,'0.00');assert.equal($('v3-sl-minus').disabled,true);assert.equal($('v3-sl-plus').disabled,false);await $('v3-sl-plus').onclick();await $('v3-sl-confirm').onclick();assert.equal(actions.at(-1).a.distance,'0.10');
+ ctx.view.v3_sl_distance='0.125';vm.runInContext('v3Render()',ctx);assert.equal($('v3-sl-value').textContent,'0.125');await $('v3-sl-plus').onclick();await $('v3-sl-confirm').onclick();assert.equal(actions.at(-1).a.distance,'0.225');await $('v3-sl-minus').onclick();await $('v3-sl-confirm').onclick();assert.equal(actions.at(-1).a.distance,'0.025');
  ctx.view.v3_sl_distance='1.50';vm.runInContext('v3Render()',ctx);
  const d=dialogs.length;await $('v3-link-toggle').onclick();assert.equal(actions.at(-1).a.type,'v3_link');assert.equal(dialogs.length,d,'trigger placement has no preview dialog');
  ctx.view.v3_link={side:'SELL',price:'3998.5',count:6};ctx.view.v3_controls.can_cancel_link=true;vm.runInContext('v3Render()',ctx);const d2=dialogs.length;await $('v3-link-toggle').onclick();assert.equal(actions.at(-1).a.type,'v3_cancel_link');assert.equal(dialogs.length,d2,'cancel no dialog');
@@ -121,7 +137,7 @@ async function main(){
  ctx.view=structuredClone(base);vm.runInContext('v3Render()',ctx);assert($('recovery-current-summary').textContent.includes('g1'));assert($('recovery-current-summary').textContent.includes('0.06'));
  for(const block of ['busy','pending','read_only','stale']){
   ctx.busy=block==='busy';ctx.pending=block==='pending'?'req':null;ctx.view.read_only=block==='read_only';vm.runInContext('v3Fresh='+String(block!=='stale')+';v3Render()',ctx);
-  before=actions.length;await $('v3-link-toggle').onclick();await $('v3-submit-entry').onclick();await $('v3-sl-plus').onclick();await $('recovery-profile-apply').onclick();await $('recovery-profile-save').onclick();await $('recovery-save-sl').onclick();assert.equal(actions.length,before,block);assert.equal($('v3-link-toggle').disabled,true);
+  before=actions.length;await $('v3-link-toggle').onclick();await $('v3-submit-entry').onclick();await $('v3-sl-plus').onclick();await $('v3-sl-confirm').onclick();await $('recovery-profile-apply').onclick();await $('recovery-profile-save').onclick();await $('recovery-save-sl').onclick();assert.equal(actions.length,before,block);assert.equal($('v3-link-toggle').disabled,true);
  }
  ctx.busy=false;ctx.pending=null;ctx.view.read_only=false;vm.runInContext('v3Fresh=true',ctx);
  ctx.view.recovery_mode='V1';ctx.view.migration_block='Legacy active cycle needs reconciliation';vm.runInContext('v3Render()',ctx);
@@ -170,8 +186,8 @@ async function main(){
  $('drawer-toggle').onclick();assert.equal($('drawer-content').hidden,false);$('drawer-toggle').onclick();assert.equal($('drawer-content').hidden,true);
  ctx.preview={line:{},value:1};$('tab-settings').onclick();assert.equal($('settings-page').hidden,true,'active edit preview cannot disappear behind settings');ctx.preview=null;
  ctx.view.feed.status='FRESH';vm.runInContext('v3Fresh=true;connectionLabel()',ctx);assert.equal($('chart').dataset.feedFresh,'true');
- vm.runInContext('v3Fresh=false;connectionLabel()',ctx);assert($('drawer-toggle').textContent.includes('нет свежего снимка'));assert.equal($('chart').dataset.feedFresh,'false');
- ctx.view.feed.timestamp_semantics='UNVERIFIED';vm.runInContext('v3Fresh=true;connectionLabel()',ctx);assert($('drawer-toggle').textContent.includes('время не проверено'));
+ vm.runInContext('v3Fresh=false;connectionLabel()',ctx);assert($('drawer-toggle').title.includes('нет свежего снимка'));assert.equal($('chart').dataset.feedFresh,'false');
+ ctx.view.feed.timestamp_semantics='UNVERIFIED';vm.runInContext('v3Fresh=true;connectionLabel()',ctx);assert($('drawer-toggle').title.includes('время не проверено'));
  ctx.preview={value:1.5};vm.runInContext('draw()',ctx);assert.equal($('preview-backdrop').hidden,false);assert.equal($('command-drawer').inert,true);assert.equal($('v3-panels').inert,true);assert.equal($('bottom-tabs').inert,true);
  ctx.preview=null;vm.runInContext('draw()',ctx);assert.equal($('preview-backdrop').hidden,true);assert.equal($('command-drawer').inert,false);assert.equal($('v3-panels').inert,false);
  assert.equal(actions.length,before,'all gestures and navigation are display-only');

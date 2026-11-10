@@ -31,7 +31,7 @@ state.feed.candles=Array.from({length:300},(_,i)=>({utc_time:1700000000+i*60,ope
   await page.locator('#close-sl-panel').click();assert(await page.locator('#v3-sl-panel').evaluate(n=>n.inert));
   await page.locator('#toggle-entry-panel').click();await page.locator('#v3-submit-entry').click();
   await page.waitForTimeout(200);assert.equal(actions.at(-1).action.type,'v3_entry');assert.equal(dialogs.length,0);
-  assert.equal(await page.locator('#action-error').getAttribute('data-tone'),'success');
+  assert.equal(await page.locator('#bot-activity-action').getAttribute('data-tone'),'success');
   current.v3_controls.can_cancel_entry=true;current.v3_controls.can_enter=false;await page.waitForTimeout(1200);
   await page.locator('#v3-cancel-entry').click();await page.waitForTimeout(100);assert.equal(actions.at(-1).action.type,'v3_cancel_entry');
   assert.deepEqual(Object.keys(actions.at(-1).action).sort(),['cycle_id','type']);
@@ -45,7 +45,7 @@ state.feed.candles=Array.from({length:300},(_,i)=>({utc_time:1700000000+i*60,ope
   await page.locator('#tab-settings').click();assert(await page.locator('#v3-entry-panel').evaluate(n=>n.inert));
   await page.locator('#tab-chart').click();assert.equal(await page.locator('#v3-entry-panel').getAttribute('data-open'),'false');
   await page.setViewportSize({width,height:480});await page.locator('#toggle-entry-panel').click();
-  const bounds=await page.locator('#v3-entry-panel').boundingBox();assert(bounds.height>100&&bounds.height<480);
+  const bounds=await page.locator('#v3-entry-panel').boundingBox();const chartBounds=await page.locator('#chart-page').boundingBox();assert(bounds.height>0&&bounds.height<=chartBounds.height*.42+1);assert(bounds.y>chartBounds.y,'compact drawer anchors below chart top');
   assert.deepEqual(errors,[]);await page.close();console.log('PASS side drawers, direct STOP, cancel, notices, settings and landscape at '+width);
  }}finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

@@ -96,7 +96,7 @@ body{background:var(--bg)}main{padding:0;max-width:none}#login{max-width:480px;m
 #v3-panels #v3-sl-panel[data-open=true]{transform:translateX(0)}
 
 /* Source-backed totals stay above the activity text; history has its own tab. */
-:root{--activity-height:clamp(112px,16dvh,156px)}
+:root{--activity-height:clamp(123.2px,17.6dvh,171.6px)}
 #bot-activity{flex-basis:var(--activity-height);height:var(--activity-height);max-height:var(--activity-height)}
 #activity-totals{position:sticky;top:-5px;z-index:1;display:grid;grid-template-columns:1fr 1fr;gap:8px;background:#12151a;padding:5px 0}
 #activity-totals>div{min-width:0;background:#192533;border-radius:7px;padding:4px 8px}
@@ -110,7 +110,7 @@ body{background:var(--bg)}main{padding:0;max-width:none}#login{max-width:480px;m
 #history-page h1{font-size:26px}#history-page .card{padding:12px;margin:12px 0}#history-page summary{cursor:pointer;min-height:44px}
 #bottom-tabs button{width:33.333%;min-width:0}#tab-history::before{content:'◷'}
 
-#activity-totals #activity-recovery,#debt,#cycle-history-rows td:last-child{color:#b8f36a}
+#activity-totals #activity-recovery,#debt{color:#b8f36a}
 
 /* Two compact left-edge handles at the lower chart/Commands area. */
 #chart-page{position:relative}
@@ -137,3 +137,33 @@ body{background:var(--bg)}main{padding:0;max-width:none}#login{max-width:480px;m
 #preview button{font-size:12px;margin:0;padding:8px;min-height:40px}
 #preview-backdrop{background:transparent}
 @media(min-width:600px){#preview{left:calc(50% - 280px);right:auto;width:560px}}
+
+/* P/L sign colors are independent of warning colors. */
+#activity-totals #activity-total-net[data-tone=loss]{color:#ff8585;background:#351e24;border-color:#ef7373}
+#activity-totals #activity-total-net[data-tone=success]{color:#b2f2d2;background:#12372b;border-color:#55cb98}
+
+/* Relative vertical sizing: notifications +10%, totals row -5%. */
+#activity-totals{padding:4.75px 0}
+#activity-totals>div{padding-block:3.8px}
+#activity-totals small{font-size:9.5px}
+#activity-totals strong{font-size:15.2px}
+
+/* Compact drawers stay at the lower edge of the chart, not over its upper half. */
+.visually-hidden{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip-path:inset(50%);white-space:nowrap;border:0!important}
+#v3-panels .side-panel,#v3-panels #v3-sl-panel{position:absolute;top:auto;bottom:60px;width:min(340px,calc(100% - 48px));max-height:42%;padding:8px 10px;box-sizing:border-box}
+#v3-panels #v3-sl-panel{bottom:116px;width:min(260px,calc(100% - 48px));max-height:38%}
+#v3-panels .side-panel-heading{margin-bottom:4px;gap:6px}
+#v3-panels .side-panel-heading h2{font-size:14px}
+#v3-panels .side-panel-heading button{height:44px;padding:0;min-height:44px}
+#v3-panels .sl-stepper{grid-template-columns:44px minmax(45px,1fr) 44px;gap:6px;text-align:center}
+#v3-panels .sl-stepper button{margin:0;min-height:44px;padding:4px;font-size:20px}
+#v3-panels .sl-stepper output{font-size:18px}
+#v3-panels #v3-sl-confirm{margin:4px 0 0;min-height:44px;padding:6px}
+#v3-panels #v3-entry-panel .fields{grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 8px}
+#v3-entry-panel label{font-size:11px;margin:0}
+#v3-entry-panel select{font-size:12px;padding:4px;min-height:44px}
+#v3-entry-panel .entry-details{padding:0;border:0;margin:4px 0}
+#v3-entry-panel .entry-details summary{font-size:11px;min-height:24px;padding:2px}
+#v3-entry-panel .entry-actions{display:grid;grid-template-columns:1fr;gap:4px}
+#v3-entry-panel .entry-actions button{font-size:12px;padding:6px;min-height:44px;margin:0}
+#v3-entry-panel p{font-size:11px;line-height:1.3;margin:4px 0}
