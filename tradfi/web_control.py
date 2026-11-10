@@ -143,6 +143,7 @@ class NativePanel:
             journal=[n['text'] for n in s['notifications'][-30:]],
             action_results={key:{'status':r['status'],'revision':r['revision'],'reason':r.get('reason')} for key,r in s.get('control_receipts',{}).items()})
     def basket_view(self,s,c,snap,feed):
+        from .panel_accounting import accounting_view
         projection=None
         try:
             key=(str(snap.get('positions',[])),c.get('recovery'),str(c.get('cfg')))
@@ -155,7 +156,7 @@ class NativePanel:
                 self._basket_projection_key=key
             projection=self._basket_projection
         except (ValueError,OSError,TimeoutError):pass
-        return dict(**(self.controller.v3_view(snap) if hasattr(self.controller,'v3_view') else {}),contract='ticket_basket_v1',source=feed['source'],scope=self.scope,revision=s.get('control_revision',0),symbol=self.controller.broker.symbol,
+        return dict(**accounting_view(s),**(self.controller.v3_view(snap) if hasattr(self.controller,'v3_view') else {}),contract='ticket_basket_v1',source=feed['source'],scope=self.scope,revision=s.get('control_revision',0),symbol=self.controller.broker.symbol,
             phase=s['phase'],read_only=bool(getattr(self.controller.broker,'read_only',False)),stopped=s['stop'],settings=deepcopy(s['basket_settings']),
             reverse_controls=self.controller.reverse_controls(snap) if hasattr(self.controller,'reverse_controls') else dict(can_enable=False,can_disable=False,reason='Нет поддержки обратной лестницы'),reverse_ladders=[dict(group=g['id'],**deepcopy(g['reverse_ladder'])) for g in c.get('groups',[]) if g.get('reverse_ladder') and not g.get('retired')],manual_close=deepcopy(c.get('manual_close')),range_override=deepcopy(c.get('range_override')),manual_close_settings=deepcopy(s.get('manual_close_settings',dict(mode='from_close',duration='once',same_distance='1',opposite_distance='2'))),tp_distances=deepcopy(s.get('tp_distances')),active_tp_distances=deepcopy(c.get('tp_distances')),range_policy=c.get('range_policy'),active_settings=deepcopy(c.get('cfg')),cycle_id=c.get('id'),debt=c.get('recovery',s.get('basket_carry','0')),realized=c.get('realized','0'),
             main_range=deepcopy(c.get('main_range')),frozen_levels=deepcopy(c.get('expanded')),levels=self.controller.levels(),edit=deepcopy(c.get('edit')),projection=projection,

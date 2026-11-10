@@ -152,6 +152,7 @@ class ControlledRecoveryController(LatestCloseBasketController):
             if not c or a['cycle_id']!=c['id'] or not c.get('v3_link'):raise ActionRejected('Нет связанных триггеров')
             c['v3_link']['cancel']=True;self.save('v3_link_cancel_requested')
             self._cancel(snap,c['v3_link']['ids']);return
+        if kind=='v3_cancel_entry':return self._cancel_v3_entry(a)
         if kind=='v3_cancel_request':
             if set(a)!={'type','cycle_id'}:raise ActionRejected('Неверные поля отмены')
             self._guard();c=self.state.get('cycle')
@@ -159,6 +160,41 @@ class ControlledRecoveryController(LatestCloseBasketController):
             c.pop('v3_request');self.save('v3_schedule_cancelled');return
         if kind=='v3_adjust_sl':return self._adjust_sl(a)
         return super().action(a)
+
+    def _cancel_entry_groups(self,snap,c):
+        # Linked-to-SL batches retain their separate cancellation owner.
+        linked=(c.get('v3_link') or {}).get('group')
+        return [g for g in c.get('groups',[]) if g['role']=='v3' and not g.get('linked_source')
+                and g['id']!=linked and not g.get('retired')
+                and (g.get('cancel_entry') or self._pending(snap,g['commands'])
+                     or any(self.state['commands'][cid]['kind']=='STOP' and self.state['commands'][cid]['status']=='READY' for cid in g['commands']))]
+
+    def _cancel_v3_entry(self,a):
+        if set(a)!={'type','cycle_id'}:raise ActionRejected('Неверные поля отмены')
+        snap=self._guard();c=self.state.get('cycle')
+        if not self._v3() or not c or a['cycle_id']!=c['id']:raise ActionRejected('Цикл изменился; обновите панель')
+        if c.get('edit') or c.get('v3_edit') or c.get('v3_rearm'):raise ActionRejected('Сначала дождитесь завершения правки')
+        groups=self._cancel_entry_groups(snap,c)
+        if not groups:raise ActionRejected('Нет ожидающих ручных триггеров')
+        for g in groups:g['cancel_entry']=True
+        # Persist ownership before sending cancellation; a restart must finish it.
+        self.save('v3_entry_cancel_requested')
+        for g in groups:self._cancel(snap,g['commands'])
+
+    def _advance_entry_cancel(self,snap):
+        c=self.state['cycle'];waiting=False
+        for g in c['groups']:
+            if not g.get('cancel_entry'):continue
+            ids=g['commands'];self._cancel(snap,ids)
+            if self._pending(snap,ids) or not self._resolved(ids) or self._uncertain():
+                waiting=True;continue
+            # Fills win cancellation races. Keep their protections, original
+            # profile stage indices and ledger; discard only proven cancellations.
+            g['commands']=[cid for cid in ids if self.state['commands'][cid]['status']!='CANCELLED']
+            g['v3_count']=len(g['commands']);g.pop('cancel_entry')
+            if not g['commands']:g['retired']=True
+            self.save('v3_entry_cancel_confirmed')
+        return waiting
 
     def _entry_ready(self,snap,c):
         initial=next((t for t in c['tickets'].values() if t['role']=='initial'),None)
@@ -438,6 +474,7 @@ class ControlledRecoveryController(LatestCloseBasketController):
         if not self._observe(snap):return
         if c.get('manual'):
             self._cancel(snap,c['entries']);return
+        if self._advance_entry_cancel(snap):return
         if self._advance_link(snap):return
         if c.get('edit'):
             if self._advance_edit(snap):return
@@ -564,7 +601,7 @@ class ControlledRecoveryController(LatestCloseBasketController):
     def v3_view(self,snap):
         c=self.state.get('cycle') or {};active=[t for t in c.get('tickets',{}).values() if not t['closed']]
         blocked=bool(not snap.get('spec') or not self._v3() or self.state['stop'] or self.state.get('time_block') or self.state.get('migration_block') or c.get('manual') or c.get('edit') or c.get('v3_edit') or self._uncertain() or getattr(self.broker,'read_only',False))
-        controls=dict(can_enter=False,can_link=False,can_cancel_link=bool(c.get('v3_link')),can_adjust_sl=False,can_own_entry_sl=False,reason='Дождитесь сверки или подходящего этапа V3')
+        controls=dict(can_enter=False,can_link=False,can_cancel_link=bool(c.get('v3_link')),can_cancel_entry=bool(c and not getattr(self.broker,'read_only',False) and not c.get('edit') and not c.get('v3_edit') and not c.get('v3_rearm') and not c.get('manual') and not self.state.get('migration_block') and self.state['phase'] not in {'SAFE_PAUSE','MANUAL'} and self._cancel_entry_groups(snap,c)),can_adjust_sl=False,can_own_entry_sl=False,reason='Дождитесь сверки или подходящего этапа V3')
         if c and not blocked:
             controls.update(can_enter=self._entry_ready(snap,c),can_link=bool(active and len({t['group'] for t in active})==1 and any(t['index']==0 for t in active) and not snap.get('orders') and not self._unresolved() and not c.get('v3_link')),can_adjust_sl=bool(active and len({t['group'] for t in active})==1),can_own_entry_sl=bool(active and len({t['group'] for t in active})==1 and not self._protection_busy(snap)))
         cfg=c.get('cfg',self.state['basket_settings']);key='INITIAL_SL_DISTANCE' if active and active[0]['role']=='initial' else 'RECOVERY_SL_DISTANCE'

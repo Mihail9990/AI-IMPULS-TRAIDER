@@ -65,3 +65,49 @@ body{background:var(--bg)}main{padding:0;max-width:none}#login{max-width:480px;m
 #recovery-current-summary{white-space:pre-line;overflow-wrap:anywhere}
 #recovery-profile-select{max-width:100%;width:100%}
 @media(max-width:480px){.recovery-stage-row{grid-template-columns:18px minmax(0,1fr) minmax(0,1fr)}.recovery-stage-row>button{grid-column:2/4;justify-self:end}.settings-group{padding:8px}}
+
+/* Independent edge drawers do not consume chart height or depend on Commands. */
+#v3-panels{display:contents}
+.side-panel-tabs{position:fixed;right:0;top:calc(18dvh + env(safe-area-inset-top));z-index:25;display:grid;gap:8px}
+#v3-panels .side-panel-tabs button{width:auto;margin:0;border-radius:12px 0 0 12px;background:#1b2b3c;border-color:#5984ad;padding:10px;font-size:12px;box-shadow:0 3px 12px #0006}
+#v3-panels .side-panel-tabs [aria-expanded=true]{background:#244e70;color:#fff}
+#v3-panels .side-panel{position:fixed;right:0;top:calc(11dvh + env(safe-area-inset-top));bottom:calc(var(--nav-height) + env(safe-area-inset-bottom) + 10px);width:min(360px,calc(100vw - 48px));overflow:auto;overscroll-behavior:contain;background:#141b24;border:1px solid #47617d;border-radius:16px 0 0 16px;padding:16px;z-index:30;transform:translateX(105%);visibility:hidden;transition:transform .2s ease,visibility .2s;box-shadow:-12px 0 32px #0007}
+#v3-panels #v3-sl-panel{top:calc(19dvh + env(safe-area-inset-top));bottom:auto;max-height:65dvh;width:min(320px,calc(100vw - 48px))}
+#v3-panels .side-panel[data-open=true]{transform:translateX(0);visibility:visible}
+.side-panel-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px}
+.side-panel-heading h2{font-size:18px;margin:0}
+#v3-panels .side-panel-heading button{width:44px;flex:0 0 44px;margin:0}
+#v3-panels .side-panel .fields{grid-template-columns:1fr}
+#v3-submit-entry{background:#184d40;border-color:#4db69a}
+#v3-cancel-entry,#v3-cancel-request{border-color:#d4a45d}
+#chart-notices{background:#111a23;border:0}
+#chart-notices:has(p:not(:empty)){border-top:1px solid #39566d}
+#bot-activity p[data-tone],#action-error[data-tone]{padding:4px 8px;border-left:3px solid;border-radius:4px;font-size:12px}
+#bot-activity [data-tone=info],#action-error[data-tone=info]{color:#c7e4ff;background:#152a3c;border-color:#65b8ff}
+#bot-activity [data-tone=success],#action-error[data-tone=success]{color:#b2f2d2;background:#12372b;border-color:#55cb98}
+#bot-activity [data-tone=warning],#action-error[data-tone=warning]{color:#ffe0a3;background:#382d18;border-color:#efbc57}
+#bot-activity [data-tone=unknown],#action-error[data-tone=unknown]{color:#e0caff;background:#2b1f40;border-color:#b18be9}
+@media(prefers-reduced-motion:reduce){#v3-panels .side-panel{transition:none}}
+.side-panel-tabs{left:0;right:0;top:calc(11dvh + env(safe-area-inset-top));display:flex;justify-content:space-between;pointer-events:none;z-index:35}
+#v3-panels .side-panel-tabs button{pointer-events:auto}
+#v3-panels #toggle-sl-panel{border-radius:0 12px 12px 0}
+#v3-panels .side-panel{top:calc(19dvh + env(safe-area-inset-top))}
+#v3-panels #v3-sl-panel{left:0;right:auto;border-radius:0 16px 16px 0;transform:translateX(-105%)}
+#v3-panels #v3-sl-panel[data-open=true]{transform:translateX(0)}
+
+/* Source-backed totals stay above the activity text; history has its own tab. */
+:root{--activity-height:clamp(112px,16dvh,156px)}
+#bot-activity{flex-basis:var(--activity-height);height:var(--activity-height);max-height:var(--activity-height)}
+#activity-totals{position:sticky;top:-5px;z-index:1;display:grid;grid-template-columns:1fr 1fr;gap:8px;background:#12151a;padding:5px 0}
+#activity-totals>div{min-width:0;background:#192533;border-radius:7px;padding:4px 8px}
+#activity-totals small,#activity-totals strong{display:block;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+#activity-totals small{font-size:10px}#activity-totals strong{font-size:16px;color:#d0e9ff}
+#activity-totals [data-tone=success]{color:#b2f2d2}#activity-totals [data-tone=warning]{color:#ffe0a3}
+#bot-activity #activity-totals-note{font-size:10px}
+#v3-panels .side-panel-tabs{top:calc(var(--activity-height) + env(safe-area-inset-top) + 8px)}
+#v3-panels .side-panel,#v3-panels #v3-sl-panel{top:calc(var(--activity-height) + env(safe-area-inset-top) + 60px)}
+#history-page{flex:1;overflow:auto;min-height:0;padding:24px 12px;max-width:1100px;width:100%;align-self:center;overscroll-behavior:contain}
+#history-page h1{font-size:26px}#history-page .card{padding:12px;margin:12px 0}#history-page summary{cursor:pointer;min-height:44px}
+#bottom-tabs button{width:33.333%;min-width:0}#tab-history::before{content:'◷'}
+
+#activity-totals #activity-recovery,#debt,#cycle-history-rows td:last-child{color:#b8f36a}

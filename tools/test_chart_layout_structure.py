@@ -18,8 +18,10 @@ p=Structure();p.feed((ROOT/'index.html').read_text());assert not p.stack
 inside=lambda key,ancestor:any(id==ancestor for _,id in p.nodes[key][2])
 for id in ('start','stop','resume','reset','logout','save-settings','refresh-settings','save-tp-grid','save-v3-settings','logs-refresh','logs-download','writeoff-recovery'):
     assert inside(id,'settings-page'),id
-for id in ('own-entry-sl','reverse-enable','reverse-disable','cancel-initial','v3-submit-entry','v3-cancel-request','v3-link-toggle','v3-sl-plus','v3-sl-minus','level-buttons'):
+for id in ('own-entry-sl','reverse-enable','reverse-disable','cancel-initial','level-buttons'):
     assert inside(id,'drawer-content'),id
+for id in ('v3-submit-entry','v3-cancel-request','v3-cancel-entry','v3-link-toggle','v3-sl-plus','v3-sl-minus'):
+    assert inside(id,'v3-panels') and not inside(id,'drawer-content'),id
 assert not inside('bot-activity','chart-page') and not inside('bot-activity','settings-page')
 assert p.nodes['bot-activity'][1]['tabindex']=='0'
 assert not inside('chart-notices','chart-page') and not inside('chart-notices','settings-page')

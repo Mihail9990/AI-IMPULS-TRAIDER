@@ -70,7 +70,7 @@ def main():
             p.goto('http://127.0.0.1:8765/');p.locator('#workspace').wait_for(state='visible')
             assert p.locator('#chart-page').is_visible();assert not p.locator('#settings-page').is_visible()
             assert not p.locator('#start').is_visible();assert p.locator('#chart [data-quote]').count()==2
-            p.locator('#drawer-toggle').click();p.locator('#v3-panels').wait_for(state='visible');assert not p.locator('#v3-settings').is_visible()
+            p.locator('#toggle-entry-panel').click();p.locator('#v3-panels').wait_for(state='visible');assert not p.locator('#v3-settings').is_visible()
             for removed in ('manual-close-controls','manual-close-submit','recovery-mode','save-recovery-mode'):
                 assert p.locator('#'+removed).count()==0
             assert p.locator('#v3-side').is_disabled()
@@ -84,15 +84,21 @@ def main():
             p.locator('#v3-order-type').select_option('STOP');assert p.locator('#v3-timing').input_value()=='current';assert p.locator('#v3-side').is_disabled()
             p.locator('#v3-timing').select_option('next');p.locator('#v3-submit-entry').click();p.locator('#v3-cancel-request').wait_for(state='visible');assert requests[-1]['action']['timing']=='next'
             p.locator('#v3-cancel-request').click();wait("document.querySelector('#v3-cancel-request').hidden")
+            p.locator('#close-entry-panel').click();p.locator('#toggle-sl-panel').click()
             p.locator('#v3-sl-minus').click();wait("document.querySelector('#v3-sl-value').textContent==='1.40'")
             p.locator('#v3-sl-plus').click();wait("document.querySelector('#v3-sl-value').textContent==='1.50'")
+            p.locator('#close-sl-panel').click();p.locator('#toggle-entry-panel').click()
             p.locator('#v3-link-toggle').click();wait("document.querySelector('#v3-link-toggle').dataset.cancel==='true'")
             n=len(dialogs);p.locator('#v3-link-toggle').click();wait("document.querySelector('#v3-link-toggle').dataset.cancel==='false'");assert len(dialogs)==n
             assert requests[-1]['action']['type']=='v3_cancel_link'
-            # Each side panel collapses independently, persists after reload, never sends a command.
-            before=len(requests);p.locator('#v3-sl-panel > summary').click();assert not p.locator('#v3-sl-panel').evaluate('(x)=>x.open');assert p.locator('#v3-entry-panel').evaluate('(x)=>x.open')
-            p.reload();p.locator('#workspace').wait_for(state='visible');p.locator('#drawer-toggle').click();assert not p.locator('#v3-sl-panel').evaluate('(x)=>x.open');assert len(requests)==before
-            p.locator('#v3-sl-panel > summary').click()
+            # Drawers open independently; reload closes them without a command.
+            before=len(requests);p.locator('#toggle-sl-panel').click()
+            assert p.locator('#v3-sl-panel').get_attribute('data-open')=='true'
+            assert p.locator('#v3-entry-panel').get_attribute('data-open')=='true'
+            p.keyboard.press('Escape');assert p.locator('#v3-sl-panel').get_attribute('data-open')=='false'
+            p.locator('#close-entry-panel').click()
+            p.reload();p.locator('#workspace').wait_for(state='visible');assert len(requests)==before
+            assert p.locator('#v3-entry-panel').evaluate('(x)=>x.inert')
             for w in (320,360,390,430,768,900,1280):
                 p.set_viewport_size(dict(width=w,height=900));assert p.evaluate('document.documentElement.scrollWidth<=innerWidth'),w
             p.set_viewport_size(dict(width=390,height=844))
@@ -126,7 +132,7 @@ def main():
                 if p.locator('#drawer-toggle').get_attribute('aria-expanded')=='true':p.locator('#drawer-toggle').click()
                 chart=p.locator('#chart').bounding_box();nav=p.locator('#bottom-tabs').bounding_box()
                 activity=p.locator('#bot-activity').bounding_box()
-                assert activity['height']<=height*.1+1 and chart['y']>=activity['height']-1
+                assert activity['height']<=max(112,min(height*.16,156))+1 and chart['y']>=activity['height']-1
                 assert chart['height']>150,(width,height,chart)
                 assert nav['y']+nav['height']<=height+1
                 assert p.evaluate('document.documentElement.scrollWidth<=innerWidth'),width
@@ -143,7 +149,7 @@ def main():
             p.locator('#tab-chart').click();p.locator('#drawer-toggle').click()
             # Legacy active snapshots remain visible but fail closed with a reason.
             state['recovery_mode']='V1';state['migration_block']='Legacy active cycle needs reconciliation'
-            wait("document.querySelector('#safety').textContent.includes('Legacy active cycle')")
+            wait("document.querySelector('#bot-activity-warning').textContent.includes('Legacy active cycle')")
             assert p.locator('#v3-panels').is_visible();assert p.locator('#v3-submit-entry').is_disabled();assert p.locator('#save-v3-settings').is_disabled()
             state['recovery_mode']='V3';state['migration_block']=None;wait("!document.querySelector('#v3-submit-entry').disabled")
             # Read-only and stale snapshots block V3 commands.
@@ -152,10 +158,11 @@ def main():
             fail_state=True;wait("document.querySelector('#v3-control-reason').textContent.includes('Нет свежего')");assert p.locator('#v3-link-toggle').is_disabled()
             fail_state=False;wait("!document.querySelector('#v3-submit-entry').disabled")
             # UNKNOWN persists across reload; neither repeated press nor reload resends.
+            p.locator('#toggle-entry-panel').click()
             unknown=True;p.locator('#v3-link-toggle').click();wait("localStorage.getItem('basket-request')!==null");n=len(requests)
             p.reload();p.locator('#workspace').wait_for(state='visible');assert p.locator('#v3-link-toggle').is_disabled();assert len(requests)==n
             assert not errors,errors
             p.screenshot(path='/tmp/v3-panel-mobile.png',full_page=True)
-            print('PASS V3 UI: V3-only defaults, retired controls absent, legacy migration block, STOP/MARKET timing, selected profile snapshot, cancel preview, SL confirmation, immediate linked cancellation, independent collapse/reload, mobile widths, LIVE-only controls, scoped cookies/logout, removed-route rejection, read-only/stale/UNKNOWN. All HTTP mocked; no real trading.')
+            print('PASS V3 UI: V3-only defaults, retired controls absent, legacy migration block, STOP/MARKET timing, selected profile snapshot, cancel preview, SL confirmation, immediate linked cancellation, independent side drawers/reload, mobile widths, LIVE-only controls, scoped cookies/logout, removed-route rejection, read-only/stale/UNKNOWN. All HTTP mocked; no real trading.')
         finally:b.close()
 if __name__=='__main__':main()
