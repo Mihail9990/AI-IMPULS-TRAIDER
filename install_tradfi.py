@@ -139,6 +139,8 @@ def validate_release(code):
         raise SetupError('Эта версия work ещё не поддерживает установщик. Дождитесь публикации совместимой версии.')
     if read_json(code/'managed_release.json')!=CONTRACT:
         raise SetupError('Версия несовместима с этим установщиком. Скачайте новый установщик.')
+    if not (code/'independent-install-contract.json').is_file() or read_json(code/'independent-install-contract.json') != {'format': 2, 'roles': ['live'], 'layout': 'independent_roots_v1'}:
+        raise SetupError('Требуется отдельный LIVE release. Старая общая версия несовместима.')
     lines=[x.strip() for x in (code/'requirements-tradfi-mt5.txt').read_text().splitlines() if x.strip() and not x.lstrip().startswith('#')]
     if lines!=REQUIREMENTS:
         raise SetupError('Зависимости изменились: требуется проверенный новый установщик.')
@@ -147,29 +149,18 @@ def validate_release(code):
 
 
 def validate_instance(instance):
-    if instance not in {'live','paper'}: raise SetupError('Неизвестный экземпляр сервиса.')
+    if instance not in {'live'}: raise SetupError('Неизвестный экземпляр сервиса.')
     return instance
 
 
 def config_path(root, instance='live'):
     validate_instance(instance)
-    return Path(root)/'data'/('service.json' if instance=='live' else 'paper-service.json')
+    return Path(root)/'data'/'service.json'
 
 
 def binding_path(root, instance='live'):
     validate_instance(instance)
-    return Path(root)/'data'/('state-binding.json' if instance=='live' else 'paper-state-binding.json')
-
-
-def default_paper_config(root, live):
-    # Allowlist only market-source identity, never copy passwords, tokens or credentials.
-    config={key:live[key] for key in ('terminal_path','time_profile','market_time_offset_seconds','expected_server','expected_login','symbol','magic') if key in live}
-    live_state=state_path(root,live)
-    config.update(backend='paper_mt5_quotes_v1',enable_trading=False,
-        live_state_file=str(live_state),state_file=str(live_state.with_name(live_state.stem+'.paper.sqlite3')),
-        log_file=str(Path(root)/'data'/'paper.log'),
-        web={'enabled':True,'host':'127.0.0.1','port':8766,'password':''})
-    return config
+    return Path(root)/'data'/'state-binding.json'
 
 
 def state_path(root,config):
@@ -192,19 +183,10 @@ def inspect_state(root, config, instance="live"):
             row=db.execute('SELECT payload FROM snapshot WHERE id=1').fetchone()
             if row is None: raise ValueError()
             s=json.loads(row[0])
-            if s.get('schema')!=1 or s.get('backend')!=('mt5_direct_v1' if instance=='live' else 'paper_mt5_quotes_v1') : raise ValueError()
+            if s.get('schema')!=1 or s.get('backend')!='mt5_direct_v1' : raise ValueError()
             if instance=='live' and s.get('ledger_contract')!='deal_ledger_v1':raise ValueError()
             if instance=='live' and s.get('commands') and s.get('scope_contract')!='cycle_scope_v1': raise ValueError()
             if instance=='live' and (s.get('cycle') or s.get('phase') not in {'IDLE','PAUSED','WAIT_START'}): raise ValueError()
-            if instance=='paper':
-                paper=json.loads(db.execute('SELECT payload FROM paper_exchange WHERE id=1').fetchone()[0])
-                if not isinstance(paper.get('identity'),str) or not paper['identity'].startswith('PAPER-'):raise ValueError()
-                if not all(isinstance(paper.get(key),list) for key in ('orders','positions','deals','order_history')):raise ValueError()
-                if not isinstance(paper.get('paused_gap'),bool):raise ValueError()
-                if s.get('ledger_contract') is None:
-                    if s.get('seen_deals'):raise ValueError()
-                    return
-                if s.get('ledger_contract')!='deal_ledger_v1':raise ValueError()
             if instance=='live':
                 if any(v.get('status') not in {'DONE','REJECTED','CANCELLED','FILLED','OBSOLETE'} for v in s.get('commands',{}).values()): raise ValueError()
                 journal=db.execute('SELECT id FROM mt5_commands').fetchall()
@@ -239,24 +221,18 @@ class Manager:
     def config(self,instance='live'):
         path=self.path_for(instance)
         if path.exists():return read_json(path)
-        if instance=='paper':
-            if binding_path(self.root,'paper').exists():raise SetupError('Конфигурация PAPER потеряна; автоматический сброс запрещён.')
-            return default_paper_config(self.root,self.config())
         return {}
-    def prepare_paper(self):
-        if not self.path_for('paper').exists():atomic_json(self.path_for('paper'),self.config('paper'))
     @contextmanager
     def maintenance_guard(self):
         with ExitStack() as stack:
-            for name in ('operation.lock','instance-live.lock','instance-paper.lock'):
+            for name in ('operation.lock','instance-live.lock'):
                 stack.enter_context(lock(self.root/name))
-            live=self.config();paper=self.config('paper')
-            if state_path(self.root,live)==state_path(self.root,paper):raise SetupError('Базы LIVE и PAPER должны различаться.')
+            live=self.config()
             stack.enter_context(account_lock(self.root,live))
-            for config in (live,paper):stack.enter_context(state_lock(self.root,config))
+            stack.enter_context(state_lock(self.root,live))
             yield
     def inspect_states(self):
-        for instance in ('live','paper'):inspect_state(self.root,self.config(instance),instance)
+        for instance in ('live',):inspect_state(self.root,self.config(instance),instance)
     def pointer(self):
         path=self.root/'current.json'
         value=read_json(path) if path.exists() else {'current':None,'previous':None}
@@ -277,7 +253,6 @@ class Manager:
             config.update(enable_trading=False,legacy_ea_removed=False,legacy_state_reconciled=False,
                 state_file=str(self.root/'data'/'state.sqlite3'),log_file=str(self.root/'data'/'tradfi.log'))
             atomic_json(self.config_path,config)
-        self.prepare_paper()
     def prepare_python(self,release):
         env=dict(os.environ)
         for k in list(env):
@@ -344,9 +319,9 @@ class Manager:
         target=self.root/'backups'/('before-update-'+time.strftime('%Y%m%d-%H%M%S')+'-'+uuid.uuid4().hex)
         target.mkdir(parents=True)
         states={}
-        for instance in ('live','paper'):
+        for instance in ('live',):
             p=state_path(self.root,self.config(instance))
-            filename='state.sqlite3' if instance=='live' else 'paper-state.sqlite3'
+            filename='state.sqlite3'
             states[instance]={'source':str(p),'backup':filename,'copied':p.exists()}
             if p.exists():
                 src=sqlite3.connect(p.as_uri()+'?mode=ro',uri=True)
@@ -383,7 +358,7 @@ class Manager:
             atomic_json(self.root/'current.json',{'current':sha,'previous':pointer['current']})
             self.report('Переключён только код. SQLite, конфигурация и логи не откатывались.')
     def prepare_settings(self,instance='live'):
-        if instance=='paper':self.prepare_paper()
+        validate_instance(instance)
         config=self.config(instance)
         web=config.setdefault('web',{})
         if not isinstance(web,dict):raise SetupError('web должен быть объектом настроек.')
@@ -423,15 +398,9 @@ class Manager:
 
     def launch(self,execute=False,instance="live"):
         validate_instance(instance)
-        if instance=="paper" and execute:raise SetupError("PAPER не допускает --execute.")
         # Runtime acquires the same lock for its whole lifetime, including direct launches.
         with lock(self.root/'operation.lock'),lock(self.root/('instance-'+instance+'.lock')):
-            if instance=='paper':self.prepare_paper()
-            if state_path(self.root,self.config())==state_path(self.root,self.config('paper')):
-                raise SetupError('Базы LIVE и PAPER должны различаться.')
             release=self.current_release()
-            if instance=='paper' and not (release/'code'/'tradfi'/'paper_runtime.py').is_file():
-                raise SetupError('Эта версия не поддерживает отдельный симулятор PAPER. Выберите совместимую версию; база сохранена.')
             if not self.path_for(instance).is_file(): raise SetupError('Конфигурация отсутствует.')
             web=self.config(instance).get('web',{})
             if not isinstance(web,dict):raise SetupError('web должен быть объектом настроек.')
@@ -440,14 +409,13 @@ class Manager:
                 password=os.environ.get('TRADFI_WEB_PASSWORD') if instance=='live' and 'TRADFI_WEB_PASSWORD' in os.environ else web.get('password','')
                 minimum=5 if web.get('host','127.0.0.1') in {'127.0.0.1','::1'} and web.get('public_origin') is None and not any(bool(v) for k,v in web.items() if 'proxy' in str(k).lower() or 'external' in str(k).lower()) else 32
                 if not isinstance(password,str) or not password.strip() or len(password)<minimum:
-                    hint=' Если задана TRADFI_WEB_PASSWORD, она имеет приоритет.' if instance=='live' else ' PAPER использует только свой пароль из paper-service.json.'
+                    hint=' Если задана TRADFI_WEB_PASSWORD, она имеет приоритет.'
                     raise SetupError(f'Настройки {instance.upper()} (Блокнот): задайте web.password, минимум {minimum} символов.'+hint)
             session=uuid.uuid4().hex
             env=dict(os.environ,TRADFI_LAUNCH_SESSION=session,TRADFI_LAUNCH_INSTANCE=instance)
             for key in ('PYTHONPATH','PYTHONHOME','PYTHONSTARTUP'): env.pop(key,None)
-            if instance=='paper':env.pop('TRADFI_WEB_PASSWORD',None)
             args=[str(release/'venv'/'Scripts'/'python.exe'),str(release/'code'/'tradfi_main.py'),
-                  '--mode','paper' if instance=='paper' else 'mt5','--service','--config',str(self.path_for(instance))]
+                  '--mode','mt5','--service','--config',str(self.path_for(instance))]
             if execute: args.append('--execute')
         # If an update wins this small handoff race, runtime refuses its lock; no mutation.
         process=subprocess.Popen(args,cwd=self.root/'data',env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
@@ -456,130 +424,9 @@ class Manager:
 
 
 def gui():
-    try:
-        import tkinter as tk
-        from tkinter import messagebox, ttk
-    except ImportError:
-        if os.name=='nt':
-            import ctypes
-            ctypes.windll.user32.MessageBoxW(0,'Нужен Python 3.13 x64 с компонентом Tcl/Tk из python.org.','TradFi',16)
-        else: print('Нужен Python 3.13 с Tkinter (python.org).')
-        return
-    try:
-        app=tk.Tk()
-    except Exception:
-        if os.name=='nt':
-            import ctypes
-            ctypes.windll.user32.MessageBoxW(0,'Не удалось открыть Tkinter. Восстановите Tcl/Tk в установщике Python.','TradFi',16)
-        return
-    app.title('TradFi — установка и запуск'); app.geometry('1020x640')
-    if os.name!='nt' or sys.version_info[:2]!=(3,13) or sys.maxsize<=2**32:
-        messagebox.showerror('Среда','Нужен Windows и Python 3.13 x64 из python.org.'); app.destroy(); return
-    root=Path(os.environ['LOCALAPPDATA'])/'AI_IMPULS_TRADFI_Manager'
-    events=queue.Queue(); manager=Manager(root,report=lambda s:events.put(('log',s)))
-    ttk.Label(app,text='Репозиторий: '+REPO+' • ветка work').pack(anchor='w',padx=12,pady=8)
-    ttk.Label(app,text='Данные: '+str(root/'data'),wraplength=750).pack(anchor='w',padx=12)
-    text=tk.Text(app,height=17,state='disabled',wrap='word'); text.pack(fill='both',expand=True,padx=12,pady=8)
-    buttons=[]; role_buttons={'live':[],'paper':[]}; stops={}; statuses={}; busy=False; children={}; sessions={}; https_window=None
-    def log(s):
-        text.configure(state='normal'); text.insert('end',s+'\n'); text.see('end'); text.configure(state='disabled')
-    def refresh():
-        blocked=busy or (https_window is not None and https_window.winfo_exists())
-        for b in buttons:b.configure(state='disabled' if blocked or children else 'normal')
-        for role in ('live','paper'):
-            for b in role_buttons[role]:b.configure(state='disabled' if blocked or role in children else 'normal')
-            stops[role].configure(state='normal' if role in children else 'disabled')
-            statuses[role].configure(text=role.upper()+(': работает' if role in children else ': остановлен'))
-    def work(action,instance=None):
-        nonlocal busy
-        if busy or (children if instance is None else instance in children): return
-        busy=True; refresh()
-        def worker():
-            try:
-                result=action()
-                if isinstance(result,tuple): events.put(('started',(instance,result)))
-            except SetupError as exc: events.put(('error',str(exc)))
-            except Exception: events.put(('error','Операция не завершена. Проверьте сеть, файлы и свободное место. Секреты не выводятся.'))
-            finally: events.put(('done',None))
-        threading.Thread(target=worker,daemon=True).start()
-    def launch(execute=False,instance="live"):
-        if execute and not messagebox.askyesno('Реальное исполнение',
-            'Это разрешит реальное исполнение, если ваши флаги и MT5 это допускают.\n'
-            'Сохранённый цикл или отложенный /start могут исполниться сразу.\n'
-            'Никакие флаги программа не меняет. Вы проверили состояние в веб-панели?'):
-            return
-        work(lambda:manager.launch(execute,instance),instance)
-    def edit_config(instance="live"):
-        try:
-            with lock(root/'operation.lock'):
-                manager.current_release()
-                manager.prepare_settings(instance)
-                if not manager.path_for(instance).is_file(): raise SetupError('Конфигурация отсутствует.')
-            os.startfile(str(manager.path_for(instance)),'edit')
-        except Exception: messagebox.showerror('Настройки','Не удалось открыть редактор. Откройте '+manager.path_for(instance).name+' в папке data через Блокнот.')
-    def stop_service(instance):
-        if instance in children and messagebox.askyesno('Остановить процесс?',
-            'Это остановит обслуживание сервиса, а не закроет позиции и не выполнит /stop.\n'
-            'Для завершения цикла используйте Стоп в веб-панели. Остановить процесс?'):
-            try: manager.request_stop(sessions[instance],instance)
-            except OSError: messagebox.showerror('Остановка','Не удалось передать запрос остановки.')
-    panel=ttk.Frame(app); panel.pack(fill='x',padx=12,pady=4)
-    for label,fn in [('Установить / обновить',lambda:work(manager.install)),
-                     ('Диагностика запуска',lambda:work(manager.diagnose)),
-                     ('Rollback кода',lambda:work(manager.rollback))]:
-        b=ttk.Button(panel,text=label,command=fn); b.pack(side='left',padx=2); buttons.append(b)
-    for role in ('live','paper'):
-        row=ttk.Frame(app);row.pack(fill='x',padx=12,pady=4)
-        statuses[role]=ttk.Label(row,text=role.upper()+': остановлен');statuses[role].pack(side='left')
-        options=[('Настройки '+role.upper(),lambda r=role:edit_config(r)),
-                 ('Запуск '+('LIVE READ_ONLY' if role=='live' else 'PAPER'),lambda r=role:launch(False,r))]
-        if role=='live':options.append(('Реальный запуск…',lambda:launch(True,'live')))
-        for label,fn in options:
-            b=ttk.Button(row,text=label,command=fn);b.pack(side='left',padx=2);role_buttons[role].append(b)
-        stops[role]=ttk.Button(row,text='Остановить '+role.upper()+'…',command=lambda r=role:stop_service(r),state='disabled')
-        stops[role].pack(side='left',padx=2)
-    def https_wizard():
-        nonlocal https_window
-        if busy or children:return
-        if https_window is not None and https_window.winfo_exists():https_window.lift();return
-        try:
-            from https_setup import wizard
-            https_window=wizard(manager)
-        except ImportError:
-            messagebox.showerror('HTTPS','Скачайте полный архив новой версии: рядом с install_tradfi.py нужен https_setup.py.')
-    ttk.Button(app,text='HTTPS для телефона…',command=https_wizard).pack(pady=4)
-    ttk.Label(app,text='LIVE: service.json → localhost:8765. PAPER: paper-service.json → localhost:8766.\n'
-              'У каждого свой web.password. Обновление и rollback требуют остановки обоих процессов.\n'
-              'Старые папки, базы и credentials не удаляются и автоматически не переносятся.',wraplength=740).pack(padx=12,pady=8)
-    def poll():
-        nonlocal busy
-        try:
-            while True:
-                kind,value=events.get_nowait()
-                if kind=='log': log(value)
-                elif kind=='error': log(value); messagebox.showerror('TradFi',value)
-                elif kind=='started':
-                    instance,(child,session)=value;children[instance]=child;sessions[instance]=session
-                    log(instance.upper()+': процесс запущен. Проверьте режим и состояние в его веб-панели.')
-                elif kind=='done': busy=False
-        except queue.Empty: pass
-        for instance,child in list(children.items()):
-            if child.poll() is not None:
-                code=child.returncode;del children[instance]
-                (root/'data'/('stop-'+instance+'-'+sessions[instance]+'.request')).unlink(missing_ok=True)
-                log(f'{instance.upper()}: процесс завершён (код {code}). Автоматически не перезапускается.')
-        refresh(); app.after(200,poll)
-    def close():
-        if https_window is not None and https_window.winfo_exists():messagebox.showinfo('TradFi','Сначала закройте HTTPS мастер, дождавшись завершения операции.');return
-        if busy: messagebox.showinfo('TradFi','Дождитесь завершения операции.'); return
-        if children: messagebox.showinfo('TradFi','Сначала остановите оба процесса кнопками или оставьте это окно открытым.'); return
-        app.destroy()
-    app.protocol('WM_DELETE_WINDOW',close); app.after(200,poll)
-    log('Установка и READ_ONLY не включают торговлю. Реальный запуск — отдельное действие.')
-    app.mainloop()
-
-if __name__=='__main__':
-    # Preserve imports for legacy migration/diagnostics, but new user launches
-    # always select an independent application with its own installation root.
     from independent_install import main
-    main()
+    return main()
+
+
+if __name__ == '__main__':
+    gui()

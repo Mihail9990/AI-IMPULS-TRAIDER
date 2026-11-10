@@ -42,7 +42,7 @@ Backend остаётся loopback, upstream Host — `127.0.0.1:8765`; паро�
 После отказа **не повторяйте установку и не удаляйте папку вручную**. Частично созданная
 служба/файлы сохраняются, а повторный запуск отказывает. Для текущей версии это намеренное
 ограничение простого пути; сложного recovery workflow в нём нет. Безопасный отчёт
-`https-simple-diagnostic.json` находится в `%LOCALAPPDATA%\AI_IMPULS_TRADFI_Manager`.
+`https-simple-diagnostic.json` находится в `%LOCALAPPDATA%\AI_IMPULS_LIVE`.
 Ранний журнал `https-attempt.json` также сохраняется. При сбое firewall служба может уже
 работать; отчёт явно указывает этап `firewall`. Ни одна ошибка не запускает торговлю.
 
@@ -55,3 +55,7 @@ PowerShell 7 parser и mocked firewall cmdlets. **Windows PowerShell 5.1, UAC, S
 
 Контракты: [Caddy Windows service](https://caddyserver.com/docs/running),
 [Windows Firewall PowerShell](https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/configure-with-command-line).
+
+## Совместимость установки
+
+Этот мастер работает только с отдельным LIVE-приложением в `%LOCALAPPDATA%\AI_IMPULS_LIVE`: marker format 2 / role live и application role live. Старый общий каталог, чужая роль, отсутствующие маркеры, ссылки и незавершённый перенос отвергаются без изменения конфигурации. Сначала обновите LIVE через START_LIVE из нового полного ZIP.

@@ -3,7 +3,7 @@ from dataclasses import replace
 import unittest
 from tradfi.manual_range import manual_close_range,validate_manual_stops
 from tradfi.broker import Spec
-from tradfi.simulator import ARTIFICIAL_SPEC
+from tests.support.synthetic_broker import ARTIFICIAL_SPEC
 
 class ManualRange(unittest.TestCase):
     def setUp(self):self.spec=Spec.load(ARTIFICIAL_SPEC)

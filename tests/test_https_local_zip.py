@@ -14,6 +14,8 @@ from test_https_setup import Fake
 class LocalZip(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.root=Path(self.tmp.name)
+        h.save(self.root/'managed-install.json',{'format':2,'role':'live','layout':'independent_roots_v1'})
+        h.save(self.root/'application.json',{'format':1,'role':'live'})
         (self.root/'data').mkdir();(self.root/'data'/'service.json').write_text(json.dumps({'enable_trading':False,'web':{'password':'fixture'*8}}))
         self.a=Fake();self.s=h.Setup(self.root,self.a);self.data=self.a.fetch();self.path=self.root/'download.zip';self.path.write_bytes(self.data)
         self.patch=patch.object(h,'ARCHIVE_SHA256',h.digest(self.data));self.patch.start();self.addCleanup(self.patch.stop)

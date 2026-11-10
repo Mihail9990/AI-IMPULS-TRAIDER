@@ -17,6 +17,8 @@ from test_https_setup import Fake
 class Early(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.root=Path(self.tmp.name)
+        h.save(self.root/'managed-install.json',{'format':2,'role':'live','layout':'independent_roots_v1'})
+        h.save(self.root/'application.json',{'format':1,'role':'live'})
         (self.root/'data').mkdir();self.config=self.root/'data'/'service.json'
         self.config.write_text(json.dumps({'enable_trading':False,'web':{'password':'SECRET_FIXTURE_ONLY_'+('x'*32),'host':'127.0.0.1','port':8765}}))
         self.a=Fake();self.s=h.Setup(self.root,self.a);self.p=self.s.prepare('38.60.203.9')

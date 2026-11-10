@@ -4,10 +4,14 @@ const fs=require('fs'),vm=require('vm'),assert=require('assert'),path=require('p
 const root=path.resolve(__dirname,'../web/basket-panel'),src=fs.readFileSync(path.join(root,'panel.js'),'utf8'),html=fs.readFileSync(path.join(root,'index.html'),'utf8');
 assert(!html.includes('tab-live')&&!html.includes('tab-paper'),'no mode tabs');
 assert(!src.includes('switchMode'),'role cannot switch');
+for(const id of ['paper-controls','paper-history','paper-resume','paper-flatten','paper-save-cost'])assert(!html.includes('id="'+id+'"'),'removed simulator control '+id);
+assert(!html.includes('<option value="paper">'),'no simulator log option');
 for(const role of ['live','paper']){
  const c=vm.createContext({document:{body:{dataset:{role}}}});
  vm.runInContext(src.slice(src.indexOf(' const mode='),src.indexOf(' let view=')),c);
- assert.equal(vm.runInContext("apiPath('action')",c),role==='paper'?'/api/paper/action':'/api/action');
+ assert.equal(vm.runInContext("apiPath('action')",c),'/api/action');
+ assert.equal(vm.runInContext("storageKey('request')",c),'basket-request');
+ assert.equal(vm.runInContext('mode',c),'live');
  assert.throws(()=>vm.runInContext("mode='other'",c));
 }
 const ids=[...html.matchAll(/id="([^"]+)"/g)].map(x=>x[1]);assert.equal(new Set(ids).size,ids.length,'unique HTML IDs');
@@ -101,7 +105,7 @@ async function main(){
  assert(!elements['recovery-mode']);assert(!elements['save-recovery-mode']);assert(!elements['manual-close-submit']);
  assert(!src.includes("type:'recovery_mode'"));assert(!src.includes("type:'manual_close'"));
  assert(!html.includes('value="V1"'));assert(!html.includes('V3.3'));
- for(const id of ['start','stop','resume','reset','cancel-initial','own-entry-sl','reverse-enable','reverse-disable','save-settings','save-tp-grid','writeoff-recovery','paper-flatten','logs-download'])assert(elements[id],'retained control '+id);
+ for(const id of ['start','stop','resume','reset','cancel-initial','own-entry-sl','reverse-enable','reverse-disable','save-settings','save-tp-grid','writeoff-recovery','logs-download'])assert(elements[id],'retained control '+id);
  ctx.view=structuredClone(base);vm.runInContext('v3Render()',ctx);
  // Settings still submit the full server schema without exposing retired range/lot inputs.
  ctx.view.settings={EXPANSION_DISTANCE:'2',TICKET_SIZE:'0.03',INITIAL_SIZE:'0.01',BASKET_COUNT:6};

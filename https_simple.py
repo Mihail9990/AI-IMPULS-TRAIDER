@@ -59,7 +59,7 @@ class Installer:
         s=self.s;s.adapter.admin();h.origin(address)
         if s.local_archive is None:raise h.HttpsError('Сначала выберите официальный ZIP.')
         self.emit('preflight')
-        if h.read(s.root/'managed-install.json')!={'format':1}:raise h.HttpsError('Сначала установите бот штатным установщиком.')
+        s.validate_installation()
         for path in (s.root,s.root/'data',s.config):
             if path.is_symlink() or getattr(path,'is_junction',lambda:False)():raise h.HttpsError('Путь установки содержит ссылку; установка остановлена.')
         if s.home.exists() or s.attempt_path.exists():
@@ -79,7 +79,7 @@ def main():
     import tkinter as tk
     from tkinter import filedialog,messagebox,simpledialog
     app=tk.Tk();app.withdraw()
-    root=Path(os.environ.get('LOCALAPPDATA',''))/'AI_IMPULS_TRADFI_Manager'
+    root=Path(os.environ.get('LOCALAPPDATA',''))/'AI_IMPULS_LIVE'
     runner=Installer(root)
     try:
         runner.s.adapter.admin()
@@ -98,7 +98,7 @@ def main():
         print(result)
         report=runner.s.diagnose(address)
         h.save(root/'https-simple-diagnostic.json',report)
-        messagebox.showinfo('HTTPS',result+'\n'+report['https']+'\nОтчёт: https-simple-diagnostic.json в папке Manager.',parent=app)
+        messagebox.showinfo('HTTPS',result+'\n'+report['https']+'\nОтчёт: https-simple-diagnostic.json в папке AI_IMPULS_LIVE.',parent=app)
         return 0
     except Exception as exc:
         # Known safety messages contain no credentials; arbitrary native errors never printed.

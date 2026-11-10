@@ -12,7 +12,7 @@ EA, `FILE_COMMON`, snapshot/command/ack-файлы больше не участ�
 
 **Интеграция после `4488b23`, публикация одобрена пользователем 2026-10-12:** native
 MT5 подключён к per-obligation Controller/ledger. Новый `--service` по умолчанию запрещает
-торговые мутации и обслуживает настоящий Telegram. Это не симулятор. Реальная торговля
+торговые мутации и обслуживает настоящий Telegram. Реальная торговля
 этой интеграции не проверена и на VPS не включалась. Исторический UTC остаётся
 `UNVERIFIED`, `history_complete=false`; пустая история ничего не доказывает.
 
@@ -221,8 +221,7 @@ Windows. При `snapshot_after_reads` или `snapshot_complete` задержк
 Read-only inspect не запускает владельца стратегии и веб-сервер.
 
 Режим `--mode gateway` остановлен с сообщением о переходе; старый `FileGateway` и EA
-оставлены как исторические исходники. Обычный запуск без `--mode` по-прежнему выполняет
-только offline simulation. Ротационный лог прямого исполнения: `tradfi_mt5.log`.
+оставлены как исторические исходники. Обычный запуск без `--mode` выбирает MT5 и не включает исполнение без явного `--execute`. Ротационный лог прямого исполнения: `tradfi_mt5.log`.
 Offline export новой базы: `python -m tradfi.diagnostics tradfi_mt5_state.sqlite3 report.json`;
 экспорт содержит приватную торговую историю, хотя account скрыт.
 
@@ -315,7 +314,7 @@ MetaEditor/Windows/MT5 и счёт Bybit в среде разработки от
 | `tradfi/broker.py` | Живая спецификация, денежный TP через калькулятор брокера, ступени |
 | `tradfi/engine.py` | Один владелец состояния, логический Recovery-цикл и OCO |
 | `tradfi/storage.py` | Отдельная SQLite WAL/FULL, intent до отправки, журнал переходов |
-| `tradfi/simulator.py` | Искусственный брокер для offline-тестов |
+| `tests/support/synthetic_broker.py` | Искусственный брокер для offline-тестов |
 | `tradfi/gateway.py` | Локальные Common Files: команды, ответы и снимок MT5 |
 | `mt5/TradFiGateway.mq5` | EA-исполнитель: никакой стратегии или вычисления Recovery |
 | `tradfi/telegram.py` | Только `/settings`, `/start`, `/stop`, `/status`; разрешённый chat |
@@ -411,7 +410,7 @@ stop/freeze levels, валюты, calc mode, quotes, M1 Close, orders, positions
 100 единиц контракта или 0.01 лота. UST account обязателен для порога 1 UST; hedging mode
 обязателен для обнаружения двух исполнений OCO. Netting и другие валюты блокируются.
 `OrderCalcProfit` возвращает деньги в валюте счёта; формула по условному contract size не
-подменяет этот вызов. В simulator используются **явные искусственные**, не Bybit значения.
+подменяет этот вызов. В тестовых fixtures используются **явные искусственные**, не Bybit значения.
 
 Протокол v1: `snapshot.json`; `commands/<24hex>.cmd` (UTF-8 `key=value`); `acks/<id>.json`;
 `ledger/<id>.intent`. Команда содержит account identity и срок годности. Запись — temp/fsync/rename
@@ -476,12 +475,11 @@ EA запрашивает всю доступную history, а не сколь�
 ## Проверка в Linux без сети
 
 ```bash
-python tradfi_main.py --mode simulate
 python -m unittest discover -s tests -p 'test_tradfi*.py' -v
 python -m unittest discover -s tests -v
 ```
 
-Симулятор не вызывает MT5/Telegram и не подключается к брокеру. Тесты проверяют деньги, число
+Тестовые брокерские fixtures не подключаются к MT5 или брокеру. Тесты проверяют деньги, число
 мутаций, SL/TP, смену веток, зеркальный SELL, settings snapshot, 1 UST boundary, cooldown/M1,
 duplicate events/updates, UNKNOWN, commit failure и restart, OCO и stop/cancel/fill гонки.
 Проверка Python и local-mailbox тесты не являются доказательством компиляции EA или совместимости
@@ -506,7 +504,7 @@ REJECTED CANCEL оставлял pending без обработки; ASCII mailbo
 
 | Требование | Проверка |
 | --- | --- |
-| Native SL/TP у pending/MARKET, actual-fill reanchor | Симулятор + статический путь MqlTradeRequest/OrderCheck/OrderSend |
+| Native SL/TP у pending/MARKET, actual-fill reanchor | Искусственный fixture + статический путь MqlTradeRequest/OrderCheck/OrderSend |
 | Денежный target/Recovery, без fees/swap | Явная искусственная спецификация и broker profit; EA вызывает OrderCalcProfit |
 | Первый SL / повтор пары / последующий SL | Исходные уровни один раз; затем actual close и новые дистанции |
 | Ступени BUY/SELL и TP priority | Исполнимая сторона, точные activation/step границы и TP equality |

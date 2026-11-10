@@ -55,8 +55,10 @@ class Fake:
 class HTTPS(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup); self.root=Path(self.tmp.name)
+        h.save(self.root/'managed-install.json',{'format':2,'role':'live','layout':'independent_roots_v1'})
+        h.save(self.root/'application.json',{'format':1,'role':'live'})
         (self.root/'data').mkdir(); self.config=self.root/'data'/'service.json'
-        self.cfg={'enable_trading':False,'web':{'host':'127.0.0.1','port':8765,'password':'x'*33},'untouched':{'paper':123}}
+        self.cfg={'enable_trading':False,'web':{'host':'127.0.0.1','port':8765,'password':'x'*33},'untouched':{'custom_extension':123}}
         self.config.write_text(json.dumps(self.cfg)); self.adapter=Fake(); self.setup=h.Setup(self.root,self.adapter)
         self.env=patch.dict('os.environ',{},clear=True); self.env.start(); self.addCleanup(self.env.stop)
     def plan(self): return self.setup.prepare('130.94.67.32')

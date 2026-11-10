@@ -1,4 +1,4 @@
-"""Separate TradFi entry point. Default invocation only runs an offline simulator."""
+"""LIVE TradFi entry point. Execution always requires explicit activation."""
 from tradfi.runtime import main
 
 if __name__ == '__main__':

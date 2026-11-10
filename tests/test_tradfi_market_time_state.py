@@ -1,4 +1,4 @@
-"""Fixed clock bindings must never reinterpret saved execution/paper state."""
+"""Fixed clock bindings must never reinterpret saved execution state."""
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,7 +9,6 @@ from unittest.mock import patch
 
 from tradfi.storage import Store
 from tradfi.market_time_state import bind_market_time_state, MarketTimeStateError
-from tradfi.paper import PaperSession
 from tradfi.runtime import _run_mt5
 
 
@@ -21,21 +20,16 @@ class MarketTimeBindingTest(unittest.TestCase):
         self.config = dict(expected_server='Bybit-Live-6', expected_login=123,
                            symbol='XAUUSD.s', web={'enabled': False}, state_file=str(self.path))
 
-    def seed(self, binding=None, paper=False):
+    def seed(self, binding=None):
         store = Store(self.path)
         if binding is not None:
             bind_market_time_state(store, dict(self.config, market_time_offset_seconds=binding))
         # Deliberately retained READY intent and nonzero debt. A startup rejection
         # must happen before a controller can reconcile or dispatch this intent.
-        state = dict(schema=1, backend='paper_mt5_quotes_v1', phase='READY',
+        state = dict(schema=1, backend='mt5_direct_v1', phase='READY',
                      basket_carry='123.45', commands={'old': {'status': 'READY'}},
                      candle_id=1793620800)
         store.db.execute('INSERT INTO snapshot VALUES(1,?)', (json.dumps(state),))
-        if paper:
-            store.db.execute('CREATE TABLE paper_exchange(id INTEGER PRIMARY KEY, payload TEXT)')
-            store.db.execute('INSERT INTO paper_exchange VALUES(1,?)', (json.dumps(dict(
-                cursor=1793620830000, cursor_keys=['original'], deals=[{'time': 1793620800}],
-                orders=[{'id':'saved-order'}], positions=[])),))
         before = list(store.db.iterdump())
         store.close()
         return before
@@ -61,7 +55,7 @@ class MarketTimeBindingTest(unittest.TestCase):
             store.close()
 
     def test_legacy_nonzero_rejects_without_any_database_change(self):
-        before = self.seed(paper=True)
+        before = self.seed()
         store = Store(self.path)
         try:
             with self.assertRaisesRegex(MarketTimeStateError, 'Legacy database'):
@@ -71,27 +65,15 @@ class MarketTimeBindingTest(unittest.TestCase):
         self.assertEqual(self.dump(), before)
 
     def test_legacy_default_zero_adopts_without_changing_snapshot(self):
-        self.seed(paper=True)
+        self.seed()
         store = Store(self.path)
         try:
             old = store.load()
-            history = store.db.execute('SELECT payload FROM paper_exchange').fetchone()
             self.assertEqual(bind_market_time_state(store, self.config)['market_time_offset_seconds'], 0)
             self.assertEqual(store.load(), old)
-            self.assertEqual(store.db.execute('SELECT payload FROM paper_exchange').fetchone(), history)
         finally:
             store.close()
 
-    def test_paper_rejects_before_exchange_or_controller_and_preserves_cursor(self):
-        before = self.seed(binding=0, paper=True)
-        reader = SimpleNamespace(_expected_account='123@Bybit-Live-6', market_time_offset_seconds=7200)
-        with patch('tradfi.paper.PaperExchange') as exchange, patch('tradfi.paper.ControlledRecoveryController') as controller:
-            exchange.backend_id = 'paper_mt5_quotes_v1'
-            with self.assertRaises(MarketTimeStateError):
-                PaperSession(self.path, reader, clock=lambda: 0, monotonic=lambda: 0)
-            exchange.assert_not_called()
-            controller.assert_not_called()
-        self.assertEqual(self.dump(), before)
 
     def test_live_stale_ready_cannot_connect_or_dispatch_after_offset_change(self):
         before = self.seed(binding=0)

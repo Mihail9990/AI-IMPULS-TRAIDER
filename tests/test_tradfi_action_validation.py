@@ -6,15 +6,15 @@ import unittest
 from unittest.mock import patch
 from tradfi.control import ActionGateway,OwnerMailbox
 from tradfi.basket import BasketController
-from tradfi.interactive_simulator import InteractiveSimulator
-from tradfi.simulator import ARTIFICIAL_SPEC
+from tests.support.interactive_broker import InteractiveBroker
+from tests.support.synthetic_broker import ARTIFICIAL_SPEC
 from tradfi.storage import Store
 
 class ActionValidationTest(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.store=Store(Path(self.tmp.name)/'s.db');self.addCleanup(self.store.close)
-        self.broker=InteractiveSimulator(dict(ARTIFICIAL_SPEC,volume_min="0.01",volume_step="0.01"));self.bot=BasketController(self.store,self.broker)
+        self.broker=InteractiveBroker(dict(ARTIFICIAL_SPEC,volume_min="0.01",volume_step="0.01"));self.bot=BasketController(self.store,self.broker)
         self.gateway=ActionGateway(self.bot,execute=self.bot.action);self.index=0
     def apply(self,action):
         self.index+=1

@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from tradfi.interactive import InteractiveController
-from tradfi.interactive_simulator import InteractiveSimulator
+from tests.support.interactive_broker import InteractiveBroker
 from tradfi.storage import Store
 from tradfi.settings import Settings
 from tradfi.strategies.fixed_recovery import RecoveryConfig
@@ -14,7 +14,7 @@ class CandleEntryTest(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.store=Store(Path(self.tmp.name)/'state.db');self.addCleanup(self.store.close)
-        self.broker=InteractiveSimulator();self.broker.data['now']=90
+        self.broker=InteractiveBroker();self.broker.data['now']=90
         self.broker.data['candle']=dict(id=0,open='3999',close='4000')
         self.bot=InteractiveController(self.store,self.broker)
     def tick(self,n=1):
@@ -33,7 +33,7 @@ class CandleEntryTest(unittest.TestCase):
                     with tempfile.TemporaryDirectory() as tmp:
                         store=Store(Path(tmp)/'s.db')
                         try:
-                            b=InteractiveSimulator();b.data['now']=90;b.data['candle']=dict(id=0,open='3999',close='4000')
+                            b=InteractiveBroker();b.data['now']=90;b.data['candle']=dict(id=0,open='3999',close='4000')
                             bot=InteractiveController(store,b);bot.configure(engine,RecoveryConfig().dump());bot.command('/start auto')
                             b.data['now']=120;b.data['candle']=dict(id=60,open='3999' if side=='BUY' else '4001',close='4000');bot.tick();bot.tick()
                             self.assertEqual(len(b.data['orders']),1);o=b.data['orders'][0]

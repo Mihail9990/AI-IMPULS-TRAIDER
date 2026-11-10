@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from tradfi.interactive import InteractiveController
-from tradfi.interactive_simulator import InteractiveSimulator
+from tests.support.interactive_broker import InteractiveBroker
 from tradfi.strategies.fixed_recovery import RecoveryConfig
 from tradfi.storage import Store
 
@@ -13,7 +13,7 @@ class InteractiveTest(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.store=Store(Path(self.tmp.name)/'state.sqlite3');self.addCleanup(self.store.close)
-        self.broker=InteractiveSimulator();self.bot=InteractiveController(self.store,self.broker)
+        self.broker=InteractiveBroker();self.bot=InteractiveController(self.store,self.broker)
 
     def tick(self,n=1):
         for _ in range(n):self.bot.tick()

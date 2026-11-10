@@ -1,4 +1,4 @@
-"""Independent TradFi runner. Simulation is default; direct MT5 requires explicit opt-in."""
+"""Independent TradFi runner. Direct MT5 is read-only until explicit execution opt-in."""
 import argparse
 from contextlib import contextmanager, ExitStack
 import hashlib
@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 import time
 
-from .interactive_simulator import InteractiveSimulator
 from .storage import Store, DurabilityError
 
 
@@ -159,7 +158,7 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description='TradFi MT5 runner')
-    parser.add_argument('--mode', choices=('simulate', 'mt5', 'paper', 'gateway'), default='simulate')
+    parser.add_argument('--mode', choices=('mt5', 'gateway'), default='mt5')
     parser.add_argument('--config', default='tradfi_config.json')
     parser.add_argument('--inspect', action='store_true', help='Read-only MT5 preflight; no SQLite/web/trading')
     parser.add_argument('--inspect-evidence', action='store_true', help='Read-only obligation evidence summary; never execute')
@@ -167,35 +166,11 @@ def main(argv=None):
     parser.add_argument('--service',action='store_true',help='Native MT5 + web service; trading disabled by default')
     parser.add_argument('--execute',action='store_true',help='Explicit execution activation; requires --service and config opt-ins')
     args = parser.parse_args(argv)
-    if (args.service and (args.mode not in {'mt5','paper'} or args.inspect or args.inspect_evidence)
+    if (args.service and (args.mode != 'mt5' or args.inspect or args.inspect_evidence)
             or args.execute and not args.service):
         parser.error('--service requires --mode mt5 without inspect; --execute requires --service')
     if (args.inspect_evidence and args.mode != 'mt5') or (args.journal_snapshot and not args.inspect_evidence):
         parser.error('Evidence inspection requires --mode mt5 --inspect-evidence')
-    if args.mode == 'paper':
-        if args.execute or args.inspect or args.inspect_evidence or args.journal_snapshot:
-            parser.error('Paper cannot enable execution or live inspection')
-        from .paper_runtime import main as paper_main
-        return paper_main(['--config', args.config if args.config!='tradfi_config.json' else 'tradfi_paper_config.json'])
-    if args.mode == 'simulate':
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            store = Store(Path(tmp)/'state.sqlite3')
-            try:
-                from .recovery_v3 import ControlledRecoveryController
-                from .simulator import ARTIFICIAL_SPEC
-                broker=InteractiveSimulator(dict(ARTIFICIAL_SPEC,volume_min='0.01',volume_step='0.01'))
-                bot=ControlledRecoveryController(store,broker)
-                bot.state['tp_distances']=['0.25']+[None]*19
-                bot.command('/start');broker.data.update(now=120,candle=dict(id=60,open='3999',close='4000'));bot.tick()
-                broker.fill('BUY'); broker.quote('4003', '4003.10')
-                for _ in range(4): bot.tick()
-                broker.close('TP'); bot.tick()
-                print(json.dumps({'mode': 'OFFLINE_SIMULATOR', 'recovery_mode':'V3', 'state': bot.status(),
-                                  'completed': bot.state['completed'], 'commands': len(broker.commands)}, indent=2))
-            finally:
-                store.close()
-        return
     if args.mode == 'gateway':
         parser.exit(2, 'Legacy file gateway runtime is retired. Preserve its database/journal; '
                     'no automatic migration. Use --mode mt5 --inspect with a direct-MT5 config.\n')

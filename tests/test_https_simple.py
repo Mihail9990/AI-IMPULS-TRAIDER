@@ -17,9 +17,10 @@ class Simple(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.root=Path(self.tmp.name);(self.root/'data').mkdir()
-        h.save(self.root/'managed-install.json',{'format':1})
+        h.save(self.root/'managed-install.json',{'format':2,'role':'live','layout':'independent_roots_v1'})
+        h.save(self.root/'application.json',{'format':1,'role':'live'})
         self.config=self.root/'data/service.json'
-        self.config.write_text(json.dumps({'enable_trading':False,'web':{'host':'127.0.0.1','port':8765,'password':'x'*32},'paper':{'preserve':True}}))
+        self.config.write_text(json.dumps({'enable_trading':False,'web':{'host':'127.0.0.1','port':8765,'password':'x'*32},'custom_extension':{'preserve':True}}))
         self.a=Adapter();self.i=s.Installer(self.root,self.a)
         self.sha=patch.object(h,'ARCHIVE_SHA256',h.digest(self.a.fetch()));self.sha.start();self.addCleanup(self.sha.stop)
         self.env=patch.dict('os.environ',{},clear=True);self.env.start();self.addCleanup(self.env.stop)
@@ -29,7 +30,7 @@ class Simple(unittest.TestCase):
         self.install()
         self.assertEqual(sum(c[0]=='create' for c in self.a.calls),1)
         self.assertEqual(self.a.calls[-1],('firewall',))
-        self.assertTrue(h.read(self.config)['paper']['preserve'])
+        self.assertTrue(h.read(self.config)['custom_extension']['preserve'])
         self.assertFalse(h.read(self.config)['enable_trading'])
     def test_repeat_refused_no_duplicate(self):
         self.install()
@@ -80,3 +81,27 @@ class Simple(unittest.TestCase):
         self.assertNotIn('Remove-NetFirewallRule',s.FIREWALL)
         self.assertIn("'8765','Block'",s.FIREWALL)
         self.assertIn('Get-NetFirewallApplicationFilter',s.FIREWALL)
+
+    def test_rejects_legacy_or_foreign_installation_without_changes(self):
+        before=self.config.read_bytes()
+        for marker,application in (({'format':1},{'format':1,'role':'live'}),({'format':2,'role':'other','layout':'independent_roots_v1'},{'format':1,'role':'other'}),({'format':2,'role':'live','layout':'independent_roots_v1'},{'format':1,'role':'other'})):
+            h.save(self.root/'managed-install.json',marker);h.save(self.root/'application.json',application)
+            with self.assertRaises(h.HttpsError):self.install()
+            self.assertFalse(self.i.s.home.exists());self.assertFalse(self.i.s.attempt_path.exists())
+            self.assertEqual(self.config.read_bytes(),before);self.assertFalse(self.a.services)
+
+    def test_missing_ownership_marker_rejected(self):
+        (self.root/'application.json').unlink()
+        with self.assertRaises(h.HttpsError):self.install()
+        self.assertFalse(self.a.services);self.assertFalse(self.i.s.home.exists())
+
+    def test_changed_ownership_between_plan_and_apply_rejected_before_writes(self):
+        plan=self.i.s.prepare('38.60.203.9');before=self.config.read_bytes()
+        h.save(self.root/'application.json',{'format':1,'role':'other'})
+        with self.assertRaises(h.HttpsError):self.i.s.apply(plan,True)
+        self.assertEqual(self.config.read_bytes(),before);self.assertFalse(self.i.s.attempt_path.exists());self.assertFalse(self.a.services)
+
+    def test_pending_migration_rejected(self):
+        h.save(self.root/'migration-pending.json',{'format':1})
+        with self.assertRaises(h.HttpsError):self.install()
+        self.assertFalse(self.i.s.home.exists())

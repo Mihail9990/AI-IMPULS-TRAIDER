@@ -18,19 +18,17 @@ from .chart_feed import ChartFeed
 
 def panel_html(body,role):
     """Render a fixed server role, never a client-selected execution target."""
-    import re
-    if role not in {'live','paper'}:raise ValueError('Invalid panel role')
+    if role != 'live':raise ValueError('Invalid panel role')
     body=body.replace(b'<body>',('<body data-controller="native" data-role="'+role+'">').encode())
-    body=body.replace(b'__PANEL_ROLE__',('PAPER · Симулятор' if role=='paper' else 'LIVE · Торговля').encode())
-    other='live' if role=='paper' else 'paper'
-    return re.sub(('<option value="'+other+'">[^<]*</option>').encode(),b'',body)
+    body=body.replace(b'__PANEL_ROLE__','LIVE · Торговля'.encode())
+    return body
 
 
 class WebTransport:
     def __init__(self,mailbox,*,authority='127.0.0.1:8765',password=None,clock=time.monotonic,public_origin=None,role='live',logs=None):
         if urlsplit('http://'+authority).hostname not in {'127.0.0.1','::1'}:raise ValueError('Web server must bind loopback')
         self.logs=logs
-        if role not in {'live','paper'}:raise ValueError('Invalid panel role')
+        if role != 'live':raise ValueError('Invalid panel role')
         self._role=role;self.cookie_name='tradfi_'+role+'_session'
         self.mailbox=mailbox;self.authority=authority;self.password=password;self.clock=clock
         self.origin=public_origin or 'http://'+authority
@@ -83,7 +81,7 @@ class WebTransport:
                 return reply(200,value)
             except ValueError:return reply(400,{'error':'INVALID_LOG_REQUEST'})
         mailbox=self.mailbox
-        prefix='/api/paper/' if self.role=='paper' else '/api/'
+        prefix='/api/'
         if method=='GET' and route==prefix+'state':return reply(200,mailbox.view())
         if method=='POST' and route=='/api/logout':
             with self.lock:self.sessions.pop(sid,None)
@@ -168,8 +166,8 @@ class NativePanel:
 
     def start(self):
         from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
-        from .local_panel import ROOT
-        if 'basket_settings' in self.controller.state:ROOT=ROOT.parent/'basket-panel'
+        from pathlib import Path
+        ROOT=Path(__file__).resolve().parents[1]/'web'/('basket-panel' if 'basket_settings' in self.controller.state else 'local-panel')
         transport=self.transport;authority=self.authority
         class Handler(BaseHTTPRequestHandler):
             def setup(self):super().setup();self.connection.settimeout(2)
@@ -210,18 +208,3 @@ class NativePanel:
     def close(self):
         self.logs.close()
         if self.server:self.server.shutdown();self.server.server_close()
-
-
-class PaperPanel:
-    """Paper-only HTTP owner; uses PaperSession presentation, never native feeds."""
-    def __init__(self,paper_session,*,authority='127.0.0.1:8766',password=None,clock=time.time,monotonic=time.monotonic,public_origin=None):
-        from .web_logs import DiagnosticLogs
-        self.paper_session=paper_session;self.controller=paper_session.controller
-        self.mailbox=paper_session.mailbox;self.clock=clock;self.authority=authority;self.server=None
-        self.logs=DiagnosticLogs(getattr(paper_session,'log_file',None))
-        self.transport=WebTransport(self.mailbox,authority=authority,password=password,clock=monotonic,public_origin=public_origin,role='paper',logs=self.logs)
-    def view(self):return self.paper_session.view()
-    def step(self):
-        self.logs.capture('paper',self.controller.store,self.controller.state,self.clock(),self.view())
-    start=NativePanel.start
-    close=NativePanel.close

@@ -64,7 +64,7 @@ class LogsTest(unittest.TestCase):
         self.assertIn('INITIAL_POSITION',self.logs.document('live'));self.assertEqual(path.read_text(),raw)
     def test_no_per_tick_log_and_pagination(self):
         state=self.fixture.bot.state;view=dict(quote=dict(bid=4000,ask=4001))
-        self.logs.capture('paper',self.fixture.store,state,1800000000,view);view['quote']['bid']=4001
-        self.logs.capture('paper',self.fixture.store,state,1800000001,view);self.assertEqual(len(self.logs.recent['paper']),1)
-        self.logs.documents['paper']='Я'*40000
-        page=self.logs.response('paper',1);self.assertEqual(len(page['text']),16000);self.assertTrue(page['has_more'])
+        self.logs.capture('live',self.fixture.store,state,1800000000,view);view['quote']['bid']=4001
+        self.logs.capture('live',self.fixture.store,state,1800000001,view);self.assertEqual(len(self.logs.recent['live']),1)
+        self.logs.documents['live']='Я'*40000
+        page=self.logs.response('live',1);self.assertEqual(len(page['text']),16000);self.assertTrue(page['has_more'])

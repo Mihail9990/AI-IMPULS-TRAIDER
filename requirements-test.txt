@@ -1,0 +1,3 @@
+# Offline tests only; no MetaTrader5 installation or broker connection required.
+requests>=2.31,<3
+numpy>=1.26,<3

@@ -14,7 +14,7 @@ from tradfi.gateway import FileGateway
 from tradfi.runtime import owner_lock
 from tradfi.settings import Settings
 from tradfi.storage import Store, DurabilityError
-from tradfi.simulator import Simulator
+from tests.support.synthetic_broker import SyntheticBroker
 import test_tradfi as fixture
 
 
@@ -250,7 +250,7 @@ class MailboxTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.gateway = FileGateway(self.root, enable_trading=True)
-        self.snap = Simulator().snapshot()
+        self.snap = SyntheticBroker().snapshot()
         self.snap.update(protocol=1, connected=True, now=time.time())
         self.snap['quote']['utc_time'] = time.time()
         (self.root/'snapshot.json').write_text(json.dumps(self.snap))
@@ -306,7 +306,7 @@ class MailboxTest(unittest.TestCase):
     def test_offline_diagnostic_export_redacts_account(self):
         from tradfi.diagnostics import export
         store = Store(self.root/'state.sqlite3'); self.addCleanup(store.close)
-        controller = Controller(store, Simulator()); controller.command('/start')
+        controller = Controller(store, SyntheticBroker()); controller.command('/start')
         export(store.path, self.root/'report.json')
         report = json.loads((self.root/'report.json').read_text())
         self.assertEqual(report['state']['account'], '<redacted>')

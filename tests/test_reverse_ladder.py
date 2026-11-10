@@ -4,7 +4,7 @@ from dataclasses import replace
 import unittest
 import test_basket_latest_close as fixtures
 from tradfi.broker import Spec
-from tradfi.simulator import ARTIFICIAL_SPEC
+from tests.support.synthetic_broker import ARTIFICIAL_SPEC
 from tradfi.reverse_ladder import reverse_sl_prices
 from tradfi.basket_latest_close import LatestCloseBasketController
 from tradfi.control import ActionRejected,ActionGateway

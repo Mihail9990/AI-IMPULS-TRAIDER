@@ -7,8 +7,8 @@ import unittest
 from tradfi.basket import BasketController
 from tradfi.basket_math import BasketSettings,ladder,expanded_levels
 from tradfi.broker import Spec
-from tradfi.interactive_simulator import InteractiveSimulator
-from tradfi.simulator import ARTIFICIAL_SPEC
+from tests.support.interactive_broker import InteractiveBroker
+from tests.support.synthetic_broker import ARTIFICIAL_SPEC
 from tradfi.storage import Store
 from tradfi.control import ActionGateway
 
@@ -16,7 +16,7 @@ class BasketTest(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.store=Store(Path(self.tmp.name)/'basket.db');self.addCleanup(self.store.close)
-        self.b=InteractiveSimulator(dict(ARTIFICIAL_SPEC,volume_min='0.01',volume_step='0.01',contract_size='100'))
+        self.b=InteractiveBroker(dict(ARTIFICIAL_SPEC,volume_min='0.01',volume_step='0.01',contract_size='100'))
         self.b.data.update(now=90,candle=dict(id=0,open='3999',close='4000'))
         self.bot=BasketController(self.store,self.b)
         self.bot.state['basket_settings']['INITIAL_SIZE']='0.01';self.bot.save('fixture')
@@ -266,7 +266,7 @@ class NativeBasketTest(unittest.TestCase):
 
 class BasketArithmeticTest(unittest.TestCase):
     def test_normalized_confirmed_formula_and_mirror(self):
-        b=InteractiveSimulator(dict(ARTIFICIAL_SPEC,tick_size='0.00000001',point='0.00000001',volume_min='.01',volume_step='.01',contract_size='1'))
+        b=InteractiveBroker(dict(ARTIFICIAL_SPEC,tick_size='0.00000001',point='0.00000001',volume_min='.01',volume_step='.01',contract_size='1'))
         spec=Spec.load(b.data['spec'])
         for side in ('BUY','SELL'):
             tps=ladder(b,spec,side,['4000']*6,['.01']*6,'.03')

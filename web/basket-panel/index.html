@@ -70,10 +70,7 @@
 <article><small>Цикл / этап</small><strong id="phase">—</strong><span id="cycle">—</span></article><article><small>Долг RECOVERY</small><strong id="debt">—</strong><span id="realized">—</span></article><article><small>Защита и связь</small><strong id="feed-status">—</strong><span id="mode">—</span></article>
 </div>
 
-</details><details id="paper-controls" class="card" hidden><summary>Бумажная торговля</summary>
-<p>Реальные read-only котировки MT5. Исполнения и расходы — модель; реальных сделок нет.</p>
-<p id="paper-status"></p>
-<button id="paper-resume">Продолжить после перерыва…</button><button id="paper-flatten">Закрыть бумажные билеты…</button><label>Модель комиссии UST / лот / сторона<input id="paper-cost" inputmode="decimal" value="0"></label><button id="paper-save-cost">Применить модель расходов…</button><p>По умолчанию комиссия 0, swap и сборы 0. Это не фактические тарифы брокера.</p></details>
+</details>
 <details class="card"><summary id="state-heading">Брокерское состояние</summary>
 <div class="table-wrap"><table>
 <thead><tr>
@@ -87,16 +84,7 @@
 <tbody id="tickets"></tbody>
 </table></div>
 <p id="edit-status"></p></details>
-<details id="paper-history" class="card" hidden><summary>История бумажных исполнений</summary><div class="table-wrap"><table>
-<thead><tr>
-<th>Время UTC</th>
-<th>Событие</th>
-<th>Сторона / объём</th>
-<th>Цена</th>
-<th>Net модели</th>
-</tr></thead>
-<tbody id="paper-deals"></tbody>
-</table></div></details>
+
 <details class="card"><summary>Параметры торговли</summary>
 <section id="v3-settings" hidden><h3>Настройки входа V3</h3>
 <div class="fields">
@@ -110,7 +98,7 @@
 <button id="save-tp-grid">Предпросмотр ступеней…</button></section><section><h3>Остаток RECOVERY</h3>
 <p>Сначала остановите новые входы. Списание возможно только без позиций, ордеров и неизвестных исходов. Уже учтённый убыток не вычитается повторно. После подтверждения — новый цикл с новой закрытой M1.</p>
 <button id="writeoff-recovery">Сбросить остаток RECOVERY…</button><p id="writeoff-history"></p></section><details id="logs-section"><summary>Логи</summary><label>Контур<select id="log-scope"><option value="live">Торговля · audit</option>
-<option value="paper">Симулятор · audit</option>
+
 <option value="runtime">Файл этого сервиса · очищенный</option></select></label><button id="logs-refresh">Показать</button><button id="logs-prev">Предыдущая страница</button><button id="logs-next">Следующая страница</button><button id="logs-download">Скачать .txt</button><p id="logs-status"></p>
 <pre id="logs-view"></pre>
 <p>UTC — исходное время; UTC+2 — отдельно подписанное отображение. Выгрузка ограничена последними записями и удаляет чувствительные поля. Исходные логи не очищаются.</p></details></details>

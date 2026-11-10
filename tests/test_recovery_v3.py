@@ -205,23 +205,3 @@ class V3(unittest.TestCase):
         f.bot.edit(settings=cfg);f.bot.command('/stop');f.tick(10)
         self.assertFalse(f.b.data['orders']);self.assertFalse(f.bot.state['cycle'].get('v3_rearm'))
         self.assertFalse(f.b.data['positions'])
-
-
-class V3Paper(unittest.TestCase):
-    def setUp(self):
-        from test_tradfi_paper import PaperTest
-        self.f=PaperTest();self.f.primary_v3=True;self.f.setUp();self.addCleanup(self.f.doCleanups);self.addCleanup(self.f.tearDown)
-    def test_real_quote_paper_market_and_recovery_wait(self):
-        f=self.f;f.initial();f.reader.tick('3998','3998.1');f.step(5)
-        self.assertFalse(f.p['orders']);self.assertEqual(f.session.controller.state['phase'],'V3_WAIT_ENTRY')
-        c=f.session.controller.state['cycle']
-        f.action(dict(type='v3_entry',cycle_id=c['id'],order_type='MARKET',timing='now',side='SELL',count=3));f.step(5)
-        self.assertEqual(len(f.p['positions']),3);self.assertEqual({p['entry'] for p in f.p['positions']},{'3998'})
-        self.assertFalse(c.get('manual'));self.assertFalse(f.p['orders'])
-        f.reader.tick('4002','4002.1');f.step(5)
-        self.assertFalse(f.p['positions']);self.assertFalse(f.p['orders']);self.assertEqual(f.session.controller.state['phase'],'V3_WAIT_ENTRY')
-    def test_market_idempotency_and_gap_block(self):
-        f=self.f;e=f.session.exchange
-        cmd=dict(id='m1',kind='MARKET',side='BUY',size='.01',price='4000.10',sl='3998',tp='4001')
-        e.submit(cmd);e.submit(cmd);self.assertEqual(len(f.p['positions']),1)
-        e.p['paused_gap']=True;e.submit(dict(cmd,id='m2'));self.assertEqual(e.result('m2')['status'],'REJECTED');self.assertEqual(len(f.p['positions']),1)

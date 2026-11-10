@@ -287,6 +287,20 @@ class Setup:
         self.root=Path(root); self.home=self.root/'https'; self.adapter=adapter or Windows()
         self.config=self.root/'data'/'service.json'; self.journal=self.home/'transaction.json'
         self.attempt_path=self.root/'https-attempt.json'; self.attempt=None; self.local_archive=None
+    def validate_installation(self):
+        """Only the independently owned LIVE root can publish its panel."""
+        for path in (self.root,self.root/'data',self.config,self.root/'managed-install.json',self.root/'application.json'):
+            if path.is_symlink() or getattr(path,'is_junction',lambda:False)():
+                raise HttpsError('Путь установки содержит ссылку; настройка HTTPS остановлена.')
+        try:
+            marker=read(self.root/'managed-install.json')
+            application=read(self.root/'application.json')
+        except (OSError,ValueError):
+            raise HttpsError('Сначала установите отдельный LIVE-бот штатным установщиком.') from None
+        if marker!={'format':2,'role':'live','layout':'independent_roots_v1'} or application!={'format':1,'role':'live'}:
+            raise HttpsError('HTTPS требует собственную независимую LIVE-установку. Старый общий или чужой каталог не изменён.')
+        if (self.root/'migration-pending.json').exists():
+            raise HttpsError('Перенос установки не завершён; HTTPS заблокирован.')
     def select_local_zip(self,path):
         # Cancellation is a no-op. An actual reselection invalidates the previous bytes first.
         if not path:return False
@@ -305,6 +319,7 @@ class Setup:
     def use_download(self):self.local_archive=None
     def archive_source(self):return 'LOCAL_OFFICIAL_SHA256' if self.local_archive is not None else 'OFFICIAL_HTTPS_DOWNLOAD'
     def prepare(self,address):
+        self.validate_installation()
         if self.attempt_path.exists() and read(self.attempt_path).get('status')!='RECOVERED': raise HttpsError('Есть предыдущая попытка HTTPS. Сначала диагностика и восстановление подготовки либо откат; повторное Apply запрещено.')
         public=origin(address); raw=self.config.read_bytes(); cfg=json.loads(raw.decode('utf-8-sig'))
         web=cfg.get('web',{})
@@ -343,6 +358,7 @@ class Setup:
         save(self.journal,tx)
     def apply(self,plan,confirmed=False):
         if not confirmed: raise HttpsError('Применение не подтверждено.')
+        self.validate_installation()
         if self.attempt_path.exists() and read(self.attempt_path).get('status')!='RECOVERED':
             raise HttpsError('Предыдущая попытка не сверена. Повторное Apply запрещено.')
         self.attempt={'format':1,'id':uuid.uuid4().hex,'status':'RUNNING','stage':'begin',
@@ -375,6 +391,7 @@ class Setup:
         self._stage('unpack');binary=validate_archive(archive)
         self._stage('recheck');same_plan(self.adapter,plan)
         if digest(self.config.read_bytes())!=plan['config_hash']: raise HttpsError('Настройки изменились во время загрузки.')
+        self.validate_installation()
         self._stage('directory')
         # exist_ok=False: a directory arriving after preflight is not adopted.
         self.home.mkdir(parents=False,exist_ok=False)
@@ -604,7 +621,7 @@ def wizard(manager):
         if job.busy:return
         def work():
             if not locked:return action()
-            with lock(manager.root/'operation.lock'),lock(manager.root/'instance-live.lock'),lock(manager.root/'instance-paper.lock'),account_lock(manager.root,manager.config()),state_lock(manager.root,manager.config()):return action()
+            with lock(manager.root/'operation.lock'),lock(manager.root/'instance-live.lock'),account_lock(manager.root,manager.config()),state_lock(manager.root,manager.config()):return action()
         pending=done
         if job.start(work):status.set('Выполняется. Окно остаётся доступным; дождитесь результата.');refresh()
     def poll():

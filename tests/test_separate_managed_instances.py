@@ -1,6 +1,5 @@
-"""Real subprocess ownership/admission checks; no MT5, network or trading."""
-from contextlib import ExitStack
-import json,os,subprocess,sys,tempfile,unittest
+"""Real subprocess LIVE ownership/admission checks; no MT5, network or trading."""
+import os,subprocess,sys,tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch
 import install_tradfi as installer
@@ -18,8 +17,7 @@ try:
 except Exception as exc:
  print(type(exc).__name__,flush=True)
 """
-
-class SeparateManagedInstances(unittest.TestCase):
+class ManagedLiveOwnership(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.root=Path(self.tmp.name);self.sha='a'*40;self.code=self.root/'releases'/self.sha/'code'
@@ -27,44 +25,35 @@ class SeparateManagedInstances(unittest.TestCase):
         installer.atomic_json(self.root/'managed-install.json',{'format':1})
         installer.atomic_json(self.root/'current.json',{'current':self.sha,'previous':None})
         self.patch=patch.object(managed,'__file__',str(self.file));self.patch.start();self.addCleanup(self.patch.stop)
-    def child(self,role):
+    def child(self,role='live'):
         env=dict(os.environ);env.pop('PYTHONPATH',None)
-        p=subprocess.Popen([sys.executable,'-c',CHILD,str(self.file),str(self.root/'data'/(role+'.sqlite3')),role],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=env)
+        p=subprocess.Popen([sys.executable,'-c',CHILD,str(self.file),str(self.root/'data'/'state.sqlite3'),role],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=env)
         def cleanup():
             if p.poll() is None:p.communicate('\n',timeout=10)
             else:p.communicate(timeout=10)
-        self.addCleanup(cleanup)
-        return p
-    def test_two_processes_coexist_but_update_and_duplicate_are_blocked(self):
-        live=self.child('live');self.assertEqual(live.stdout.readline().strip(),'READY')
-        paper=self.child('paper');self.assertEqual(paper.stdout.readline().strip(),'READY')
-        # Admission is short, so another role can start; update cannot own both.
+        self.addCleanup(cleanup);return p
+    def test_live_owner_blocks_update_and_duplicate(self):
+        live=self.child();self.assertEqual(live.stdout.readline().strip(),'READY')
         with installer.lock(self.root/'operation.lock'):
-            for role in ('live','paper'):
-                with self.assertRaises(installer.SetupError):
-                    with installer.lock(self.root/('instance-'+role+'.lock')):pass
-        duplicate=self.child('live');self.assertEqual(duplicate.stdout.readline().strip(),'SetupError')
+            with self.assertRaises(installer.SetupError):
+                with installer.lock(self.root/'instance-live.lock'):pass
+        duplicate=self.child();self.assertEqual(duplicate.stdout.readline().strip(),'SetupError')
         live.communicate('\n',timeout=10)
-        with installer.lock(self.root/'instance-live.lock'):pass
-        with self.assertRaises(installer.SetupError):
-            with installer.lock(self.root/'instance-paper.lock'):pass
-        paper.communicate('\n',timeout=10)
-        with installer.lock(self.root/'operation.lock'),installer.lock(self.root/'instance-live.lock'),installer.lock(self.root/'instance-paper.lock'):pass
+        with installer.lock(self.root/'operation.lock'),installer.lock(self.root/'instance-live.lock'):pass
     def test_update_admission_blocks_new_instance(self):
         with installer.lock(self.root/'operation.lock'):
-            p=self.child('paper');self.assertEqual(p.stdout.readline().strip(),'SetupError')
-    def test_separate_bindings_and_role_stop_requests(self):
-        live=self.root/'data'/'live.sqlite3';paper=self.root/'data'/'paper.sqlite3';live.parent.mkdir();live.touch();paper.touch()
-        managed.bind_state(live,instance='live');managed.bind_state(paper,instance='paper')
-        self.assertNotEqual(managed.binding_path(self.root,'live'),managed.binding_path(self.root,'paper'))
-        with managed.runtime_guard(live,instance='live'),managed.runtime_guard(paper,instance='paper'):pass
+            p=self.child();self.assertEqual(p.stdout.readline().strip(),'SetupError')
+    def test_non_live_role_rejected_before_locks(self):
+        p=self.child('paper');self.assertEqual(p.stdout.readline().strip(),'ValueError')
+        self.assertFalse((self.root/'instance-paper.lock').exists())
+    def test_binding_and_stop_request_preserve_live_data(self):
+        state=self.root/'data'/'state.sqlite3';state.parent.mkdir();state.touch()
+        managed.bind_state(state)
+        self.assertEqual(managed.binding_path(self.root,'live'),self.root/'data'/'state-binding.json')
+        with managed.runtime_guard(state):pass
+        with patch.dict(os.environ,{'TRADFI_LAUNCH_SESSION':'b'*32,'TRADFI_LAUNCH_INSTANCE':'live'}):event=managed.stop_request()
+        self.assertEqual(event.path.name,'stop-live-'+'b'*32+'.request')
+        event.path.touch();self.assertTrue(event.is_set())
+        state.unlink()
         with self.assertRaises(installer.SetupError):
-            with managed.runtime_guard(live,instance='paper'):pass
-        events={}
-        for role in ('live','paper'):
-            with patch.dict(os.environ,{'TRADFI_LAUNCH_SESSION':'b'*32,'TRADFI_LAUNCH_INSTANCE':role}):events[role]=managed.stop_request(instance=role)
-        self.assertNotEqual(events['live'].path,events['paper'].path)
-        events['live'].path.touch();self.assertTrue(events['live'].is_set());self.assertFalse(events['paper'].is_set())
-        paper.unlink()
-        with self.assertRaises(installer.SetupError):
-            with managed.runtime_guard(paper,instance='paper'):pass
+            with managed.runtime_guard(state):pass

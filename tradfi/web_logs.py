@@ -56,7 +56,7 @@ class DiagnosticLogs:
         if scope=='runtime':
             if not self.runtime_path:return 'Лог-файл не настроен.\n'
             return build_document(self.runtime_path).decode('utf-8',errors='replace')
-        if scope not in {'live','paper'}:raise ValueError('Invalid log scope')
+        if scope != 'live':raise ValueError('Invalid log scope')
         with self.lock:text=self.documents.get(scope,'Логи этого контура пока отсутствуют.\n')
         archived=[]
         if self.runtime_path:

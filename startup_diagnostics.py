@@ -151,7 +151,7 @@ def run(root,output,*,api=None,busy=port_busy,exists=None,clock=time.time):
         with ExitStack() as stack:
             try:
                 stack.enter_context(lock(root/'operation.lock'))
-                for instance in ('live','paper'):stack.enter_context(lock(root/('instance-'+instance+'.lock')))
+                for instance in ('live',):stack.enter_context(lock(root/('instance-'+instance+'.lock')))
             except Exception:report.add('ERROR','LOCK_BUSY');return False
             previous=root/'data'/'startup-error.txt'
             try:

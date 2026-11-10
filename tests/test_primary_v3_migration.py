@@ -43,23 +43,3 @@ class PrimaryMigration(unittest.TestCase):
             with self.assertRaises(ActionRejected):fn()
         for mode in ('V1','V3','V3.3'):
             with self.assertRaises(ActionRejected):b.action(dict(type='recovery_mode',mode=mode,cycle_id=None))
-
-    def test_paper_legacy_restart_blocks_special_mutations(self):
-        from test_tradfi_paper import PaperTest
-        f=PaperTest();f.setUp();self.addCleanup(f.doCleanups);self.addCleanup(f.tearDown)
-        f.initial();cycle=deepcopy(f.session.controller.state['cycle']);positions=deepcopy(f.p['positions'])
-        f.session.close();f.primary_v3=True;f.create();f.step()
-        self.assertTrue(f.session.controller.state.get('migration_block'))
-        self.assertEqual(f.session.controller.state['cycle'],cycle);self.assertEqual(f.p['positions'],positions)
-        for a in ({'type':'paper_flatten','confirmed':True},{'type':'paper_resume'},{'type':'command','text':'/reset_manual'}):
-            with self.assertRaises(ActionRejected):f.action(a)
-        self.assertEqual(f.p['positions'],positions)
-
-    def test_cli_simulator_uses_primary_v3(self):
-        import io,json
-        from contextlib import redirect_stdout
-        from tradfi.runtime import main
-        out=io.StringIO()
-        with redirect_stdout(out):main(['--mode','simulate'])
-        result=json.loads(out.getvalue())
-        self.assertEqual(result['recovery_mode'],'V3');self.assertTrue(result['completed'])

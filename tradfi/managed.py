@@ -1,4 +1,4 @@
-"""Coordinate independently owned live/paper services with managed updates."""
+"""Coordinate the independently owned LIVE service with managed updates."""
 from contextlib import contextmanager, ExitStack
 import os
 from pathlib import Path
@@ -14,19 +14,20 @@ def managed_root():
 
 
 def _role(instance):
-    if instance not in {'live','paper'}:raise ValueError('Unknown service instance')
+    if instance != 'live':raise ValueError('Unknown service instance')
     return instance
 
 
 def binding_path(root,instance):
-    return root/'data'/('state-binding.json' if _role(instance)=='live' else 'paper-state-binding.json')
+    _role(instance)
+    return root/'data'/'state-binding.json'
 
 
 @contextmanager
 def runtime_guard(state_file,*,instance='live'):
     """Admission is serialized with updates; role ownership lasts until exit.
 
-    Updates take operation.lock then BOTH role locks in live,paper order. A
+    Updates take operation.lock then the LIVE role lock. A
     service takes admission then only its role lock, releasing admission before
     running. No shared byte-range lock assumptions are needed on Windows.
     """
@@ -61,9 +62,6 @@ def runtime_guard(state_file,*,instance='live'):
             value={'path':str(Path(state_file).resolve())}
             if binding.exists() and (read_json(binding)!=value or not Path(state_file).is_file()):
                 raise SetupError('Managed state missing or moved; automatic reset forbidden')
-            other=binding_path(root,'paper' if instance=='live' else 'live')
-            if not independent and other.exists() and read_json(other)==value:
-                raise SetupError('Live and paper state files must be separate')
         yield
 
 
@@ -92,6 +90,5 @@ def stop_request(*,instance='live'):
         # Preserve stop compatibility with an older live launcher; new launchers
         # always specify a role and never share a stop request with each other.
         stem='stop-'+instance+'-' if launch_instance is not None else 'stop-'
-        if launch_instance is None and instance=='paper':return None
         return StopRequest(root/'data'/(stem+session+'.request'))
     return None

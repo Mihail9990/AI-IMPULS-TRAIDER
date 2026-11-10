@@ -16,7 +16,7 @@ class Structure(HTMLParser):
         assert self.stack and self.stack[-1][0]==tag,(tag,self.stack[-3:]);self.stack.pop()
 p=Structure();p.feed((ROOT/'index.html').read_text());assert not p.stack
 inside=lambda key,ancestor:any(id==ancestor for _,id in p.nodes[key][2])
-for id in ('start','stop','resume','reset','logout','save-settings','refresh-settings','save-tp-grid','save-v3-settings','logs-refresh','logs-download','paper-save-cost','writeoff-recovery'):
+for id in ('start','stop','resume','reset','logout','save-settings','refresh-settings','save-tp-grid','save-v3-settings','logs-refresh','logs-download','writeoff-recovery'):
     assert inside(id,'settings-page'),id
 for id in ('own-entry-sl','reverse-enable','reverse-disable','cancel-initial','v3-submit-entry','v3-cancel-request','v3-link-toggle','v3-sl-plus','v3-sl-minus','level-buttons'):
     assert inside(id,'drawer-content'),id
@@ -35,5 +35,5 @@ js=(ROOT/'panel.js').read_text()
 for id in re.findall(r"\$\('([^']+)'\)",js):
     if id.endswith('-'):continue
     assert id in p.nodes,id
-assert "mode=document.body.dataset.role" in js and 'switchMode' not in js
-print('PASS static chart-first structure, command reachability, IDs, tabs, separate role contract. Browser layout NOT verified.')
+assert "const mode='live'" in js and 'switchMode' not in js
+print('PASS static chart-first structure, command reachability, IDs, tabs, fixed LIVE role contract. Browser layout NOT verified.')

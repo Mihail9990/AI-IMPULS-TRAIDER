@@ -96,19 +96,3 @@ class NativeTPDebt(unittest.TestCase):
         self.assertEqual(len(f.api.orders),12);count=len(f.api.sends)
         f.bot=LatestCloseBasketController(f.store,f.broker,clock=lambda:f.api.now,monotonic=lambda:f.api.now);f.tick(3)
         self.assertEqual(len(f.api.sends),count)
-
-class PaperTPDebt(unittest.TestCase):
-    def test_paper_observed_tp_costs_then_fresh_inside_quote_rearms_main(self):
-        from test_tradfi_paper import PaperTest
-        case=PaperTest();case.setUp();self.addCleanup(case.doCleanups);self.addCleanup(case.tearDown);case.reversal()
-        main=deepcopy(case.session.controller.state['cycle']['main_range'])
-        case.action(dict(type='paper_costs',commission_per_lot_side='100'))
-        target=min(D(p['tp']) for p in case.p['positions'])
-        case.reader.tick(target-D('.1'),target);case.session.exchange.observe(case.reader.read())
-        self.assertFalse(case.p['positions'])
-        case.reader.tick('3998','3998.1');case.step(6)
-        c=case.session.controller.state['cycle'];self.assertEqual(c['expanded'],main)
-        self.assertGreater(D(c['recovery']),0);self.assertEqual(len(case.p['orders']),12)
-        ids=sorted(o['id'] for o in case.p['orders']);case.session.close();case.create();case.step()
-        case.action(dict(type='paper_resume'));case.step(3)
-        self.assertEqual(ids,sorted(o['id'] for o in case.p['orders']))

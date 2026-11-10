@@ -2,11 +2,11 @@
 from copy import deepcopy
 import time
 from decimal import Decimal as D
-from .simulator import Simulator
+from .synthetic_broker import SyntheticBroker
 
 
-class InteractiveSimulator(Simulator):
-    backend_id = 'interactive_simulator_v1'
+class InteractiveBroker(SyntheticBroker):
+    backend_id = 'synthetic_test_broker_v1'
 
     def quote(self,bid,ask):
         super().quote(bid,ask)

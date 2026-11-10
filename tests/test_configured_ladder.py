@@ -2,12 +2,12 @@ from decimal import Decimal as D
 import unittest
 from tradfi.basket_math import configured_ladder
 from tradfi.broker import Spec
-from tradfi.interactive_simulator import InteractiveSimulator
-from tradfi.simulator import ARTIFICIAL_SPEC
+from tests.support.interactive_broker import InteractiveBroker
+from tests.support.synthetic_broker import ARTIFICIAL_SPEC
 
 class ConfiguredLadder(unittest.TestCase):
     def setUp(self):
-        self.b=InteractiveSimulator(dict(ARTIFICIAL_SPEC,volume_min='.01',volume_step='.01',contract_size='100'))
+        self.b=InteractiveBroker(dict(ARTIFICIAL_SPEC,volume_min='.01',volume_step='.01',contract_size='100'))
         self.spec=Spec.load(self.b.snapshot()['spec'])
     def calc(self,distances,debt='3',side='BUY'):
         return configured_ladder(self.b,self.spec,side,['4000']*len(distances),['.01']*len(distances),debt,distances)

@@ -58,7 +58,7 @@ class USTAccountingTest(unittest.TestCase):
                 self.assertEqual(D(completed['realized']), D('4.4'))
                 self.assertEqual(D(completed['forgiven_residual']), D('1'))
                 self.assertEqual(completed['currency'], 'UST')
-                # Simulator includes enormous commission/swap: neither enters recovery.
+                # SyntheticBroker includes enormous commission/swap: neither enters recovery.
                 self.assertIn(' UST', f.bot.state['notifications'][-1]['text'])
                 self.assertNotIn(' USD', f.bot.status())
                 restored = Controller(f.store, f.broker)

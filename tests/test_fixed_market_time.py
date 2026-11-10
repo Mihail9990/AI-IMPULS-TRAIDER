@@ -8,7 +8,6 @@ from tradfi.time_profile import (validate_market_time_offset, market_timestamp_t
                                  market_tick_to_utc, TimeProfileError)
 from tradfi.native_time import NativeUTCVerifier
 from tradfi.evidence_broker import MT5EvidenceBroker
-from tradfi.paper_market import MarketReader
 from tradfi.time_safety import TimeSafety
 from test_tradfi_native_utc import UTCAPI
 
@@ -56,23 +55,16 @@ class FixedMarketTimeTest(unittest.TestCase):
             rows=original(*a);rows['time']+=3600;return rows
         self.api.copy_rates_from_pos=wrong
         self.assertFalse(self.verifier())
-    def test_live_paper_match_and_raw_display_cursor_preserved(self):
+    def test_live_normalized_and_raw_display_time_preserved(self):
         self.setup_market()
         config=dict(terminal_path='C:/Program Files/MetaTrader 5/terminal64.exe',backend='mt5_direct_v1',time_profile='bybit_live6_time_v1',expected_server='Bybit-Live-6',expected_login=111111111,symbol='XAUUSD.s',magic=25101102,enable_trading=False,market_time_offset_seconds=7200)
         broker=MT5EvidenceBroker(config,api=self.api,time_safety=self.safety,clock=lambda:self.api.now,monotonic=lambda:self.api.now)
         broker.connect();self.addCleanup(broker.close)
-        reader=MarketReader(self.api,symbol='XAUUSD.s',clock=lambda:self.api.now,monotonic=lambda:self.api.now,safety=self.safety,expected_account='111111111@Bybit-Live-6',market_time_offset_seconds=7200)
-        reader.next_check=float('inf')
-        raw=reader.read_raw();paper=reader.read();live=broker.snapshot(require_fresh=True)
-        self.assertEqual(paper['candle']['id'],live['candle']['id'])
-        self.assertEqual(paper['quote']['utc_time'],self.api.now)
+        live=broker.snapshot(require_fresh=True)
         self.assertEqual(live['quote']['utc_time'],self.api.now)
-        self.assertEqual(paper['tick_msc'],int((self.api.now+7200)*1000))
-        self.assertEqual(raw['display_time']['tick_time_msc'],paper['tick_msc'])
-        self.assertEqual(live['mt5_display_time']['candle_time'],paper['candle']['id']+7200)
+        self.assertEqual(live['mt5_display_time']['candle_time'],live['candle']['id']+7200)
         json.dumps(live,allow_nan=False)
-        self.api.account=self.api.account._replace(login=222222222)
-        with self.assertRaises(OSError):reader.read()
+        self.assertFalse(self.api.sends);self.assertFalse(self.api.checks)
 
     def test_actual_diagnostic_nonzero_offset_and_wrong_profile(self):
         import io
@@ -109,34 +101,6 @@ class FixedMarketTimeTest(unittest.TestCase):
                 self.assertEqual(list(Path(tmp).iterdir()),[path])
                 self.assertFalse(self.api.sends);self.assertFalse(self.api.checks)
 
-    def test_actual_paper_restart_keeps_raw_cursor_with_nonzero_offset(self):
-        import tempfile
-        from pathlib import Path
-        from tradfi.paper import PaperSession
-        self.setup_market()
-        def reader():
-            value=MarketReader(self.api,symbol='XAUUSD.s',clock=lambda:self.api.now,monotonic=lambda:self.api.now,safety=self.safety,expected_account='111111111@Bybit-Live-6',market_time_offset_seconds=7200)
-            value.next_check=float('inf')
-            return value
-        with tempfile.TemporaryDirectory() as tmp:
-            path=Path(tmp)/'paper.db'
-            session=PaperSession(path,reader(),clock=lambda:self.api.now,monotonic=lambda:self.api.now)
-            try:
-                session.step()
-                cursor=session.exchange.p['cursor'];keys=list(session.exchange.p['cursor_keys'])
-                self.assertEqual(cursor,int((self.api.now+7200)*1000))
-                self.assertEqual(session.exchange.market['candle']['id'],int(self.api.now//60)*60-60)
-            finally:session.close()
-            session=PaperSession(path,reader(),clock=lambda:self.api.now,monotonic=lambda:self.api.now)
-            try:
-                self.assertEqual(session.exchange.p['cursor'],cursor)
-                self.assertEqual(session.exchange.p['cursor_keys'],keys)
-                session.step()
-                self.assertEqual(session.exchange.p['cursor'],cursor)
-                self.assertEqual(session.exchange.p['cursor_keys'],keys)
-                self.assertFalse(session.exchange.p['deals'])
-                self.assertFalse(self.api.sends);self.assertFalse(self.api.checks)
-            finally:session.close()
 
 
     def test_latest_supplied_tick_obeys_two_second_future_limit(self):

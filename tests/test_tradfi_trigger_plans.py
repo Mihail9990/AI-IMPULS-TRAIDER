@@ -1,6 +1,6 @@
 import unittest
 from tradfi.broker import Spec
-from tradfi.simulator import ARTIFICIAL_SPEC
+from tests.support.synthetic_broker import ARTIFICIAL_SPEC
 from tradfi.strategies.levels import user_triggers
 
 

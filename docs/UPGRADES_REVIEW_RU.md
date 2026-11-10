@@ -23,12 +23,12 @@ Reviewer: `/root/independent_review`, read-only. Native сервисы и HTTP �
 Независимо проверено 17 Chromium сценариев. Основной агент затем выполнил 18 UI tests,
 включая добавленную end-to-end fake проверку N Apply.
 
-Ограничение review: новый торговый контур simulator-only. Native engine/adapters не
+Ограничение review: новый торговый контур offline-fixture-only. Native engine/adapters не
 изменены; review не является подтверждением готовности production-интеграции.
 
 ## Native integration — последующий review
 
-Предыдущее ограничение simulator-only выше относится только к commit 8a2de9e.
+Предыдущее ограничение offline-fixture-only выше относится только к commit 8a2de9e.
 В новом diff runtime, адаптер, ledger и feed интегрированы; real execution не запускался.
 Reviewer `/root/independent_review` проверил изменения read-only и воспроизвёл:
 

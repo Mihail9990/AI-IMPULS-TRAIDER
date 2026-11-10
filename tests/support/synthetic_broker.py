@@ -9,8 +9,8 @@ ARTIFICIAL_SPEC = dict(symbol='XAUUSD.s', currency='UST', contract_size='200', t
     profit_currency='USD', calc_mode='SIMULATED_LINEAR')
 
 
-class Simulator:
-    backend_id = "simulator_v1"
+class SyntheticBroker:
+    backend_id = "synthetic_broker_v1"
     def __init__(self, spec=None):
         self.data = dict(account='SIMULATOR_ONLY', hedging=True, history_complete=True,
             spec=deepcopy(spec or ARTIFICIAL_SPEC), now=0,

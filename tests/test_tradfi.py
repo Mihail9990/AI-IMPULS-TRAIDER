@@ -8,7 +8,7 @@ import unittest
 from tradfi.broker import Spec, target_price
 from tradfi.engine import Controller
 from tradfi.settings import Settings
-from tradfi.simulator import Simulator
+from tests.support.synthetic_broker import SyntheticBroker
 from tradfi.storage import Store, DurabilityError
 
 
@@ -16,7 +16,7 @@ class RecoveryTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.store = Store(Path(self.tmp.name) / 'state.sqlite3'); self.addCleanup(self.store.close)
-        self.broker = Simulator(); self.bot = Controller(self.store, self.broker)
+        self.broker = SyntheticBroker(); self.bot = Controller(self.store, self.broker)
 
     def tick(self, n=1):
         for _ in range(n): self.bot.tick()

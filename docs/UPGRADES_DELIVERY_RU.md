@@ -3,7 +3,7 @@
 # Апгрейды: native pipeline, проверенный offline
 
 База защит времени: `9519208e09f680d003ce893e6dc8688870823d63`.
-Предыдущий simulator этап: `8a2de9e35a0e2dd0037915d873f34e9f6299ffc5`.
+Предыдущий этап искусственных fixtures: `8a2de9e35a0e2dd0037915d873f34e9f6299ffc5`.
 Ветка `upgrades/local-control`. Этот результат обновляет только архив апгрейдов.
 Time-safety ZIP не заменяется. Реальные MT5, Telegram, сеть, сделки и VPS не запускались.
 
@@ -12,7 +12,7 @@ Time-safety ZIP не заменяется. Реальные MT5, Telegram, се�
 | Требование | Реализация в коде | Проверка offline / ограничения |
 |---|---|---|
 | Auto/semi | Runtime создаёт InteractiveController с native per-obligation broker. Auto сохраняет прежний M1 алгоритм; semi принимает один/два exact trigger или два диапазона от снимка команды (BUY Ask, SELL Bid), ждёт следующую команду после полного цикла | Runtime → adapter → fake MT5: auto и semi. Existing active legacy cycle получает legacy metadata при загрузке до обработки настроек; долг не переинициализируется |
-| Fixed SL recovery | Один engine на цикл, переключение со следующего полного цикла. Фактический net с commission/swap/fee открытия и закрытия, N=3 default, оставшиеся части, новый SL добавляет долг и переразбивает, без прощения 0.01. SL фиксирован на сделку; старый stepped TP сохранён | Fake MT5 OCO, SL, новый recovery, N, costs и atomic ledger/restart. Native closure ledger коммитится вместе с состоянием, не только simulator memory |
+| Fixed SL recovery | Один engine на цикл, переключение со следующего полного цикла. Фактический net с commission/swap/fee открытия и закрытия, N=3 default, оставшиеся части, новый SL добавляет долг и переразбивает, без прощения 0.01. SL фиксирован на сделку; старый stepped TP сохранён | Fake MT5 OCO, SL, новый recovery, N, costs и atomic ledger/restart. Native closure ledger коммитится вместе с состоянием, не только fixture memory |
 | Обычный TP | Для новой БД InteractiveController default 0.25; расчётный recovery TP отдельно | Сохранённые настройки старой БД не переписываются молча, включая ранее установленный TP 0.20 |
 | Изменение N/TP/SL | N переразбивает текущий долг на N, сразу рассчитывает TP, SL сохраняется. MODIFY проходит native SLTP и readback. Profitably reached target вызывает отдельный CLOSE с повторной проверкой Bid/Ask/target/profit после order_check | Native tests проверяют SLTP, сохранение SL и гонку потери прибыльного target. Browser Apply → очередь → controller → adapter → fake MT5 |
 | Manual close | Exact owned position identifier → текущий ticket, full volume, FOK; durable may-send boundary. EXPERT exit признаётся нашим только при точной корреляции CLOSE/order marker/response/entry identity; фактический net пересчитывает долг и останавливает входы | Runtime → adapter → fake MT5 полный close. Lost reply + restart без второго send; UNKNOWN без подтверждения не повторяется; чужой EXPERT exit блокирует учёт |
@@ -28,7 +28,7 @@ Time-safety ZIP не заменяется. Реальные MT5, Telegram, се�
 ## Проверки и воспроизведение
 
 - `python tools/run_offline_tests.py`: **495 tests OK**, `Blocked real network attempts: 0`.
-- `python tools/test_local_panel.py`: **21 Chromium tests OK**, все HTTP routes перехвачены из файлов/handlers, сервер не запускался.
+- Историческая проверка старой панели: 21 Chromium test. Этот прежний runner удалён; текущий UI проверяется `tools/test_v3_panel.py`, а его фактический статус нужно сверять с результатами текущего выпуска.
 - В данной среде backend Python: `/workspace/.venvs/ai-impuls-traider/bin/python`.
   Для системного Python с Playwright использован уже установленный requests через
   `PYTHONPATH=/workspace/.venvs/ai-impuls-traider/lib/python3.13/site-packages`.

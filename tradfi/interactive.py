@@ -1,4 +1,4 @@
-"""Interactive owner controller over simulator or native per-obligation evidence."""
+"""Interactive owner controller over native per-obligation evidence."""
 from copy import deepcopy
 from decimal import Decimal as D
 import uuid
@@ -15,8 +15,8 @@ class InteractiveController(Controller):
     def __init__(self, store, broker, **kwargs):
         native=(getattr(broker,'backend_id',None)=='mt5_direct_v1' and
                 getattr(broker,'evidence_contract',None)=='per_obligation_v1')
-        if not native and getattr(broker,'backend_id',None)!='interactive_simulator_v1':
-            raise ActionRejected('Interactive operations require native obligation evidence or explicit simulator')
+        if not native and getattr(broker,'backend_id',None)!='synthetic_test_broker_v1':
+            raise ActionRejected('Interactive operations require native obligation evidence or explicit test fixture')
         fresh=store.load() is None
         super().__init__(store,broker,**kwargs)
         if fresh:
