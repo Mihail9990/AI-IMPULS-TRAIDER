@@ -2,7 +2,7 @@
 (() => {
  const $=id=>document.getElementById(id),svg=$('chart'),ns='http://www.w3.org/2000/svg';
  const mode='live';
- let plotBottom=480,plotHeight=450,frameHeight=520;
+ let plotBottom=480,plotHeight=450,frameHeight=520,plotRight=855;
  const storageKey=k=>'basket-'+k;
  const apiPath=kind=>'/api/'+kind;
  let view=null,pending=localStorage.getItem(storageKey('request')),pendingScope=localStorage.getItem(storageKey('scope')),busy=false,polling=false,loadedScope=null,preview=null,lines=[],zoom=1,pan=0,gesture=null,hold=null,timeOffset=0,visibleCount=60,previewFocus=null,previewWasOpen=false;
@@ -100,7 +100,7 @@
   svg.dataset.feedFresh=String(fresh);
  }
  // Profile editor keeps draft strings intact: broker validation never rounds volumes or TP.
- let profileRows=[],profileDraft=null,profileSourceKey='',profileOptionsKey='',profileRemovalSource='',profileRemoved=new Set();
+ let profileRows=[],profileDraft=null,profileSourceKey='',profileBaseline='',profileOptionsKey='',profileRemovalSource='',profileRemoved=new Set();
  const profileConfig=()=>view?.recovery_profiles;
  const profileTotal=stages=>{const values=stages.map(s=>String(s.volume));if(values.some(v=>!/^\d+(\.\d+)?$/.test(v)))return '—';const scale=Math.max(0,...values.map(v=>(v.split('.')[1]||'').length));const sum=values.reduce((n,v)=>n+BigInt(v.replace('.',''))*10n**BigInt(scale-(v.split('.')[1]||'').length),0n).toString().padStart(scale+1,'0');return scale?(sum.slice(0,-scale)+'.'+sum.slice(-scale)).replace(/0+$/,'').replace(/\.$/,''):sum;};
  const profileSummary=p=>p?`${p.name} · ${p.stages?.length??p.count??'—'} ступ. · ${p.total_volume??profileTotal(p.stages??[])} лота`:'Профиль недоступен';
@@ -109,7 +109,18 @@
   $('recovery-stage-rows').replaceChildren();profileRows.forEach((stage,i)=>{const row=document.createElement('div');row.className='recovery-stage-row';const title=document.createElement('strong');title.textContent=String(i+1);row.append(title);for(const [key,labelText] of [['volume','Объём'],['tp_distance','TP от входа']]){const label=document.createElement('label');label.textContent=labelText;const input=document.createElement('input');input.inputMode='decimal';input.value=stage[key];input.setAttribute('aria-label',labelText+' · ступень '+(i+1));input.oninput=()=>{stage[key]=input.value;updateProfileTotal();};label.append(input);row.append(label);}const remove=document.createElement('button');remove.type='button';remove.textContent='Удалить';remove.disabled=profileRows.length===1;remove.onclick=()=>{profileRows.splice(i,1);renderProfileRows();};row.append(remove);$('recovery-stage-rows').append(row);});updateProfileTotal();
  }
  function updateProfileTotal(){$('recovery-draft-total').textContent=profileRows.length+' / 20 ступеней · всего '+profileTotal(profileRows)+' лота';$('recovery-add-stage').disabled=profileRows.length>=20;}
- function loadProfileDraft(profile){profileDraft=profile?.id??null;profileSourceKey=JSON.stringify(profileConfig());$('recovery-profile-name').value=profile?.name??'Новый профиль';profileRows=(profile?.stages??[{volume:'0.01',tp_distance:'0.25'}]).map(s=>({volume:String(s.volume),tp_distance:String(s.tp_distance)}));renderProfileRows();}
+ function profileDraftValue(){return JSON.stringify({name:$('recovery-profile-name').value,stages:profileRows});}
+ function profileDraftDirty(){return !!profileBaseline&&profileDraftValue()!==profileBaseline;}
+ function loadProfileDraft(profile){profileDraft=profile?.id??null;profileSourceKey=JSON.stringify(profileConfig());$('recovery-profile-name').value=profile?.name??'Новый профиль';profileRows=(profile?.stages??[{volume:'0.01',tp_distance:'0.25'}]).map(s=>({volume:String(s.volume),tp_distance:String(s.tp_distance)}));renderProfileRows();profileBaseline=profileDraftValue();}
+ function revealProfileEditor(){
+  $('recovery-profile-settings').open=true;$('recovery-profile-editor').open=true;
+  $('recovery-profile-editor').scrollIntoView({block:'start'});
+  $('recovery-profile-name').focus({preventScroll:true});
+ }
+ function openProfileDraft(profile){
+  if(profileDraftDirty()&&!confirm('В редакторе есть несохранённые изменения. Заменить этот черновик?')){revealProfileEditor();return;}
+  loadProfileDraft(profile);revealProfileEditor();
+ }
  function renderProfiles(){
   const config=profileConfig(),selected=view?.selected_recovery_profile,available=!!config?.profiles?.length,blocked=v3Blocked()||!v3Enabled()||!available;
   const key=JSON.stringify(config);if(key!==profileOptionsKey){profileOptionsKey=key;$('recovery-profile-select').replaceChildren();for(const p of config?.profiles??[]){const option=document.createElement('option');option.value=p.id;option.textContent=profileSummary(p);$('recovery-profile-select').append(option);}$('recovery-profile-select').value=config?.selected_profile_id??'';}
@@ -128,8 +139,8 @@
  function checkProfileRemovals(){if(profileRemoved.size&&profileRemovalSource!==JSON.stringify(profileConfig()))throw Error('Список изменился. Загрузите актуальные настройки и повторите исключения.');}
  $('recovery-profile-remove').onclick=()=>{const id=$('recovery-profile-select').value;if(!profileConfig()?.profiles.some(p=>p.id===id))return;if(!profileRemoved.size)profileRemovalSource=JSON.stringify(profileConfig());if(profileRemoved.has(id))profileRemoved.delete(id);else profileRemoved.add(id);$('recovery-profile-removals').textContent='Исключены в черновике: '+(profileConfig().profiles.filter(p=>profileRemoved.has(p.id)).map(p=>p.name).join(', ')||'нет')+'. Повторное нажатие возвращает профиль. Сохраните исключения или профиль для применения.';};
  $('recovery-profile-save-list').onclick=async()=>{try{checkProfileRemovals();const config=profileConfig(),profiles=config.profiles.filter(p=>!profileRemoved.has(p.id));if(!profiles.length)throw Error('Оставьте хотя бы один профиль или сохраните новый.');const selected_profile_id=profiles.some(p=>p.id===config.selected_profile_id)?config.selected_profile_id:profiles[0].id;await saveProfileConfig({...config,profiles,selected_profile_id},'Сохранить список профилей?\nОстанутся: '+profiles.map(p=>p.name).join(', ')+'\nВыбран: '+profiles.find(p=>p.id===selected_profile_id).name);}catch(e){error(e.message);}};
- $('recovery-profile-edit').onclick=()=>loadProfileDraft(profileConfig()?.profiles.find(p=>p.id===$('recovery-profile-select').value));
- $('recovery-profile-new').onclick=()=>loadProfileDraft(null);
+ $('recovery-profile-edit').onclick=()=>openProfileDraft(profileConfig()?.profiles.find(p=>p.id===$('recovery-profile-select').value));
+ $('recovery-profile-new').onclick=()=>openProfileDraft(null);
  $('recovery-add-stage').onclick=()=>{if(profileRows.length<20){profileRows.push({volume:'0.01',tp_distance:''});renderProfileRows();}};
  $('recovery-profile-apply').onclick=async()=>{if(v3Blocked()||!v3Enabled())return;try{const p=profileConfig()?.profiles.find(p=>p.id===$('recovery-profile-select').value);if(!p)throw Error('Выберите сохранённый профиль.');const revision=view.revision,scope=view.scope;if(!confirm('Выбрать для следующих корзин?\n'+profileDetails(p)+'\nОткрытые и ожидающие заявки не изменятся.'))return;await send({type:'recovery_profile_select',cycle_id:view.cycle_id,profile_id:p.id},revision,scope);}catch(e){error(e.message);}};
  $('recovery-profile-save').onclick=async()=>{try{if(profileSourceKey!==JSON.stringify(profileConfig()))throw Error('Профили изменились. Загрузите профиль заново перед сохранением.');const name=$('recovery-profile-name').value.trim();if(!name||name.length>80)throw Error('Название: от 1 до 80 символов.');if(profileRows.length<1||profileRows.length>20)throw Error('Нужно от 1 до 20 ступеней.');const stages=profileRows.map((s,i)=>({volume:positiveDecimal(s.volume,'Объём '+(i+1)),tp_distance:positiveDecimal(s.tp_distance,'TP '+(i+1))}));const p={id:profileDraft??('profile-'+Date.now().toString(36)),name,stages},config=profileConfig();checkProfileRemovals();const profiles=config.profiles.filter(x=>x.id!==p.id&&!profileRemoved.has(x.id)).concat([p]);await saveProfileConfig({...config,profiles,selected_profile_id:p.id},'Сохранить и выбрать профиль?\n'+profileDetails(p));}catch(e){error(e.message);}};
@@ -185,11 +196,12 @@
  $('v3-sl-minus').onclick=()=>v3AdjustSl(-10);$('v3-sl-plus').onclick=()=>v3AdjustSl(10);
 
  function fields(){if(!view)return;v3FillSettings();$('fields').replaceChildren();for(const [k,v] of Object.entries(view.settings)){if(['EXPANSION_DISTANCE','TICKET_SIZE','BASKET_COUNT','RECOVERY_SL_DISTANCE'].includes(k)||(view.tp_distances&&['COST_RESERVE','TP_STEP_MULTIPLIER'].includes(k)))continue;const label=document.createElement('label');label.textContent=names[k]??k;const input=document.createElement('input');input.id='setting-'+k;input.value=v;input.inputMode='decimal';label.append(input);const active=document.createElement('small');active.textContent='В цикле: '+(view.active_settings?.[k]??'—');label.append(active);$('fields').append(label);} $('tp-grid-settings').hidden=true;$('tp-fields').replaceChildren();if(view.tp_distances)for(let i=0;i<Number(view.settings.BASKET_COUNT);i++){const label=document.createElement('label');label.textContent='TP '+(i+1)+(i===0?' · обязательно':' · пусто = авто');const input=document.createElement('input');input.id='tp-distance-'+i;input.inputMode='decimal';input.value=view.tp_distances[i]??'';label.append(input);const active=document.createElement('small');active.textContent='В цикле: '+(view.active_tp_distances?.[i]??'авто / не задано');label.append(active);$('tp-fields').append(label);}}
- $('refresh-settings').onclick=()=>{fields();error('Загружены актуальные параметры.');};
+ $('refresh-settings').onclick=()=>{if((profileDraftDirty()||profileRemoved.size)&&!confirm('Загрузить актуальные параметры? Несохранённый черновик профиля и исключения будут заменены.'))return;fields();error('Загружены актуальные параметры.');};
  $('save-settings').onclick=async()=>{if(!view)return;const settings={};for(const k of Object.keys(view.settings)){if(['EXPANSION_DISTANCE','TICKET_SIZE','BASKET_COUNT','RECOVERY_SL_DISTANCE'].includes(k)||(view.tp_distances&&['COST_RESERVE','TP_STEP_MULTIPLIER'].includes(k))){settings[k]=view.settings[k];continue;}const raw=$('setting-'+k).value.trim();if(raw===''||!Number.isFinite(Number(raw))){error('Проверьте числовое значение: '+(names[k]??k));return;}settings[k]=k==='BASKET_COUNT'?Number(raw):raw;}const revision=view.revision,scope=view.scope;if(!confirm('Применить параметры? Объём открытых билетов не меняется.\n'+Object.entries(settings).filter(([k])=>!['EXPANSION_DISTANCE','TICKET_SIZE','BASKET_COUNT','RECOVERY_SL_DISTANCE'].includes(k)).map(([k,v])=>(names[k]??k)+': '+v).join('\n')))return;try{await send({type:'basket_settings',settings,cycle_id:view.cycle_id},revision,scope);}catch(e){error(e.message);}};
  $('writeoff-recovery').onclick=async()=>{if(!view)return;const v=view,revision=v.revision,scope=v.scope;const action={type:'writeoff_recovery',cycle_id:v.cycle_id,expected_debt:v.debt,confirmed:true};if(!confirm('ТОРГОВЛЯ'+' — списать RECOVERY '+v.debt+' UST? Фактическая доходность не изменится: убыток уже учтён. Позиции и ордера не закрываются. После сверки начнётся ожидание новой M1.'))return;try{await send(action,revision,scope);}catch(e){error(e.message);}};
  $('save-tp-grid').onclick=async()=>{if(!view?.tp_distances)return;const values=[...view.tp_distances],scope=view.scope,revision=view.revision,cycle_id=view.cycle_id;for(let i=0;i<Number(view.settings.BASKET_COUNT);i++){const raw=$('tp-distance-'+i).value.trim();if((i===0&&!raw)||(raw&&(!Number.isFinite(Number(raw))||Number(raw)<=0))){error('Задайте положительное расстояние TP '+(i+1));return;}values[i]=raw||null;}if(!confirm('Применить расстояния TP? SL остаются на фактических текущих уровнях.\n'+values.slice(0,Number(view.settings.BASKET_COUNT)).map((v,i)=>'TP '+(i+1)+': '+(v??'авто')).join('\n')))return;try{await send({type:'tp_distances',cycle_id,distances:values},revision,scope);}catch(e){error(e.message);}};
  function node(tag,attrs,text){const n=document.createElementNS(ns,tag);for(const[k,v]of Object.entries(attrs))n.setAttribute(k,v);if(text!==undefined)n.textContent=text;return n;}
+ function chartPoint(clientX,clientY){const point=svg.createSVGPoint();point.x=clientX;point.y=clientY;return point.matrixTransform(svg.getScreenCTM().inverse());}
  // Viewport changes only: never request or alter orders while navigating history.
  function visibleCandles(){const all=view?.feed?.candles??[];const count=Math.max(10,Math.min(240,Math.round(visibleCount)));timeOffset=Math.max(0,Math.min(timeOffset,Math.max(0,all.length-count)));const end=all.length-Math.round(timeOffset);return all.slice(Math.max(0,end-count),end);}
  function domain(){const prices=[...lines.map(l=>l.price),...visibleCandles().flatMap(c=>[Number(c.low),Number(c.high)]),Number(view?.feed?.quote?.bid),Number(view?.feed?.quote?.ask)].filter(x=>Number.isFinite(x)&&x>0);let lo=Math.min(...prices),hi=Math.max(...prices);if(!prices.length){lo=0;hi=1;}const mid=(lo+hi)/2+pan,span=Math.max(1,hi-lo)*1.25/zoom;return{min:mid-span/2,max:mid+span/2};}
@@ -207,32 +219,37 @@
   for(const p of view.positions)for(const key of ['entry','tp','sl'])lines.push({key:p.id+'-'+key,kind:key,pid:p.id,price:Number(p[key]),label:key.toUpperCase()+' #'+(p.ticket??p.id).slice(-6),color:colors[key]});
   if(!lines.length&&!(view.feed.candles??[]).length&&!Number(view.feed.quote?.bid)){svg.replaceChildren(node('text',{x:230,y:250,fill:'#969ba6','font-size':28},'Ожидание реальных данных MT5'));$('level-buttons').replaceChildren();drawAnalysis();return;}
   frameHeight=Math.max(240,svg.clientHeight/Math.max(1,svg.clientWidth)*1000);plotBottom=frameHeight-45;plotHeight=plotBottom-20;svg.setAttribute('viewBox','0 0 1000 '+frameHeight);
-  const labelSize=innerWidth<680?32:17;const labelRows=[];
+  const labelSize=svg.clientWidth<680?32:17;const labelRows=[];
+  // Reserve a price-only gutter before positioning any candle, at every zoom level.
+  const quoteText=key=>key.toUpperCase()+' '+Number(view.feed.quote?.[key]).toFixed(2);
+  const quoteWidth=Math.max(155,...['ask','bid'].map(key=>quoteText(key).length*labelSize*.9*.65+14));
+  const badgeX=Math.max(500,998-quoteWidth);plotRight=badgeX-18;
   const d=domain(),y=p=>plotBottom-(p-d.min)/(d.max-d.min)*plotHeight;svg.replaceChildren();
-  for(let i=0;i<=6;i++){const price=d.min+(d.max-d.min)*i/6,py=y(price);svg.append(node('line',{x1:0,x2:855,y1:py,y2:py,stroke:colors.grid}),node('text',{x:868,y:py+5,fill:'#afc0d2','font-size':labelSize},price.toFixed(2)));}
-  const candles=visibleCandles(),w=840/Math.max(1,candles.length);svg.dataset.firstCandle=String(candles[0]?.utc_time??'');svg.dataset.visibleCount=String(candles.length);candles.forEach((c,i)=>{const x=10+i*w,green=Number(c.close)>=Number(c.open),color=green?colors.up:colors.down;svg.append(node('line',{x1:x,x2:x,y1:y(Number(c.high)),y2:y(Number(c.low)),stroke:color}),node('rect',{x:x-w*.3,y:Math.min(y(Number(c.open)),y(Number(c.close))),width:Math.max(2,w*.6),height:Math.max(1,Math.abs(y(Number(c.open))-y(Number(c.close)))),fill:color}));});
-  for(const l of lines){const py=y(l.price);if(py<0||py>frameHeight)continue;const g=node('g',{'data-line':l.key,visibility:prefs.mainCycle?'visible':'hidden'});g.append(node('line',{x1:0,x2:855,y1:py,y2:py,stroke:l.color,'stroke-width':2,'stroke-dasharray':'none'}),node('line',{x1:0,x2:855,y1:py,y2:py,stroke:'transparent','stroke-width':18}));g.append(node('title',{},l.label+' '+l.price.toFixed(2)));if(!labelRows.some(row=>Math.abs(row-py)<labelSize)){g.append(node('text',{x:868,y:py-5,fill:l.color,'font-size':labelSize-2},l.price.toFixed(2)));labelRows.push(py);}svg.append(g);}
+  for(let i=0;i<=6;i++){const price=d.min+(d.max-d.min)*i/6,py=y(price);svg.append(node('line',{x1:0,x2:plotRight,y1:py,y2:py,stroke:colors.grid}),node('text',{x:badgeX+7,y:py+5,fill:'#afc0d2','font-size':labelSize},price.toFixed(2)));}
+  const candles=visibleCandles(),w=(plotRight-20)/Math.max(3,candles.length+2);svg.dataset.firstCandle=String(candles[0]?.utc_time??'');svg.dataset.visibleCount=String(candles.length);candles.forEach((c,i)=>{const x=10+(i+.5)*w,green=Number(c.close)>=Number(c.open),color=green?colors.up:colors.down;svg.append(node('line',{x1:x,x2:x,y1:y(Number(c.high)),y2:y(Number(c.low)),stroke:color}),node('rect',{x:x-w*.3,y:Math.min(y(Number(c.open)),y(Number(c.close))),width:Math.max(2,w*.6),height:Math.max(1,Math.abs(y(Number(c.open))-y(Number(c.close)))),fill:color}));});
+  for(const l of lines){const py=y(l.price);if(py<0||py>frameHeight)continue;const g=node('g',{'data-line':l.key,visibility:prefs.mainCycle?'visible':'hidden'});g.append(node('line',{x1:0,x2:plotRight,y1:py,y2:py,stroke:l.color,'stroke-width':2,'stroke-dasharray':'none'}),node('line',{x1:0,x2:plotRight,y1:py,y2:py,stroke:'transparent','stroke-width':18}));g.append(node('title',{},l.label+' '+l.price.toFixed(2)));if(!labelRows.some(row=>Math.abs(row-py)<labelSize)){g.append(node('text',{x:badgeX+7,y:py-5,fill:l.color,'font-size':labelSize-2},l.price.toFixed(2)));labelRows.push(py);}svg.append(g);}
   // Bid/Ask are display-only live quote lines, never draggable trading levels.
   const quoteLabels=[];
   for(const [key,color] of [['ask','#ff5b63'],['bid','#24d99a']]){
    const price=Number(view.feed.quote?.[key]);if(!Number.isFinite(price)||price<=0)continue;
    const py=y(price);if(py<20||py>plotBottom)continue;
-   let ly=py;for(const previous of quoteLabels)if(Math.abs(ly-previous)<labelSize+8)ly=previous+labelSize+8;
-   ly=Math.max(20+labelSize/2,Math.min(plotBottom-labelSize/2,ly));if(quoteLabels.some(previous=>Math.abs(ly-previous)<labelSize+8))ly=Math.max(20+labelSize/2,quoteLabels[0]-labelSize-8);quoteLabels.push(ly);
-   const badgeX=innerWidth<680?798:845;
+   const badgeHalf=labelSize/2+5,quoteGap=labelSize+14;
+   let ly=Math.max(20+badgeHalf,Math.min(plotBottom-badgeHalf,py));
+   for(const previous of quoteLabels)if(Math.abs(ly-previous)<quoteGap)ly=previous+quoteGap<=plotBottom-badgeHalf?previous+quoteGap:previous-quoteGap;
+   quoteLabels.push(ly);
    const g=node('g',{'data-quote':key,'pointer-events':'none'});
-   g.append(node('line',{x1:0,x2:badgeX-5,y1:py,y2:py,stroke:color,'stroke-width':1.5,'stroke-dasharray':'3 4'}),node('line',{x1:badgeX-5,x2:badgeX,y1:py,y2:ly,stroke:color}),node('rect',{x:badgeX,y:ly-labelSize/2-5,width:998-badgeX,height:labelSize+10,rx:7,fill:'#08090b',stroke:color}),node('text',{x:badgeX+7,y:ly+labelSize/3,fill:'#f1f3f5','font-size':labelSize*.9},key.toUpperCase()+' '+price.toFixed(2)));svg.append(g);
+   g.append(node('line',{x1:0,x2:badgeX-5,y1:py,y2:py,stroke:color,'stroke-width':1.5,'stroke-dasharray':'3 4'}),node('line',{x1:badgeX-5,x2:badgeX,y1:py,y2:ly,stroke:color}),node('rect',{x:badgeX,y:ly-labelSize/2-5,width:998-badgeX,height:labelSize+10,rx:7,fill:'#08090b',stroke:color}),node('text',{x:badgeX+7,y:ly+labelSize/3,fill:'#f1f3f5','font-size':labelSize*.9},quoteText(key)));svg.append(g);
   }
-  candles.forEach((c,i)=>{if(i%Math.max(1,Math.floor(candles.length/5))===0&&utcLabel(c.utc_time,true)){const label=utcLabel(c.utc_time,true);svg.append(node('text',{x:10+i*w,y:frameHeight-10,fill:'#969ba6','font-size':labelSize},label));}});
-  svg.append(node('text',{x:868,y:frameHeight-10,fill:'#969ba6','font-size':labelSize},feedUtcVerified()?'UTC':'RAW'));
+  candles.forEach((c,i)=>{if(i%Math.max(1,Math.floor(candles.length/5))===0&&utcLabel(c.utc_time,true)){const label=utcLabel(c.utc_time,true);svg.append(node('text',{x:10+(i+.5)*w,y:frameHeight-10,fill:'#969ba6','font-size':labelSize},label));}});
+  svg.append(node('text',{x:badgeX+7,y:frameHeight-10,fill:'#969ba6','font-size':labelSize},feedUtcVerified()?'UTC':'RAW'));
   if(!feedUtcVerified())svg.append(node('title',{},'Время MT5 не проверено; часовые метки скрыты.'));
   if(!candles.length)svg.append(node('text',{x:300,y:250,fill:'#969ba6','font-size':20},'Ожидание данных MT5'));
-  if(preview){const py=y(preview.value);svg.append(node('line',{x1:0,x2:855,y1:py,y2:py,stroke:'#fff','stroke-width':3,'stroke-dasharray':'none'}));}
+  if(preview){const py=y(preview.value);svg.append(node('line',{x1:0,x2:plotRight,y1:py,y2:py,stroke:'#fff','stroke-width':3,'stroke-dasharray':'none'}));}
   drawAnalysis();
   $('level-buttons').replaceChildren();for(const l of lines){const b=document.createElement('button');b.textContent=l.label+' '+l.price.toFixed(2);b.style.borderColor=l.color;b.disabled=l.kind==='entry';b.onclick=()=>openPreview(l,l.price);$('level-buttons').append(b);}
  }
  function openPreview(line,value){if(!view||pending)return;$('preview-error').textContent='';preview={line:{...line},value,backend:structuredClone(view)};$('preview').hidden=false;$('new-price').value=value.toFixed(2);$('preview-text').textContent=line.label+': '+line.price.toFixed(2)+' → '+value.toFixed(2);draw();}
- function priceAt(clientY){const r=svg.getBoundingClientRect(),d=domain(),point=svg.createSVGPoint();point.x=r.left;point.y=clientY;const local=point.matrixTransform(svg.getScreenCTM().inverse());return Math.round((d.min+(plotBottom-local.y)/plotHeight*(d.max-d.min))*100)/100;}
+ function priceAt(clientY){const r=svg.getBoundingClientRect(),d=domain(),local=chartPoint(r.left,clientY);return Math.round((d.min+(plotBottom-local.y)/plotHeight*(d.max-d.min))*100)/100;}
  const pointers=new Map();let pinch=null;
  const distanceBetween=points=>Math.hypot(points[0].x-points[1].x,points[0].y-points[1].y);
  function cancelGesture(){clearTimeout(hold);pointers.clear();pinch=null;gesture=null;}
@@ -249,11 +266,12 @@
   if(!gesture||gesture.id!==e.pointerId)return;
   if(gesture.drag&&preview){preview.value=priceAt(e.clientY);$('new-price').value=preview.value.toFixed(2);$('preview-text').textContent=preview.line.label+': '+preview.line.price.toFixed(2)+' → '+preview.value.toFixed(2);draw();return;}
   const dx=e.clientX-gesture.startX,dy=e.clientY-gesture.start;if(Math.hypot(dx,dy)<=8&&!gesture.moved)return;
-  clearTimeout(hold);gesture.moved=true;const r=svg.getBoundingClientRect();
-  // Drag candles to the right to reveal earlier data. Forward vertical swipes also reveal history.
-  if(Math.abs(dx)>=Math.abs(dy))timeOffset=gesture.offset+dx/Math.max(1,r.width*.84)*visibleCount;
-  else if(e.clientX-r.left>r.width*.855)pan=gesture.pan+dy/Math.max(1,r.height)*gesture.span;
-  else timeOffset=gesture.offset-dy/Math.max(1,r.height)*visibleCount;
+  clearTimeout(hold);gesture.moved=true;
+  const local=chartPoint(e.clientX,e.clientY),start=chartPoint(gesture.startX,gesture.start),localDx=local.x-start.x,localDy=local.y-start.y;
+  // Use SVG coordinates, including letterboxing on short or split chart panes.
+  if(Math.abs(dx)>=Math.abs(dy))timeOffset=gesture.offset+localDx/Math.max(1,plotRight)*visibleCount;
+  else if(local.x>plotRight)pan=gesture.pan+localDy/Math.max(1,plotHeight)*gesture.span;
+  else timeOffset=gesture.offset-localDy/Math.max(1,plotHeight)*visibleCount;
   draw();
  });
  const end=e=>{clearTimeout(hold);pointers.delete(e.pointerId);if(e.type==='pointercancel'&&gesture?.drag){preview=null;$('preview').hidden=true;}gesture=null;if(pointers.size<2)pinch=null;draw();};

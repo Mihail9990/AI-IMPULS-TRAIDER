@@ -130,6 +130,7 @@ HttpOnly/SameSite cookie, проверка Origin, ограничение поп
 python -m pip install -r requirements-test.txt
 python tools/run_offline_tests.py
 node --check web/basket-panel/panel.js
+node tools/test_profile_quote_unit.js
 ```
 
 Тесты используют искусственный брокер и подставные MT5 API. Реальные сделки,

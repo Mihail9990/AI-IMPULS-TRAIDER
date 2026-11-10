@@ -18,6 +18,9 @@ const ids=[...html.matchAll(/id="([^"]+)"/g)].map(x=>x[1]);assert.equal(new Set(
 class Element{
  constructor(){this.value='';this.textContent='';this.disabled=false;this.hidden=false;this.open=true;this.dataset={};this.children=[];this.classList={toggle:()=>{}};this.events={};this.attributes={};this.style={};this.clientHeight=520;this.clientWidth=1000;}
  focus(){}
+ scrollIntoView(){}
+ createSVGPoint(){return{x:0,y:0,matrixTransform(m){return{x:(this.x-m.left)/m.scale,y:(this.y-m.top)/m.scale};}};}
+ getScreenCTM(){const r=this.getBoundingClientRect(),height=Number(this.attributes.viewBox.split(' ')[3]),scale=Math.min(r.width/1000,r.height/height);return{inverse:()=>({scale,left:r.left+(r.width-1000*scale)/2,top:r.top+(r.height-height*scale)/2})};}
  append(...xs){this.children.push(...xs);}setAttribute(k,v){this.attributes[k]=v;}replaceChildren(...xs){this.children=xs;}querySelector(){return this.now??=new Element();}addEventListener(type,fn){this.events[type]=fn;}
 }
 const elements=Object.fromEntries(ids.map(id=>[id,new Element()]));
