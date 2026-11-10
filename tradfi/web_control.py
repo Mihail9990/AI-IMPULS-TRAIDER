@@ -109,13 +109,25 @@ class NativePanel:
             controller.save('bind_web_store_identity')
         self.scope=hashlib.sha256((controller.broker.account+'|'+controller.broker.symbol+'|'+controller.state['web_store_id']).encode()).hexdigest()
     def step(self):
+        step_start=time.perf_counter()
+        snapshot_ms=None
         if self.monotonic()>=self.next_feed:
+            snapshot_start=time.perf_counter()
             try:
                 self.snapshot=self.controller.snapshot();self.feed.capture(self.snapshot)
             except (ValueError,OSError,TimeoutError):self.feed.disconnected()
+            snapshot_ms=(time.perf_counter()-snapshot_start)*1000
             self.next_feed=self.monotonic()+1
         self.mailbox.drain(self.gateway,self.view)
-        self.logs.capture('live',self.controller.store,self.controller.state,self.clock(),self.view())
+        try:
+            diagnostic_view=self.mailbox.view()
+            elapsed=(time.perf_counter()-step_start)*1000
+            diagnostic_view['timings']={'snapshot_ms':snapshot_ms,'publish_ms':elapsed,'capture_ms':self.logs.last_capture_ms}
+            diagnostic_view['latency_band']='SLOW_2000MS' if elapsed>=2000 else 'SLOW_500MS' if elapsed>=500 else 'NORMAL'
+            self.logs.capture('live',self.controller.store,self.controller.state,self.clock(),diagnostic_view)
+        except Exception:
+            pass  # Diagnostics must not interrupt control or retry a trade.
+
     def time_status(self):
         # Presentation only: use cached diagnostics, never probe MT5/network or
         # replace/clear the latched execution guard while rendering a view.
