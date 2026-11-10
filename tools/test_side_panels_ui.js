@@ -37,11 +37,11 @@ state.feed.candles=Array.from({length:300},(_,i)=>({utc_time:1700000000+i*60,ope
   assert.deepEqual(Object.keys(actions.at(-1).action).sort(),['cycle_id','type']);
   current.v3_request={bar_id:1700000000,order_type:'STOP',recovery_profile:profile};await page.waitForTimeout(1200);
   await page.locator('#v3-cancel-request').click();assert.equal(actions.at(-1).action.type,'v3_cancel_request');assert.equal(dialogs.length,0);
-  await page.locator('#v3-link-toggle').click();assert.equal(actions.at(-1).action.type,'v3_link');assert.equal(dialogs.length,0);
+  await page.locator('#close-entry-panel').click();await page.locator('#drawer-toggle').click();await page.locator('#v3-link-toggle').click();assert.equal(actions.at(-1).action.type,'v3_link');assert.equal(dialogs.length,0);
   current.manual_reason='TP1_OWN_ENTRY_SL_UNAVAILABLE';current.journal=['MANUAL: TP1_OWN_ENTRY_SL_UNAVAILABLE'];await page.waitForTimeout(1200);
   assert(!(await page.locator('#bot-activity').innerText()).includes('TP1_OWN_ENTRY_SL_UNAVAILABLE'));
   assert((await page.locator('#bot-activity-warning').innerText()).includes('не удалось перенести SL'));
-  assert.equal(await page.locator('#safety').innerText(),'');assert(await page.locator('#v3-cancel-entry').isDisabled());
+  assert.equal(await page.locator('#safety').innerText(),'');await page.locator('#toggle-entry-panel').click();assert(await page.locator('#v3-cancel-entry').isDisabled());
   await page.locator('#tab-settings').click();assert(await page.locator('#v3-entry-panel').evaluate(n=>n.inert));
   await page.locator('#tab-chart').click();assert.equal(await page.locator('#v3-entry-panel').getAttribute('data-open'),'false');
   await page.setViewportSize({width,height:480});await page.locator('#toggle-entry-panel').click();

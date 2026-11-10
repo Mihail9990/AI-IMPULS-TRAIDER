@@ -18,9 +18,9 @@ p=Structure();p.feed((ROOT/'index.html').read_text());assert not p.stack
 inside=lambda key,ancestor:any(id==ancestor for _,id in p.nodes[key][2])
 for id in ('start','stop','resume','reset','logout','save-settings','refresh-settings','save-tp-grid','save-v3-settings','logs-refresh','logs-download','writeoff-recovery'):
     assert inside(id,'settings-page'),id
-for id in ('own-entry-sl','reverse-enable','reverse-disable','cancel-initial','level-buttons'):
+for id in ('own-entry-sl','reverse-enable','reverse-disable','cancel-initial','v3-link-toggle','level-buttons'):
     assert inside(id,'drawer-content'),id
-for id in ('v3-submit-entry','v3-cancel-request','v3-cancel-entry','v3-link-toggle','v3-sl-plus','v3-sl-minus'):
+for id in ('v3-submit-entry','v3-cancel-request','v3-cancel-entry','v3-sl-plus','v3-sl-minus'):
     assert inside(id,'v3-panels') and not inside(id,'drawer-content'),id
 assert not inside('bot-activity','chart-page') and not inside('bot-activity','settings-page')
 assert p.nodes['bot-activity'][1]['tabindex']=='0'
@@ -37,5 +37,11 @@ js=(ROOT/'panel.js').read_text()
 for id in re.findall(r"\$\('([^']+)'\)",js):
     if id.endswith('-'):continue
     assert id in p.nodes,id
-assert "const mode='live'" in js and 'switchMode' not in js
-print('PASS static chart-first structure, command reachability, IDs, tabs, fixed LIVE role contract. Browser layout NOT verified.')
+assert "const mode='live';" in js and 'switchMode' not in js
+print('PASS static chart-first structure, command reachability, IDs, tabs, separate role contract. Browser layout NOT verified.')
+
+for id in ('position-history-note','position-history-list'):assert inside(id,'history-page') and not inside(id,'settings-page'),id
+for id in ('writeoff-history','cycle-history-rows'):assert id not in p.nodes
+assert inside('activity-recovery','bot-activity') and inside('activity-total-net','bot-activity')
+
+assert inside('v3-link-status','drawer-content') and not inside('v3-link-toggle','v3-entry-panel')

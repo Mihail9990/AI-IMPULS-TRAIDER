@@ -111,3 +111,29 @@ body{background:var(--bg)}main{padding:0;max-width:none}#login{max-width:480px;m
 #bottom-tabs button{width:33.333%;min-width:0}#tab-history::before{content:'◷'}
 
 #activity-totals #activity-recovery,#debt,#cycle-history-rows td:last-child{color:#b8f36a}
+
+/* Two compact left-edge handles at the lower chart/Commands area. */
+#chart-page{position:relative}
+#v3-panels .side-panel-tabs{position:absolute;inset:auto auto 8px 0;display:grid;gap:12px;width:44px;z-index:35}
+#v3-panels .side-panel-tabs button,#v3-panels #toggle-sl-panel{width:44px;height:48px;min-height:48px;padding:0;margin:0;border-radius:0 12px 12px 0;font-size:30px;line-height:1;touch-action:none;user-select:none;-webkit-user-select:none}
+#v3-panels .side-panel,#v3-panels #v3-sl-panel{left:0;right:auto;top:calc(var(--activity-height) + env(safe-area-inset-top) + 8px);border-radius:0 16px 16px 0;transform:translateX(-105%)}
+#v3-panels .side-panel[data-open=true],#v3-panels #v3-sl-panel[data-open=true]{transform:translateX(0)}
+#v3-panels .side-panel.dragging{visibility:visible;transition:none;pointer-events:none}
+#linked-trigger-commands{margin:12px 0!important;padding:8px 0!important}
+#linked-trigger-commands #v3-link-toggle{width:100%}
+
+#bot-activity #bot-activity-state{color:#83c3ff}
+#position-history-list{display:grid;gap:12px}
+.position-history-card{background:#141b24;border:1px solid #35465a;border-radius:12px;padding:14px}
+.position-history-card h2{font-size:17px;margin:0 0 8px}.position-history-card p{margin:4px 0;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.position-history-card strong{display:block;margin-top:10px;font-variant-numeric:tabular-nums;color:#c7e4ff}
+.position-history-card [data-tone=success]{color:#b2f2d2}.position-history-card [data-tone=warning]{color:#ffe0a3}
+
+/* Compact level confirmation keeps the chart visible; dragging never opens it. */
+#preview{inset:auto 8px calc(var(--nav-height) + env(safe-area-inset-bottom) + 4px);width:auto;max-width:560px;max-height:32dvh;padding:10px 12px;border-radius:12px;background:#151d27;box-shadow:0 4px 22px #0009}
+#preview h2{font-size:13px;margin:0 0 4px}#preview p{font-size:11px;margin:3px 0;line-height:1.3;overflow-wrap:anywhere}
+#preview .preview-actions{display:grid;grid-template-columns:minmax(64px,1fr) auto auto;gap:6px;align-items:end}
+#preview label{font-size:10px;gap:2px;margin:0}#preview input{min-width:0;padding:6px;min-height:40px}
+#preview button{font-size:12px;margin:0;padding:8px;min-height:40px}
+#preview-backdrop{background:transparent}
+@media(min-width:600px){#preview{left:calc(50% - 280px);right:auto;width:560px}}

@@ -87,12 +87,12 @@ def main():
             p.locator('#close-entry-panel').click();p.locator('#toggle-sl-panel').click()
             p.locator('#v3-sl-minus').click();wait("document.querySelector('#v3-sl-value').textContent==='1.40'")
             p.locator('#v3-sl-plus').click();wait("document.querySelector('#v3-sl-value').textContent==='1.50'")
-            p.locator('#close-sl-panel').click();p.locator('#toggle-entry-panel').click()
+            p.locator('#close-sl-panel').click();p.locator('#drawer-toggle').click()
             p.locator('#v3-link-toggle').click();wait("document.querySelector('#v3-link-toggle').dataset.cancel==='true'")
             n=len(dialogs);p.locator('#v3-link-toggle').click();wait("document.querySelector('#v3-link-toggle').dataset.cancel==='false'");assert len(dialogs)==n
             assert requests[-1]['action']['type']=='v3_cancel_link'
             # Drawers open independently; reload closes them without a command.
-            before=len(requests);p.locator('#toggle-sl-panel').click()
+            before=len(requests);p.locator('#drawer-toggle').click();p.locator('#toggle-entry-panel').click();p.locator('#toggle-sl-panel').click()
             assert p.locator('#v3-sl-panel').get_attribute('data-open')=='true'
             assert p.locator('#v3-entry-panel').get_attribute('data-open')=='true'
             p.keyboard.press('Escape');assert p.locator('#v3-sl-panel').get_attribute('data-open')=='false'
@@ -158,7 +158,7 @@ def main():
             fail_state=True;wait("document.querySelector('#v3-control-reason').textContent.includes('Нет свежего')");assert p.locator('#v3-link-toggle').is_disabled()
             fail_state=False;wait("!document.querySelector('#v3-submit-entry').disabled")
             # UNKNOWN persists across reload; neither repeated press nor reload resends.
-            p.locator('#toggle-entry-panel').click()
+            if p.locator('#drawer-toggle').get_attribute('aria-expanded')!='true':p.locator('#drawer-toggle').click()
             unknown=True;p.locator('#v3-link-toggle').click();wait("localStorage.getItem('basket-request')!==null");n=len(requests)
             p.reload();p.locator('#workspace').wait_for(state='visible');assert p.locator('#v3-link-toggle').is_disabled();assert len(requests)==n
             assert not errors,errors

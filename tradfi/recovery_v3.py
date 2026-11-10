@@ -519,7 +519,7 @@ class ControlledRecoveryController(LatestCloseBasketController):
             return
         if c.get('v3_link') and snap['orders']:
             self.state['phase']='RECOVERY_PENDING';return
-        if number(c['recovery'])<=0:
+        if number(c['recovery'])<=0 and not (c.get('recovery_waived_keep_pending') and (c.get('v3_request') or snap['orders'] or self._unresolved())):
             c.pop('v3_request',None);self._finish(snap);return
         if snap['orders'] or self._unresolved():self.state['phase']='RECOVERY_PENDING';return
         for g in c['groups']:g['retired']=True
@@ -601,7 +601,7 @@ class ControlledRecoveryController(LatestCloseBasketController):
     def v3_view(self,snap):
         c=self.state.get('cycle') or {};active=[t for t in c.get('tickets',{}).values() if not t['closed']]
         blocked=bool(not snap.get('spec') or not self._v3() or self.state['stop'] or self.state.get('time_block') or self.state.get('migration_block') or c.get('manual') or c.get('edit') or c.get('v3_edit') or self._uncertain() or getattr(self.broker,'read_only',False))
-        controls=dict(can_enter=False,can_link=False,can_cancel_link=bool(c.get('v3_link')),can_cancel_entry=bool(c and not getattr(self.broker,'read_only',False) and not c.get('edit') and not c.get('v3_edit') and not c.get('v3_rearm') and not c.get('manual') and not self.state.get('migration_block') and self.state['phase'] not in {'SAFE_PAUSE','MANUAL'} and self._cancel_entry_groups(snap,c)),can_adjust_sl=False,can_own_entry_sl=False,reason='Дождитесь сверки или подходящего этапа V3')
+        controls=dict(can_writeoff_recovery=self.can_writeoff_recovery(snap),can_enter=False,can_link=False,can_cancel_link=bool(c.get('v3_link')),can_cancel_entry=bool(c and not getattr(self.broker,'read_only',False) and not c.get('edit') and not c.get('v3_edit') and not c.get('v3_rearm') and not c.get('manual') and not self.state.get('migration_block') and self.state['phase'] not in {'SAFE_PAUSE','MANUAL'} and self._cancel_entry_groups(snap,c)),can_adjust_sl=False,can_own_entry_sl=False,reason='Дождитесь сверки или подходящего этапа V3')
         if c and not blocked:
             controls.update(can_enter=self._entry_ready(snap,c),can_link=bool(active and len({t['group'] for t in active})==1 and any(t['index']==0 for t in active) and not snap.get('orders') and not self._unresolved() and not c.get('v3_link')),can_adjust_sl=bool(active and len({t['group'] for t in active})==1),can_own_entry_sl=bool(active and len({t['group'] for t in active})==1 and not self._protection_busy(snap)))
         cfg=c.get('cfg',self.state['basket_settings']);key='INITIAL_SL_DISTANCE' if active and active[0]['role']=='initial' else 'RECOVERY_SL_DISTANCE'

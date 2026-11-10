@@ -60,7 +60,7 @@
   const write=(id,text)=>{if($(id).textContent!==text)$(id).textContent=text;};
   const role='LIVE';
   if(!view){write('bot-activity-state',role+' · Ожидание снимка контроллера.');return;}
-  const phases={WAIT_START:'Ожидание запуска',WAIT_CANDLE:'Ожидание новой закрытой свечи',INITIAL_WAIT:'Ожидание начального входа',INITIAL_PENDING:'Ожидание начального триггера',INITIAL_POSITION:'Сопровождение начальной позиции',RECOVERY_POSITION:'Сопровождение корзины RECOVERY',RECOVERY_PENDING:'Ожидание ордеров RECOVERY / сверки',RECOVERY_CLEANUP:'Очистка ордеров RECOVERY / сверка',V3_WAIT_ENTRY:'Ожидание вашего входа RECOVERY',V3_WAIT_CANDLE:'Ожидание выбранной свечи RECOVERY',COOLDOWN:'Пауза перед новым циклом',PAUSED:'Новые входы остановлены',PAUSED_CYCLE:'Цикл приостановлен',MANUAL:'Требуется ручная сверка',SAFE_PAUSE:'Защитная пауза',MIGRATION_BLOCK:'Блокировка переноса состояния'};
+  const phases={WAIT_START:'Ожидание запуска',WAIT_CANDLE:'Ожидаю закрытие свечи',INITIAL_WAIT:'Ожидаю закрытие свечи',INITIAL_PENDING:'Ожидаю сверку состояния ордеров',INITIAL_POSITION:'Ожидаю сверку состояния позиции',RECOVERY_POSITION:'Ожидаю сверку состояния позиций',RECOVERY_PENDING:'Ожидание ордеров RECOVERY / сверки',RECOVERY_CLEANUP:'Очистка ордеров RECOVERY / сверка',V3_WAIT_ENTRY:'Ожидаю ручной ордер',V3_WAIT_CANDLE:'Ожидаю закрытие свечи',COOLDOWN:'Пауза перед новым циклом',PAUSED:'Новые входы остановлены',PAUSED_CYCLE:'Цикл приостановлен',MANUAL:'Требуется ручная сверка',SAFE_PAUSE:'Защитная пауза',MIGRATION_BLOCK:'Блокировка переноса состояния'};
   const warnings=[];if(!v3Fresh)warnings.push('Нет свежего снимка: ниже последние полученные данные.');
   if(view.read_only)warnings.push('Только просмотр: торговые команды отключены');
   if(view.migration_block)warnings.push(friendlyReason(view.migration_block));if(view.manual_reason)warnings.push(friendlyReason(view.manual_reason));
@@ -68,6 +68,10 @@
   if(view.feed?.status!=='FRESH'||!feedUtcVerified())warnings.push('Котировки или время не подтверждены как свежие.');
   write('bot-activity-warning',warnings.join(' · '));$('bot-activity-warning').dataset.tone='warning';$('bot-activity-state').dataset.tone='info';
   let detail=phases[view.phase]??('Состояние контроллера: '+(view.phase??'не указано'));
+  const safetyBlocked=!v3Fresh||view.manual_reason||view.migration_block||view.time_block||['MANUAL','SAFE_PAUSE','MIGRATION_BLOCK'].includes(view.phase);
+  if(!safetyBlocked){if(view.positions?.length)detail='Ожидаю исполнения TP или SL';else if(view.orders?.length)detail='Ожидаю исполнения триггер ордера';}
+  else if(!v3Fresh)detail='Нет свежего состояния; действия недоступны';else detail='Действия приостановлены: требуется проверка';
+  if(busy||pending)detail='Ожидаю подтверждения команды; повтор недоступен';
   if(view.v3_request)detail+=' · Запланирован '+view.v3_request.order_type+' по закрытию выбранной свечи';
   if(view.v3_link?.cancel)detail+=' · Отмена связанных триггеров ожидает сверки';
   else if(view.v3_link?.replace)detail+=' · Перенос связанных триггеров ожидает сверки';
@@ -198,17 +202,48 @@
  }
  $('v3-order-type').onchange=v3InputMode;$('v3-timing').onchange=v3InputMode;
  // Each drawer owns its state; opening one never opens or closes the other.
- const sidePanelOrder=[];
+ const sidePanelOrder=[],sidePanelDragCancels=[];
+ const cancelSidePanelDrags=()=>sidePanelDragCancels.forEach(cancel=>cancel());
  function setSidePanel(name,open,restoreFocus=false){
   const panel=$('v3-'+name+'-panel'),toggle=$('toggle-'+name+'-panel');
-  panel.dataset.open=String(open);panel.inert=!open;toggle.setAttribute('aria-expanded',String(open));
+  panel.dataset.open=String(open);panel.inert=!open;panel.style.transform='';panel.classList.toggle('dragging',false);toggle.setAttribute('aria-expanded',String(open));
+  toggle.textContent=open?'<':'>';toggle.setAttribute('aria-label',(open?'Закрыть ':'Открыть ')+(name==='sl'?'контроль SL':'выставление ордеров'));toggle.title=(name==='sl'?'Контроль SL':'Ордера')+': нажмите или потяните '+(open?'влево':'вправо');
   const index=sidePanelOrder.indexOf(name);if(index>=0)sidePanelOrder.splice(index,1);
   if(open){sidePanelOrder.push(name);sidePanelOrder.forEach((key,i)=>{$('v3-'+key+'-panel').style.zIndex=String(30+i);});$('close-'+name+'-panel').focus({preventScroll:true});}
   else if(restoreFocus)toggle.focus({preventScroll:true});
  }
  for(const name of ['sl','entry']){
-  $('toggle-'+name+'-panel').onclick=()=>setSidePanel(name,$('v3-'+name+'-panel').dataset.open!=='true');
-  $('close-'+name+'-panel').onclick=()=>setSidePanel(name,false,true);
+  const handle=$('toggle-'+name+'-panel'),panel=$('v3-'+name+'-panel');
+  let drag=null,suppressClick=false;
+  const reset=()=>{drag=null;panel.style.transform='';panel.classList.toggle('dragging',false);};
+  const cancel=()=>{if(drag)suppressClick=true;reset();};
+  sidePanelDragCancels.push(cancel);
+  handle.onclick=e=>{if(suppressClick&&e?.detail!==0){suppressClick=false;e?.preventDefault();return;}cancel();setSidePanel(name,panel.dataset.open!=='true');};
+  handle.addEventListener('pointerdown',e=>{
+   if(drag){cancel();return;}
+   if(e.isPrimary===false||(e.button!==undefined&&e.button!==0))return;
+   suppressClick=false;drag={id:e.pointerId,x:e.clientX,y:e.clientY,open:panel.dataset.open==='true',dx:0,dy:0};
+   handle.setPointerCapture(e.pointerId);e.stopPropagation();
+  });
+  handle.addEventListener('pointermove',e=>{
+   if(!drag||e.pointerId!==drag.id)return;
+   drag.dx=e.clientX-drag.x;drag.dy=e.clientY-drag.y;
+   if(Math.abs(drag.dy)>12&&Math.abs(drag.dy)>Math.abs(drag.dx)){cancel();return;}
+   if(Math.abs(drag.dx)<8)return;
+   suppressClick=true;e.preventDefault();e.stopPropagation();
+   const width=panel.getBoundingClientRect().width||320;
+   const progress=Math.max(0,Math.min(1,(drag.open?1:0)+drag.dx/width));
+   panel.classList.toggle('dragging',true);panel.style.transform='translateX('+((progress-1)*105)+'%)';
+  });
+  handle.addEventListener('pointerup',e=>{
+   if(!drag||e.pointerId!==drag.id)return;
+   const saved=drag,dx=e.clientX-saved.x,dy=e.clientY-saved.y;
+   const moved=Math.abs(dx)>=8||Math.abs(dy)>=8;
+   reset();
+   if(moved){suppressClick=true;e.preventDefault();e.stopPropagation();if(Math.abs(dx)>=36&&Math.abs(dx)>Math.abs(dy))setSidePanel(name,dx>0);}
+  });
+  handle.addEventListener('pointercancel',cancel);handle.addEventListener('lostpointercapture',cancel);
+  $('close-'+name+'-panel').onclick=()=>{cancel();setSidePanel(name,false,true);};
  }
  $('save-v3-settings').onclick=async()=>{if(v3Blocked()||!v3Enabled())return;try{const distance=positiveDecimal($('v3-setting-distance').value,'Отступ'),revision=view.revision,scope=view.scope;if(!confirm('Сохранить отступ RECOVERY от Close: '+distance+'?'))return;await send({type:'v3_settings',cycle_id:view.cycle_id,entry_distance:distance},revision,scope);}catch(e){error(e.message);}};
  $('v3-submit-entry').onclick=async()=>{if(v3Blocked()||!v3Enabled()||view.v3_controls?.can_enter!==true||!view.selected_recovery_profile)return;try{const action={type:'v3_entry',cycle_id:view.cycle_id,order_type:$('v3-order-type').value,timing:$('v3-timing').value,side:$('v3-side').value},revision=view.revision,scope=view.scope;if(action.order_type==='STOP'&&action.timing==='now')throw Error('STOP выставляется только после текущей или следующей M1.');const timing=action.timing==='now'?'Сейчас':action.timing==='current'?'После закрытия текущей M1':'После закрытия следующей M1';if(action.order_type==='MARKET'&&!confirm('ТОРГОВЛЯ'+' — '+action.order_type+', '+profileDetails(view.selected_recovery_profile)+'\nSL: '+view.selected_recovery_profile.sl_distance+'\n'+timing+'\nНаправление: '+(action.timing==='now'?action.side:'по цвету свечи; doji — пропуск')+(action.order_type==='STOP'?'\nОтступ от Close: '+view.v3_settings.entry_distance:'\nЦена определяется рыночным исполнением')+'\nПосле исполнения бот сопровождает корзину.'))return;await send(action,revision,scope);}catch(e){error(e.message);}};
@@ -222,17 +257,17 @@
  function fields(){if(!view)return;v3FillSettings();$('fields').replaceChildren();for(const [k,v] of Object.entries(view.settings)){if(['EXPANSION_DISTANCE','TICKET_SIZE','BASKET_COUNT','RECOVERY_SL_DISTANCE'].includes(k)||(view.tp_distances&&['COST_RESERVE','TP_STEP_MULTIPLIER'].includes(k)))continue;const label=document.createElement('label');label.textContent=names[k]??k;const input=document.createElement('input');input.id='setting-'+k;input.value=v;input.inputMode='decimal';label.append(input);const active=document.createElement('small');active.textContent='В цикле: '+(view.active_settings?.[k]??'—');label.append(active);$('fields').append(label);} $('tp-grid-settings').hidden=true;$('tp-fields').replaceChildren();if(view.tp_distances)for(let i=0;i<Number(view.settings.BASKET_COUNT);i++){const label=document.createElement('label');label.textContent='TP '+(i+1)+(i===0?' · обязательно':' · пусто = авто');const input=document.createElement('input');input.id='tp-distance-'+i;input.inputMode='decimal';input.value=view.tp_distances[i]??'';label.append(input);const active=document.createElement('small');active.textContent='В цикле: '+(view.active_tp_distances?.[i]??'авто / не задано');label.append(active);$('tp-fields').append(label);}}
  $('refresh-settings').onclick=()=>{if((profileDraftDirty()||profileRemoved.size)&&!confirm('Загрузить актуальные параметры? Несохранённый черновик профиля и исключения будут заменены.'))return;fields();error('Загружены актуальные параметры.');};
  $('save-settings').onclick=async()=>{if(!view)return;const settings={};for(const k of Object.keys(view.settings)){if(['EXPANSION_DISTANCE','TICKET_SIZE','BASKET_COUNT','RECOVERY_SL_DISTANCE'].includes(k)||(view.tp_distances&&['COST_RESERVE','TP_STEP_MULTIPLIER'].includes(k))){settings[k]=view.settings[k];continue;}const raw=$('setting-'+k).value.trim();if(raw===''||!Number.isFinite(Number(raw))){error('Проверьте числовое значение: '+(names[k]??k));return;}settings[k]=k==='BASKET_COUNT'?Number(raw):raw;}const revision=view.revision,scope=view.scope;if(!confirm('Применить параметры? Объём открытых билетов не меняется.\n'+Object.entries(settings).filter(([k])=>!['EXPANSION_DISTANCE','TICKET_SIZE','BASKET_COUNT','RECOVERY_SL_DISTANCE'].includes(k)).map(([k,v])=>(names[k]??k)+': '+v).join('\n')))return;try{await send({type:'basket_settings',settings,cycle_id:view.cycle_id},revision,scope);}catch(e){error(e.message);}};
- $('writeoff-recovery').onclick=async()=>{if(!view)return;const v=view,revision=v.revision,scope=v.scope;const action={type:'writeoff_recovery',cycle_id:v.cycle_id,expected_debt:v.debt,confirmed:true};if(!confirm('ТОРГОВЛЯ'+' — списать RECOVERY '+v.debt+' UST? Фактическая доходность не изменится: убыток уже учтён. Позиции и ордера не закрываются. После сверки начнётся ожидание новой M1.'))return;try{await send(action,revision,scope);}catch(e){error(e.message);}};
+ $('writeoff-recovery').onclick=async()=>{if(v3Blocked()||view.positions.length||view.v3_controls?.can_writeoff_recovery!==true)return;const v=view,revision=v.revision,scope=v.scope;const action={type:'writeoff_recovery',cycle_id:v.cycle_id,expected_debt:v.debt,confirmed:true};if(!confirm('ТОРГОВЛЯ'+' — списать RECOVERY '+v.debt+' UST? Фактическая доходность не изменится: убыток уже учтён. Разрешено только без открытых позиций. Ожидающие триггеры и выбранная свеча сохраняются. Новые убытки после сброса снова учитываются.'))return;try{await send(action,revision,scope);}catch(e){error(e.message);}};
  $('save-tp-grid').onclick=async()=>{if(!view?.tp_distances)return;const values=[...view.tp_distances],scope=view.scope,revision=view.revision,cycle_id=view.cycle_id;for(let i=0;i<Number(view.settings.BASKET_COUNT);i++){const raw=$('tp-distance-'+i).value.trim();if((i===0&&!raw)||(raw&&(!Number.isFinite(Number(raw))||Number(raw)<=0))){error('Задайте положительное расстояние TP '+(i+1));return;}values[i]=raw||null;}if(!confirm('Применить расстояния TP? SL остаются на фактических текущих уровнях.\n'+values.slice(0,Number(view.settings.BASKET_COUNT)).map((v,i)=>'TP '+(i+1)+': '+(v??'авто')).join('\n')))return;try{await send({type:'tp_distances',cycle_id,distances:values},revision,scope);}catch(e){error(e.message);}};
  function node(tag,attrs,text){const n=document.createElementNS(ns,tag);for(const[k,v]of Object.entries(attrs))n.setAttribute(k,v);if(text!==undefined)n.textContent=text;return n;}
  function chartPoint(clientX,clientY){const point=svg.createSVGPoint();point.x=clientX;point.y=clientY;return point.matrixTransform(svg.getScreenCTM().inverse());}
  // Viewport changes only: never request or alter orders while navigating history.
  function visibleCandles(){const all=view?.feed?.candles??[];const count=Math.max(10,Math.min(240,Math.round(visibleCount)));timeOffset=Math.max(0,Math.min(timeOffset,Math.max(0,all.length-count)));const end=all.length-Math.round(timeOffset);return all.slice(Math.max(0,end-count),end);}
- function domain(){const prices=[...lines.map(l=>l.price),...visibleCandles().flatMap(c=>[Number(c.low),Number(c.high)]),Number(view?.feed?.quote?.bid),Number(view?.feed?.quote?.ask)].filter(x=>Number.isFinite(x)&&x>0);let lo=Math.min(...prices),hi=Math.max(...prices);if(!prices.length){lo=0;hi=1;}const mid=(lo+hi)/2+pan,span=Math.max(1,hi-lo)*1.25/zoom;return{min:mid-span/2,max:mid+span/2};}
+ function domain(){if(preview?.dragDomain)return preview.dragDomain;const prices=[...lines.map(l=>l.price),...visibleCandles().flatMap(c=>[Number(c.low),Number(c.high)]),Number(view?.feed?.quote?.bid),Number(view?.feed?.quote?.ask)].filter(x=>Number.isFinite(x)&&x>0);let lo=Math.min(...prices),hi=Math.max(...prices);if(!prices.length){lo=0;hi=1;}const mid=(lo+hi)/2+pan,span=Math.max(1,hi-lo)*1.25/zoom;return{min:mid-span/2,max:mid+span/2};}
  function syncPreviewDialog(){
-  const open=!!preview;$('preview-backdrop').hidden=!open;
-  for(const id of ['command-drawer','v3-panels','settings-page','history-page','bottom-tabs','analysis-pane','bot-activity'])$(id).inert=open;
-  if(open&&!previewWasOpen){previewFocus=document.activeElement;$('cancel-level').focus({preventScroll:true});}
+  const active=!!preview,open=active&&!preview.dragging;$('preview-backdrop').hidden=!open;$('preview').hidden=!open;
+  for(const id of ['command-drawer','v3-panels','settings-page','history-page','bottom-tabs','analysis-pane','bot-activity'])$(id).inert=active;
+  if(open&&!previewWasOpen){cancelSidePanelDrags();previewFocus=document.activeElement;$('cancel-level').focus({preventScroll:true});}
   if(!open&&previewWasOpen)(previewFocus?.isConnected?previewFocus:$('drawer-toggle')).focus({preventScroll:true});
   previewWasOpen=open;
  }
@@ -240,7 +275,7 @@
   syncPreviewDialog();
   if(!view)return;lines=[];const colors=prefs.colors;
   for(const [side,price] of Object.entries(view.levels)){const pendingOrder=view.orders.some(o=>o.side===side&&Number(o.price)===Number(price));if(pendingOrder||view.frozen_levels)lines.push({key:'trigger-'+side,kind:'trigger',side,price:Number(price),label:side+(pendingOrder?' STOP':' · уровень цикла'),color:colors[side]});}
-  for(const p of view.positions)for(const key of ['entry','tp','sl'])lines.push({key:p.id+'-'+key,kind:key,pid:p.id,price:Number(p[key]),label:key.toUpperCase()+' #'+(p.ticket??p.id).slice(-6),color:colors[key]});
+  for(const p of view.positions)for(const key of ['entry','tp','sl'])lines.push({key:p.id+'-'+key,kind:key,pid:p.id,price:Number(p[key]),label:key.toUpperCase()+(Number.isInteger(view.tickets?.find(t=>t.id===p.id)?.index)?' · ступень '+(view.tickets.find(t=>t.id===p.id).index+1):'')+' · #'+(p.ticket??p.id).slice(-6),color:colors[key]});
   if(!lines.length&&!(view.feed.candles??[]).length&&!Number(view.feed.quote?.bid)){svg.replaceChildren(node('text',{x:230,y:250,fill:'#969ba6','font-size':28},'Ожидание реальных данных MT5'));$('level-buttons').replaceChildren();drawAnalysis();return;}
   frameHeight=Math.max(240,svg.clientHeight/Math.max(1,svg.clientWidth)*1000);plotBottom=frameHeight-45;plotHeight=plotBottom-20;svg.setAttribute('viewBox','0 0 1000 '+frameHeight);
   const labelSize=svg.clientWidth<680?32:17;const labelRows=[];
@@ -272,17 +307,25 @@
   drawAnalysis();
   $('level-buttons').replaceChildren();for(const l of lines){const b=document.createElement('button');b.textContent=l.label+' '+l.price.toFixed(2);b.style.borderColor=l.color;b.disabled=l.kind==='entry';b.onclick=()=>openPreview(l,l.price);$('level-buttons').append(b);}
  }
- function openPreview(line,value){if(!view||pending)return;$('preview-error').textContent='';preview={line:{...line},value,backend:structuredClone(view)};$('preview').hidden=false;$('new-price').value=value.toFixed(2);$('preview-text').textContent=line.label+': '+line.price.toFixed(2)+' → '+value.toFixed(2);draw();}
+ function openPreview(line,value,dragging=false){
+  if(v3Blocked()||line.kind==='entry')return false;
+  if(line.pid&&!view.positions.some(p=>p.id===line.pid&&Number(p[line.kind])===line.price))return false;
+  const dragDomain=dragging?domain():null;
+  $('preview-error').textContent='';preview={line:{...line},value,backend:structuredClone(view),dragging,dragDomain};
+  $('preview').hidden=dragging;$('new-price').value=value.toFixed(2);$('preview-text').textContent=line.label+': '+line.price.toFixed(2)+' → '+value.toFixed(2);
+  $('preview-scope').textContent=line.kind==='sl'?'SL изменится у всех живых билетов этой корзины.':line.kind==='tp'?'TP выбранного билета. Другие ручные TP сохранятся.':'Правка ожидающего триггера.';
+  draw();return true;
+ }
  function priceAt(clientY){const r=svg.getBoundingClientRect(),d=domain(),local=chartPoint(r.left,clientY);return Math.round((d.min+(plotBottom-local.y)/plotHeight*(d.max-d.min))*100)/100;}
  const pointers=new Map();let pinch=null;
  const distanceBetween=points=>Math.hypot(points[0].x-points[1].x,points[0].y-points[1].y);
- function cancelGesture(){clearTimeout(hold);pointers.clear();pinch=null;gesture=null;}
+ function cancelGesture(){clearTimeout(hold);pointers.clear();pinch=null;if(gesture?.drag){preview=null;$('preview').hidden=true;}gesture=null;}
  svg.addEventListener('pointerdown',e=>{
-  if(preview)return;svg.setPointerCapture(e.pointerId);pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  if(preview){if(preview.dragging){cancelGesture();draw();}return;}if(e.button!==undefined&&e.button!==0)return;svg.setPointerCapture(e.pointerId);pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
   if(pointers.size>1){clearTimeout(hold);gesture=null;pinch={distance:distanceBetween([...pointers.values()]),count:visibleCount,zoom};return;}
   const l=lines.find(l=>l.key===e.target.closest('[data-line]')?.dataset.line);
   gesture={id:e.pointerId,start:e.clientY,startX:e.clientX,pan,offset:timeOffset,span:domain().max-domain().min,line:l,drag:false,moved:false};
-  if(l&&l.kind!=='entry')hold=setTimeout(()=>{if(gesture&&!gesture.moved&&gesture.id===e.pointerId){gesture.drag=true;openPreview(l,l.price);}},500);
+  if(l&&l.kind!=='entry')hold=setTimeout(()=>{if(gesture&&!gesture.moved&&gesture.id===e.pointerId){if(openPreview(l,l.price,true))gesture.drag=true;}},1000);
  });
  svg.addEventListener('pointermove',e=>{
   if(!pointers.has(e.pointerId))return;pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
@@ -298,27 +341,39 @@
   else timeOffset=gesture.offset-localDy/Math.max(1,plotHeight)*visibleCount;
   draw();
  });
- const end=e=>{clearTimeout(hold);pointers.delete(e.pointerId);if(e.type==='pointercancel'&&gesture?.drag){preview=null;$('preview').hidden=true;}gesture=null;if(pointers.size<2)pinch=null;draw();};
+ const end=e=>{clearTimeout(hold);pointers.delete(e.pointerId);if(gesture?.id===e.pointerId&&gesture.drag&&preview){if(e.type==='pointerup'){preview.dragging=false;$('preview').hidden=false;}else{preview=null;$('preview').hidden=true;}}if(gesture?.id===e.pointerId)gesture=null;if(pointers.size<2)pinch=null;draw();};
+ svg.addEventListener('contextmenu',e=>{if(gesture?.line||preview)e.preventDefault();});
  svg.addEventListener('pointerup',end);svg.addEventListener('pointercancel',end);svg.addEventListener('lostpointercapture',end);
  svg.addEventListener('wheel',e=>{e.preventDefault();if(preview)return;visibleCount=Math.max(10,Math.min(240,visibleCount*(e.deltaY>0?1.12:1/1.12)));draw();},{passive:false});
  $('zoom-in').onclick=()=>{visibleCount=Math.max(10,visibleCount/1.3);draw();};$('zoom-out').onclick=()=>{visibleCount=Math.min(240,visibleCount*1.3);draw();};$('chart-reset').onclick=()=>{zoom=1;pan=0;timeOffset=0;visibleCount=60;draw();};
- $('cancel-level').onclick=()=>{preview=null;$('preview').hidden=true;draw();};
- $('apply-level').onclick=async()=>{if(!preview)return;const p=preview,value=Number($('new-price').value);if(!Number.isFinite(value)||value<=0){error('Цена должна быть положительным числом.');return;}let action;if(p.line.kind==='trigger'){action={type:'basket_levels',cycle_id:p.backend.cycle_id,expected_orders:p.backend.orders.map(o=>o.id),expected:p.backend.levels,levels:{...p.backend.levels,[p.line.side]:String(value)}};}else{const position=p.backend.positions.find(x=>x.id===p.line.pid);action={type:'protection',cycle_id:p.backend.cycle_id,position_id:position.id,old:{sl:position.sl,tp:position.tp},new:{sl:position.sl,tp:position.tp,[p.line.kind]:String(value)}};}if(!confirm('Подтвердить '+p.line.label+' → '+value+'? SL меняется для всех живых билетов этой корзины, TP выбранного билета фиксируется вручную; незаданные TP пересчитываются для покрытия долга. Другие ручные TP сохраняются. Недопустимая сетка отклоняется.'))return;try{await send(action,p.backend.revision,p.backend.scope);preview=null;$('preview').hidden=true;}catch(e){error(e.message);}draw();};
+ $('cancel-level').onclick=()=>{cancelGesture();preview=null;$('preview').hidden=true;draw();};
+ $('apply-level').onclick=async()=>{if(!preview||preview.dragging)return;const p=preview;if(v3Blocked()||view.scope!==p.backend.scope||view.cycle_id!==p.backend.cycle_id||view.revision!==p.backend.revision){error('Данные изменились или недоступны. Отмените правку и выберите линию заново.');return;}if(p.line.pid&&JSON.stringify(view.positions.map(x=>x.id).sort())!==JSON.stringify(p.backend.positions.map(x=>x.id).sort())){error('Состав позиций изменился. Отмените правку и выберите линию заново.');return;}if(p.line.pid){const current=view.positions.find(x=>x.id===p.line.pid),original=p.backend.positions.find(x=>x.id===p.line.pid);if(!current||!original||String(current.sl)!==String(original.sl)||String(current.tp)!==String(original.tp)){error('Позиция или её уровни изменились. Отмените правку и выберите линию заново.');return;}}const value=Number($('new-price').value);if(!Number.isFinite(value)||value<=0){error('Цена должна быть положительным числом.');return;}let action;if(p.line.kind==='trigger'){action={type:'basket_levels',cycle_id:p.backend.cycle_id,expected_orders:p.backend.orders.map(o=>o.id),expected:p.backend.levels,levels:{...p.backend.levels,[p.line.side]:String(value)}};}else{const position=p.backend.positions.find(x=>x.id===p.line.pid);action={type:'protection',cycle_id:p.backend.cycle_id,position_id:position.id,old:{sl:position.sl,tp:position.tp},new:{sl:position.sl,tp:position.tp,[p.line.kind]:String(value)}};}try{await send(action,p.backend.revision,p.backend.scope);preview=null;$('preview').hidden=true;}catch(e){error(e.message);}draw();};
+ $('new-price').oninput=()=>{if(!preview||preview.dragging)return;const value=Number($('new-price').value);if(!Number.isFinite(value)||value<=0)return;preview.value=value;$('preview-text').textContent=preview.line.label+': '+preview.line.price.toFixed(2)+' → '+value.toFixed(2);draw();};
  function renderTotalsHistory(){
   const metrics=view?.metrics;
   const money=(value,currency)=>value===null||value===undefined||value===''?'—':String(value)+(currency?' '+currency:'');
-  notice('activity-recovery',money(metrics?.recovery_total,metrics?.currency),'info');
-  const net=metrics?.cycle_net;
-  notice('activity-cycle-net',money(net,metrics?.currency),net===null||net===undefined?'info':Number(net)<0?'warning':Number(net)>0?'success':'info');
-  $('activity-totals-note').textContent=view?.cycle_id?'По учтённым исполнениям, без плавающего P/L.':'Нет активного цикла. RECOVERY сохраняется отдельно.';
-  const records=Array.isArray(view?.cycle_history)?view.cycle_history:[];
-  $('cycle-history-empty').textContent=records.length?'':'Сохранённых завершённых циклов пока нет.';
-  $('cycle-history-rows').replaceChildren();
-  const completed={PAPER_INTERRUPTED_RETAINED:'Прерван пользователем',MANUAL_RESET_RETAINED:'Завершён после ручной сверки',RECOVERY_WAIVED:'RECOVERY списан'};
-  for(const record of [...records].reverse()){
-   const row=document.createElement('tr');
-   for(const text of [record.id??'—',completed[record.completion]??(record.completion?'Завершён; подробности в журнале':'Завершён'),money(record.realized,record.currency),money(record.recovery_retained??record.recovery,record.currency)]){const cell=document.createElement('td');cell.textContent=text;row.append(cell);}
-   $('cycle-history-rows').append(row);
+  const debt=metrics?.recovery_total;
+  const negative=debt===null||debt===undefined?null:Number(debt)===0?'0':'-'+String(debt).replace(/^[-+]/,'');
+  notice('activity-recovery',money(negative,metrics?.currency),'info');
+  const total=metrics?.all_closed_net;
+  notice('activity-total-net',money(total,metrics?.currency),total===null||total===undefined?'info':Number(total)<0?'warning':Number(total)>0?'success':'info');
+  $('activity-totals-note').textContent=metrics?.history_complete===true?'Общий результат: закрытые позиции с комиссиями, без плавающего P/L.':'Общий результат недоступен: история исполнений неполна.';
+  const records=Array.isArray(view?.position_history)?view.position_history:[];
+  $('position-history-note').textContent=metrics?.history_note??(metrics?.history_complete===true?'':'Нет подтверждённой полной истории.');
+  $('position-history-empty').textContent=records.length?'':'Исполненных позиций пока нет.';
+  $('position-history-list').replaceChildren();
+  const stamp=value=>{if(value===null||value===undefined||value==='')return '—';const date=new Date(Number(value)*1000);return Number.isFinite(date.getTime())?date.toISOString().replace('T',' ').replace('.000Z',' UTC'):'—';};
+  const reasons={TP:'TP',SL:'SL',MANUAL:'Ручное закрытие',MANUAL_CLOSE:'Ручное закрытие',PAPER_INTERRUPT:'Прерывание пользователем',EXPERT:'Закрытие советником',MIXED:'Несколько причин закрытия'};
+  for(const record of records){
+   const card=document.createElement('article');card.className='position-history-card';
+   const heading=document.createElement('h2');heading.textContent=['BUY','SELL'].includes(record.side)?record.side:'Сторона не подтверждена';card.append(heading);
+   const reason=reasons[record.reason]??(record.reason?'Другая подтверждённая причина':'Причина не подтверждена');
+   const lines=[['Открытие',stamp(record.opened_at)],['Цена открытия',record.entry_price??'—'],['Закрытие',record.status==='open'?'Позиция открыта':record.status==='partial'?'Закрыта частично':stamp(record.closed_at)],['Цена закрытия',record.exit_price??'—']];
+   for(const [label,value] of lines){const line=document.createElement('p');line.textContent=label+': '+value;card.append(line);}
+   const result=document.createElement('strong');result.dataset.tone=record.net===null||record.net===undefined?'info':Number(record.net)<0?'warning':'success';
+   result.textContent=(record.status==='open'?'Итог после закрытия':reason)+' · '+money(record.net,record.currency);card.append(result);
+   if(record.complete===false){const note=document.createElement('p');note.textContent='Данные позиции неполны; неизвестные значения показаны как —.';card.append(note);}
+   $('position-history-list').append(card);
   }
  }
  function render(){
@@ -337,8 +392,7 @@
   $('request-status').textContent=pending?'Запрос '+pending+': '+(pendingScope===view.scope?view.action_results[pending]?.status??'ожидание':'другой контекст')+'. До сверки новые команды запрещены. При UNKNOWN проверьте журнал и брокера на VPS; перезагрузка не разрешает повтор.':'';
   for(const id of ['start','stop','resume','reset','cancel-initial','save-settings','reverse-enable','reverse-disable','save-tp-grid','apply-level'])$(id).disabled=!!pending||busy;
   $('own-entry-sl').disabled=!!pending||busy||view.read_only||!view.positions.length||(!v3Enabled()||view.v3_controls?.can_own_entry_sl!==true)||!!view.edit||!!view.manual_close||!!view.manual_reason||!!view.migration_block||!!view.time_block;
-  $('writeoff-recovery').disabled=!!pending||busy||view.read_only||!view.stopped||Number(view.debt)<=0||view.positions.length>0||view.orders.length>0;
-  $('writeoff-history').textContent=(view.recovery_writeoffs??[]).map(x=>'Списано '+x.amount+' '+x.currency+' · '+new Date(x.at_utc*1000).toISOString()).join(' | ');
+  $('writeoff-recovery').disabled=v3Blocked()||view.positions.length>0||view.v3_controls?.can_writeoff_recovery!==true;
   $('reverse-enable').disabled=!!pending||busy||view.reverse_controls?.can_enable!==true;
   $('reverse-disable').disabled=!!pending||busy||view.reverse_controls?.can_disable!==true;
   $('reverse-enable').title=view.reverse_controls?.reason??'';$('reverse-disable').title=view.reverse_controls?.reason??'';
@@ -386,7 +440,7 @@
  applyChartHeight();
  // Presentation-only navigation: the LIVE role and API paths never change.
  let activeTab='chart';
- function setTab(tab){if(preview)return;cancelGesture();for(const name of [...sidePanelOrder])setSidePanel(name,false);activeTab=['chart','history','settings'].includes(tab)?tab:'chart';for(const name of ['chart','history','settings']){$(name+'-page').hidden=activeTab!==name;$('tab-'+name).setAttribute('aria-selected',String(activeTab===name));}requestAnimationFrame(draw);}
+ function setTab(tab){if(preview)return;cancelGesture();cancelSidePanelDrags();for(const name of [...sidePanelOrder])setSidePanel(name,false);activeTab=['chart','history','settings'].includes(tab)?tab:'chart';for(const name of ['chart','history','settings']){$(name+'-page').hidden=activeTab!==name;$('tab-'+name).setAttribute('aria-selected',String(activeTab===name));}requestAnimationFrame(draw);}
  $('tab-chart').onclick=()=>setTab('chart');$('tab-history').onclick=()=>setTab('history');$('tab-settings').onclick=()=>setTab('settings');
  for(const name of ['chart','history','settings'])$('tab-'+name).addEventListener('keydown',e=>{if(['ArrowLeft','ArrowRight'].includes(e.key)){e.preventDefault();const tabs=['chart','history','settings'],other=tabs[(tabs.indexOf(name)+(e.key==='ArrowRight'?1:2))%tabs.length];setTab(other);$('tab-'+other).focus();}});
  function setDrawer(open){$('command-drawer').dataset.open=String(open);$('drawer-toggle').setAttribute('aria-expanded',String(open));$('drawer-content').hidden=!open;requestAnimationFrame(draw);}
@@ -396,9 +450,9 @@
  $('drawer-toggle').addEventListener('pointerup',e=>{if(drawerY!==null&&Math.abs(e.clientY-drawerY)>22){drawerSwiped=true;setDrawer(e.clientY<drawerY);}drawerY=null;});
  $('drawer-toggle').addEventListener('click',e=>{if(drawerSwiped){e.stopImmediatePropagation();drawerSwiped=false;}},true);
  $('drawer-toggle').addEventListener('pointercancel',()=>{drawerY=null;drawerSwiped=false;});
- document.addEventListener('keydown',e=>{if(preview&&e.key==='Tab'){const controls=[...$('preview').querySelectorAll('input,button')].filter(x=>!x.disabled),current=controls.indexOf(document.activeElement),next=e.shiftKey?(current<=0?controls.length-1:current-1):(current+1)%controls.length;e.preventDefault();controls[next]?.focus();return;}if(e.key==='Escape'){if(preview){$('cancel-level').click();}else if(sidePanelOrder.length){setSidePanel(sidePanelOrder.at(-1),false,true);}else if($('command-drawer').dataset.open==='true'){setDrawer(false);$('drawer-toggle').focus();}else setTab('chart');}});
+ document.addEventListener('keydown',e=>{if(preview&&e.key==='Tab'){const controls=[...$('preview').querySelectorAll('input,button')].filter(x=>!x.disabled),current=controls.indexOf(document.activeElement),next=e.shiftKey?(current<=0?controls.length-1:current-1):(current+1)%controls.length;e.preventDefault();controls[next]?.focus();return;}if(e.key==='Escape'){cancelSidePanelDrags();if(preview){$('cancel-level').click();}else if(sidePanelOrder.length){setSidePanel(sidePanelOrder.at(-1),false,true);}else if($('command-drawer').dataset.open==='true'){setDrawer(false);$('drawer-toggle').focus();}else setTab('chart');}});
  // Reflow the SVG after drawer resizing and device rotation without affecting its data.
  if(typeof ResizeObserver!=='undefined')new ResizeObserver(()=>requestAnimationFrame(draw)).observe($('chart-workspace'));
- layout();window.addEventListener('resize',()=>requestAnimationFrame(draw));
+ layout();window.addEventListener('blur',()=>{cancelSidePanelDrags();cancelGesture();draw();});window.addEventListener('resize',()=>{cancelSidePanelDrags();cancelGesture();requestAnimationFrame(draw);});
  setInterval(poll,1000);poll();
 })();

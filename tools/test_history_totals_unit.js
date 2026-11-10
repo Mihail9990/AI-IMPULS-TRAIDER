@@ -3,15 +3,17 @@ const fs=require('fs'),path=require('path'),vm=require('vm'),assert=require('ass
 const root=path.join(__dirname,'../web/basket-panel'),src=fs.readFileSync(path.join(root,'panel.js'),'utf8'),html=fs.readFileSync(path.join(root,'index.html'),'utf8'),css=fs.readFileSync(path.join(root,'panel.css'),'utf8');
 const nodes={};class Element{constructor(){this.textContent='';this.dataset={};this.children=[];this.events={};this.attributes={};}append(x){this.children.push(x);}replaceChildren(){this.children=[];}setAttribute(k,v){this.attributes[k]=v;}addEventListener(k,v){this.events[k]=v;}focus(){}}
 const $=id=>nodes[id]??=new Element();
-const ctx=vm.createContext({$,view:null,document:{createElement:()=>new Element()},notice:(id,text,tone)=>{const e=$(id);e.textContent=text;e.dataset.tone=tone;},preview:null,cancelGesture:()=>{},sidePanelOrder:[],setSidePanel:()=>{},requestAnimationFrame:()=>{},draw:()=>{}});
+const ctx=vm.createContext({$,view:null,document:{createElement:()=>new Element()},notice:(id,text,tone)=>{const e=$(id);e.textContent=text;e.dataset.tone=tone;},preview:null,cancelGesture:()=>{},cancelSidePanelDrags:()=>{},sidePanelOrder:[],setSidePanel:()=>{},requestAnimationFrame:()=>{},draw:()=>{}});
 vm.runInContext(src.slice(src.indexOf(' function renderTotalsHistory(){'),src.indexOf(' function render(){')),ctx);
 const run=()=>vm.runInContext('renderTotalsHistory()',ctx);
-run();assert.equal($('activity-recovery').textContent,'—');assert.equal($('activity-cycle-net').textContent,'—');assert($('cycle-history-empty').textContent.includes('пока нет'));
-ctx.view={cycle_id:'c',metrics:{recovery_total:'12.3456',cycle_net:'-2.3456',currency:'UST'},cycle_history:[{id:'a',realized:'-3',recovery_retained:'3',currency:'UST',completion:'PAPER_INTERRUPTED_RETAINED'},{id:'b',realized:'2',recovery:'0',currency:'USD'}]};run();
-assert.equal($('activity-recovery').textContent,'12.3456 UST');assert.equal($('activity-cycle-net').textContent,'-2.3456 UST');assert.equal($('activity-cycle-net').dataset.tone,'warning');
-assert.equal($('cycle-history-rows').children[0].children[0].textContent,'b');assert.equal($('cycle-history-rows').children[1].children[2].textContent,'-3 UST');
-ctx.view.metrics.cycle_net='0';run();assert.equal($('activity-cycle-net').textContent,'0 UST');ctx.view.metrics.cycle_net='1.25';run();assert.equal($('activity-cycle-net').dataset.tone,'success');
-ctx.view={debt:'999',realized:'999',cycle_history:[{id:'old'}]};run();assert.equal($('activity-recovery').textContent,'—','no invented fallback');assert.equal($('cycle-history-rows').children[0].children[2].textContent,'—');
+run();assert.equal($('activity-recovery').textContent,'—');assert.equal($('activity-total-net').textContent,'—');assert($('position-history-empty').textContent.includes('пока нет'));
+ctx.view={metrics:{recovery_total:'12.3456',all_closed_net:'-2.3456',currency:'UST',history_complete:true},position_history:[{side:'BUY',opened_at:100,closed_at:120,entry_price:'4000',exit_price:'4003',reason:'TP',net:'2.74',currency:'UST',status:'closed',complete:true},{side:'SELL',reason:'SL',net:'-3.26',currency:'UST',status:'closed',complete:false}]};run();
+assert.equal($('activity-recovery').textContent,'-12.3456 UST');assert.equal($('activity-total-net').textContent,'-2.3456 UST');assert.equal($('activity-total-net').dataset.tone,'warning');
+const card=$('position-history-list').children[0];assert.equal(card.children[0].textContent,'BUY');assert.equal(card.children.at(-1).textContent,'TP · 2.74 UST');assert(card.children[1].textContent.includes('1970-01-01'));assert(card.children[2].textContent.includes('4000'));
+ctx.view.metrics.recovery_total='0.000';ctx.view.metrics.all_closed_net='0';run();assert.equal($('activity-recovery').textContent,'0 UST');assert.equal($('activity-total-net').textContent,'0 UST');
+ctx.view.metrics.all_closed_net=null;ctx.view.metrics.history_complete=false;ctx.view.metrics.history_note='Missing opening evidence';run();assert.equal($('activity-total-net').textContent,'—');assert.equal($('position-history-note').textContent,'Missing opening evidence');
+ctx.view={debt:'999',realized:'999',position_history:[{side:'BUY',status:'open',net:null}]};run();assert.equal($('activity-recovery').textContent,'—','no invented fallback');assert.equal($('position-history-list').children[0].children.at(-1).textContent,'Итог после закрытия · —');
+assert(!$('position-history-list').children[0].children.some(x=>x.textContent.includes('RECOVERY')||x.textContent.includes('переносом')));
 vm.runInContext(src.slice(src.indexOf(" let activeTab='chart';"),src.indexOf(' function setDrawer(')),ctx);
 $('tab-history').onclick();assert.equal($('history-page').hidden,false);assert.equal($('chart-page').hidden,true);assert.equal($('settings-page').hidden,true);assert.equal($('tab-history').attributes['aria-selected'],'true');
 $('tab-history').events.keydown({key:'ArrowRight',preventDefault(){}});assert.equal($('settings-page').hidden,false);
@@ -19,4 +21,4 @@ $('tab-settings').events.keydown({key:'ArrowRight',preventDefault(){}});assert.e
 $('tab-chart').events.keydown({key:'ArrowLeft',preventDefault(){}});assert.equal($('settings-page').hidden,false);
 const nav=html.slice(html.indexOf('<nav id="bottom-tabs"'));assert(nav.indexOf('id="tab-chart"')<nav.indexOf('id="tab-history"'));assert(nav.indexOf('id="tab-history"')<nav.indexOf('id="tab-settings"'));
 assert(css.includes('#activity-totals #activity-recovery,#debt,#cycle-history-rows td:last-child{color:#b8f36a}'));
-console.log('PASS exact source-backed totals, missing/zero values, booked-net colors, history records, three-tab navigation and lime RECOVERY styling');
+console.log('PASS negative RECOVERY, all-closed net, incomplete evidence, exact position prices/times/reasons, no cycle/carry history, three-tab navigation and lime styling');

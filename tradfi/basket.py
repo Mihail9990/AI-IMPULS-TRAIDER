@@ -185,7 +185,7 @@ class BasketController(Controller):
                     try:cost=net_money(ins)
                     except ValueError:self._halt(snap,'OPENING_COSTS_UNKNOWN');return False
                     c['tickets'][pid]=dict(id=pid,command_id=cid,group=g['id'],role=g['role'],side=cmd['side'],entry=str(entry),size=cmd['size'],sl=cmd['sl'],tp=cmd['tp'],index=cmd['basket_index'],opening_net=str(cost),closed=False)
-                    c['realized']=str(number(c['realized'])+cost);c['recovery']=str(max(D(0),-number(c['realized'])));c['opened_ids'].append(pid);changed=True
+                    c['realized']=str(number(c['realized'])+cost);c['recovery']=str(max(D(0),-number(c['realized'])-number(c.get('recovery_waived','0'))));c['opened_ids'].append(pid);changed=True
         if changed:self.save('basket_fills_adopted')
         if any(p['id'] not in c['tickets'] for p in snap['positions']):self._halt(snap,'UNKNOWN_POSITION_IDENTITY');return False
         if len({t['command_id'] for t in c['tickets'].values()})!=len(c['tickets']):self._halt(snap,'MERGED_TICKETS_UNSUPPORTED');return False
@@ -202,7 +202,7 @@ class BasketController(Controller):
                 try:net=net_money(exits)
                 except ValueError:self._halt(snap,'CLOSING_COSTS_UNKNOWN');return False
                 expected=deepcopy(self._durable_state)
-                t.update(closed=True,reason=next(iter(reasons)),exit_net=str(net),exit_facts=[{k:d.get(k) for k in ('id','price','volume','time','reason')} for d in exits]);c['realized']=str(number(c['realized'])+net);c['recovery']=str(max(D(0),-number(c['realized'])))
+                t.update(closed=True,reason=next(iter(reasons)),exit_net=str(net),exit_facts=[{k:d.get(k) for k in ('id','price','volume','time','reason')} for d in exits]);c['realized']=str(number(c['realized'])+net);c['recovery']=str(max(D(0),-number(c['realized'])-number(c.get('recovery_waived','0'))))
                 self.state['seen_deals'].extend(d['id'] for d in exits)
                 for cmd in self.state['commands'].values():
                     if cmd['kind']=='MODIFY' and cmd.get('position_id')==pid and cmd['status'] not in TERMINAL:cmd.update(status='OBSOLETE',closed_by_deals=[d['id'] for d in exits])
@@ -552,7 +552,7 @@ class BasketController(Controller):
                 delta+=net_money([d for d in snap['deals'] if d['entry']=='IN' and d['position_id']==pid])
         c['reset_position_ids']=sorted(positions);self.save('basket_manual_reset_evidence');expected=deepcopy(self._durable_state)
         try:
-            debt=max(D(0),-number(c['realized'])-delta)
+            debt=max(D(0),-number(c['realized'])-delta-number(c.get('recovery_waived','0')))
             self.state['basket_carry']=str(debt)
             self.state['completed'].append(dict(id=c['id'],contract=CONTRACT,recovery_retained=str(debt),written_off_recovery='0',completion='MANUAL_RESET_RETAINED'))
             self.state['seen_deals'].extend(d['id'] for d in fresh)
