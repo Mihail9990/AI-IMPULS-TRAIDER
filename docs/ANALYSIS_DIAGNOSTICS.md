@@ -94,3 +94,44 @@ node tools/test_main_analysis_unit.js
 These use actual source with DOM/HTTP doubles. They are not a live-browser or
 Windows/MT5 verification. A local Chromium attempt was blocked before page load
 by the environment's socket restriction; no screenshot or visual pass is claimed.
+
+
+## Cross-interpreter Windows clock
+
+The previous release ran LIVE on Python 3.13 and analysis on Python 3.12. On Windows,
+`time.monotonic()` changed from GetTickCount64 in 3.12 to QueryPerformanceCounter
+in 3.13. Absolute readings from those clock domains cannot be subtracted across
+IPC. A small negative delta previously produced `TIME_UNVERIFIED` with no bars;
+the next parent proof could already be `READY`, so the two statuses in diagnostics
+could differ without a worker crash.
+
+Analysis now uses its own `analysis_clock()` backed by `time.perf_counter()` for
+proof creation, dispatch, calculation, final publication and all local analysis
+deadlines. This is system-wide QPC on both historical Windows interpreters. The
+current release uses Python 3.13 for both processes, in separate environments;
+the shared clock and regression coverage remain necessary transport guarantees. The
+same owner proof object is used for validation and dispatch, and each response
+uses one captured proof and a subsequent clock sample. The original maximum age,
+negative elapsed rejection, native identity, closed-bar boundaries and retry
+limits remain unchanged. Trading clocks/gates and frontend rendering are not
+modified. Unknown/expired data still fail closed; no last-good chart is disguised
+as current. `received_at` remains an untrusted display wall-clock timestamp.
+
+An offline operator probe, using already-installed interpreters and no MT5:
+
+```
+py -3.13 tools/check_analysis_clock.py --worker-python .venv-analysis-313/Scripts/python.exe
+```
+
+Use the actual analysis environment path for a managed release. The probe reports
+Python versions, clock implementations and whether the child sample falls inside
+the parent round trip. It never installs software, reads LIVE configuration,
+opens a terminal, sends orders, or changes the system clock. A Linux pass does
+not verify Windows or the live installation. Fully stop/restart the service after
+an update so both processes use the same release code.
+
+`MISSING_LAST_CLOSED_PERIOD` is separate: a native M1 history ending one minute
+before the expected close remains `STALE`. Missing bars are never synthesized.
+
+Sources: [Python 3.13 clock change](https://docs.python.org/3.13/whatsnew/3.13.html#time)
+and [Python 3.12 perf_counter](https://docs.python.org/3.12/library/time.html#time.perf_counter).

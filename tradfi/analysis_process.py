@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import struct
 import subprocess
+import sys
 
 COMMAND_LIMIT = 2048
 
@@ -13,14 +14,16 @@ def validate_python(value):
     if not isinstance(value, str) or value.startswith(('\\\\', '//')):
         raise ValueError('ANALYSIS_LOCAL_PATH_REQUIRED')
     path = Path(value)
-    if not path.is_absolute() or not path.is_file() or path.name.lower() not in {'python', 'python.exe', 'python3', 'python3.12'}:
+    if not path.is_absolute() or not path.is_file() or path.name.lower() not in {'python', 'python.exe', 'python3', 'python3.13'}:
         raise ValueError('ANALYSIS_PYTHON_INVALID')
     if path.parent.name not in {'Scripts', 'bin'}: raise ValueError('ANALYSIS_VENV_REQUIRED')
+    if path.parent.parent.resolve() == Path(sys.prefix).resolve():
+        raise ValueError('ANALYSIS_TARGET_MUST_BE_SEPARATE')
     cfg = path.parent.parent / 'pyvenv.cfg'
     if not cfg.is_file() or cfg.stat().st_size > 8192: raise ValueError('ANALYSIS_VENV_REQUIRED')
     settings = dict(line.lower().strip().split(' = ', 1) for line in cfg.read_text().splitlines() if ' = ' in line)
     if settings.get('include-system-site-packages') != 'false': raise ValueError('ANALYSIS_ISOLATION_REQUIRED')
-    if not settings.get('version', '').startswith('3.12.'): raise ValueError('ANALYSIS_PYTHON_312_REQUIRED')
+    if not settings.get('version', '').startswith('3.13.'): raise ValueError('ANALYSIS_PYTHON_313_REQUIRED')
     return str(path)
 
 

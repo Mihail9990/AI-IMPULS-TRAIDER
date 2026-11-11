@@ -15,6 +15,7 @@ def main():
     sys.stdout = null
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from tradfi.analysis_process import COMMAND_LIMIT
+    from tradfi.analysis_runtime import supported_runtime
     from tradfi.analysis_service import RESULT_LIMIT, _worker
 
     class Input:
@@ -33,7 +34,7 @@ def main():
     config = incoming.get()
     required = {'terminal_path', 'symbol', 'expected_login', 'expected_server', 'time_mode', 'offset'}
     if not isinstance(config, dict) or set(config) != required: raise ValueError('INVALID_CONFIG')
-    if sys.version_info[:2] != (3, 12) or struct.calcsize('P') != 8: raise ValueError('PYTHON_312_X64_REQUIRED')
+    if not supported_runtime(): raise ValueError('PYTHON_313_X64_GIL_REQUIRED')
     _worker(config, incoming, Output())
 
 

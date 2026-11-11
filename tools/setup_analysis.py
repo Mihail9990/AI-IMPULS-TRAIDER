@@ -1,4 +1,4 @@
-"""Explicit operator setup for isolated Windows Python 3.12 x64 analytics.
+"""Explicit operator setup for isolated Windows Python 3.13 x64 analytics.
 
 Never invoked by the LIVE installer. No trading configuration, broker calls,
 terminal initialization or automatic panel launch is performed here.
@@ -9,9 +9,11 @@ import re
 import json
 import os
 from pathlib import Path
-import struct
 import subprocess
 import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tradfi.analysis_runtime import VENV_DIRECTORY, supported_runtime
 
 
 def run(args, env):
@@ -34,24 +36,25 @@ def resolve_target(managed_root, local_root):
     if not contract.is_file() or contract.stat().st_size > 8192: raise ValueError('INVALID_RELEASE_CONTRACT')
     if json.loads(contract.read_text()) != {'format': 2, 'roles': ['live'], 'layout': 'independent_roots_v1'}:
         raise ValueError('INVALID_RELEASE_CONTRACT')
-    for required in ('requirements-analysis.txt', 'tools/check_analysis_dependencies.py', 'tradfi/analysis_process.py', 'tools/analysis_worker.py'):
+    for required in ('requirements-analysis.txt', 'tools/check_analysis_dependencies.py', 'tradfi/analysis_process.py', 'tradfi/analysis_runtime.py', 'tools/analysis_worker.py'):
         if not (code / required).is_file(): raise ValueError('ACTIVE_RELEASE_HAS_NO_ANALYSIS_SUPPORT')
     return code, (pointer, sha)
 
 
 def main(argv=None):
-    if sys.platform != 'win32' or sys.version_info[:2] != (3, 12) or struct.calcsize('P') != 8:
-        print('Requires separately installed official Python 3.12 x64 on Windows. LIVE Python is not modified.')
+    if sys.platform != 'win32' or not supported_runtime():
+        print('Requires standard CPython 3.13 x64 on Windows (not free-threaded). LIVE Python is not modified.')
         return 2
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--managed-root', help='Explicit absolute AI_IMPULS_LIVE install root; reads current.json only.')
     args = parser.parse_args(argv)
     root, binding = resolve_target(args.managed_root, Path(__file__).resolve().parents[1])
-    print('Optional analysis target: ' + str(root / '.venv-analysis'))
+    print('Optional analysis target: ' + str(root / VENV_DIRECTORY))
+    print('The previous .venv-analysis and LIVE environment are preserved.')
     sys.path.insert(0, str(root))
     from tradfi.analysis_process import clean_environment, validate_python
     env = clean_environment();env['PIP_CONFIG_FILE'] = os.devnull
-    target = root / '.venv-analysis'
+    target = root / VENV_DIRECTORY
     python = target / 'Scripts' / 'python.exe'
     requirements = root / 'requirements-analysis.txt'
     if target.is_symlink() or (hasattr(target, 'is_junction') and target.is_junction()):
@@ -71,7 +74,7 @@ def main(argv=None):
     if binding and json.loads(binding[0].read_text()).get('current') != binding[1]:
         raise ValueError('ACTIVE_RELEASE_CHANGED_DURING_SETUP')
     # Marker is evidence only; it never enables trading or modifies config.
-    marker = {'python': '3.12', 'bits': 64, 'synthetic_smoke_passed': True,
+    marker = {'python': '3.13', 'bits': 64, 'synthetic_smoke_passed': True,
               'requirements_sha256': hashlib.sha256(requirements.read_bytes()).hexdigest(),
               'terminal_connected': False}
     (target / 'analysis-smoke.json').write_text(json.dumps(marker, indent=2), encoding='utf-8')

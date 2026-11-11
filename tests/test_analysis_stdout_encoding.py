@@ -58,7 +58,7 @@ class VendorStdoutEncodingTests(unittest.TestCase):
                     patch.object(analysis_worker.os, 'dup2'), \
                     patch.object(analysis_worker.sys, 'stdout', stdout), \
                     patch.object(analysis_worker.sys, 'stdin', stdin), \
-                    patch.object(analysis_worker.sys, 'version_info', (3, 12, 0)), \
+                    patch.object(analysis_worker.sys, 'version_info', (3, 13, 0)), \
                     patch('tradfi.analysis_service._worker', side_effect=fake_worker):
                 try:
                     analysis_worker.main()

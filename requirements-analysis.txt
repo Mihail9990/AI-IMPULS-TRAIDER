@@ -1,5 +1,5 @@
-# Optional isolated Python 3.12 x64 analysis environment.
-# Resolved and smoke-tested on Linux; Windows wheels checked separately.
+# Optional isolated standard CPython 3.13 x64 analysis environment.
+# Exact pins smoke-tested on Linux 3.13; Windows cp313 wheels resolved separately.
 # Never install into the LIVE Python environment.
 contourpy==1.4.0
 cycler==0.12.1

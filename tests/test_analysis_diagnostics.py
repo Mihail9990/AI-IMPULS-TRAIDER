@@ -3,7 +3,7 @@ import json
 import unittest
 from test_tradfi_analysis_service import API, CONFIG, NOW, proof
 import test_tradfi_analysis_service as source_tests
-from tradfi.analysis_service import calculate
+from tradfi.analysis_service import calculate, analysis_clock
 from tradfi.context_diagnostics import project
 from tradfi.web_logs import stable_context
 
@@ -62,7 +62,7 @@ class DiagnosticsTests(unittest.TestCase):
         service = AnalysisService(source_tests.ServiceTests().broker())
         service.enabled = True
         service.thread = object()
-        service.proof = dict(proof(), monotonic=time.monotonic())
+        service.proof = dict(proof(), monotonic=analysis_clock())
         for reason in ('PROOF_EXPIRED_DURING_CALCULATION', 'PROOF_EXPIRED_BEFORE_PUBLISH'):
             cached = empty_snapshot('XAUUSD.s', 'M1', 'STALE')
             cached.update(closed_through=NOW, bars=[{'utc_time': NOW-60}],
@@ -110,8 +110,8 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertEqual(diag['last_failure_reason'], 'ANALYSIS_SOURCE_UNAVAILABLE')
         service = AnalysisService(source_tests.ServiceTests().broker())
         service.cache = values
-        service.proof = dict(proof(), monotonic=time.monotonic())
-        service.received_mono = time.monotonic()-3
+        service.proof = dict(proof(), monotonic=analysis_clock())
+        service.received_mono = analysis_clock()-3
         rows = project({'analysis': service.diagnostic_view()})['analysis']
         self.assertEqual(rows[0]['current_proof_status'], 'READY')
         self.assertEqual(rows[0]['error_code'], 'HISTORY_UNAVAILABLE')

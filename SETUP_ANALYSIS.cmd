@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-py -3.12 -I tools\setup_analysis.py %*
+py -3.13 -I tools\setup_analysis.py %*
 if errorlevel 1 (
   echo Analysis setup failed. LIVE Python and trading settings were not changed.
   pause

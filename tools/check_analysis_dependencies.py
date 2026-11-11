@@ -18,6 +18,9 @@ from pathlib import Path
 import struct
 import sys
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tradfi.analysis_runtime import supported_runtime
+
 PACKAGES = {'talib': 'TA-Lib', 'smc': 'smartmoneyconcepts', 'trendln': 'trendln'}
 
 
@@ -93,7 +96,8 @@ def main(argv=None):
     passed = all(value['status'] == 'PRESENT' for value in report['modules'].values())
     if args.require_lock:
         report['lock'] = inspect_lock()
-        passed = passed and report['lock']['matches'] and sys.version_info[:2] == (3, 12) and report['bits'] == 64
+        report['runtime_supported'] = supported_runtime()
+        passed = passed and report['lock']['matches'] and report['runtime_supported']
     if args.smoke:
         try:
             report['smoke'] = smoke_check()

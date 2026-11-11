@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from tradfi.analysis_service import (AnalysisService, TIMEFRAMES, calculate,
-    empty_snapshot, proof_status, read_bars)
+    empty_snapshot, proof_status, read_bars, analysis_clock)
 from tradfi.control import OwnerMailbox
 from tradfi.web_control import WebTransport
 
@@ -164,7 +164,7 @@ class ServiceTests(unittest.TestCase):
             service.close()
     def test_timeframe_rollover_marks_old_cache_stale(self):
         service=AnalysisService(self.broker());service.enabled=True;service.thread=object()
-        p=proof();p['utc']=NOW+61;p['monotonic']=time.monotonic();service.proof=p
+        p=proof();p['utc']=NOW+61;p['monotonic']=analysis_clock();service.proof=p
         item=empty_snapshot('XAUUSD.s','M1','READY')
         item.update(bars=[{'raw_time':NOW+7200-60,'utc_time':NOW-60}],closed_through=NOW)
         service.cache={'M1':item}
@@ -178,7 +178,7 @@ class ServiceTests(unittest.TestCase):
     def test_cached_result_expires_without_owner_tick(self):
         service=AnalysisService(self.broker());service.enabled=True
         service.thread=object() # no actual supervisor
-        service.proof=proof();service.proof['monotonic']=time.monotonic()-6
+        service.proof=proof();service.proof['monotonic']=analysis_clock()-6
         service.cache={'M1':empty_snapshot('XAUUSD.s','M1','READY')}
         self.assertEqual(service.view('M1')['status'],'STALE')
 
@@ -234,7 +234,7 @@ class ServiceTests(unittest.TestCase):
         service.close()
         self.assertFalse(thread.is_alive());self.assertEqual(len(context.processes),3)
         self.assertTrue(all(not process.is_alive() for process in context.processes))
-        self.assertGreater(service.retry_after,time.monotonic())
+        self.assertGreater(service.retry_after,analysis_clock())
         self.assertEqual(service.supervisor['supervisor_state'], 'RETRY_EXHAUSTED')
         self.assertEqual(service.supervisor['failures'], 3)
 

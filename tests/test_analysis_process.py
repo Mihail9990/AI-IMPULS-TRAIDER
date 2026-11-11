@@ -21,15 +21,15 @@ class ProcessContractTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
         self.exe=self.root/'Scripts'/'python.exe';self.exe.parent.mkdir();self.exe.write_bytes(b'offline test only')
-        (self.root/'pyvenv.cfg').write_text('version = 3.12.14\ninclude-system-site-packages = false\n')
+        (self.root/'pyvenv.cfg').write_text('version = 3.13.5\ninclude-system-site-packages = false\n')
     def tearDown(self):self.temp.cleanup()
     def test_exact_isolated_venv_validation(self):
         self.assertEqual(validate_python(str(self.exe)),str(self.exe))
         for value in ('python',str(self.root/'missing.exe'),str(self.root)):
             with self.assertRaises(ValueError):validate_python(value)
-        (self.root/'pyvenv.cfg').write_text('version = 3.13.5\ninclude-system-site-packages = false\n')
+        (self.root/'pyvenv.cfg').write_text('version = 3.12.14\ninclude-system-site-packages = false\n')
         with self.assertRaises(ValueError):validate_python(str(self.exe))
-        (self.root/'pyvenv.cfg').write_text('version = 3.12.14\ninclude-system-site-packages = true\n')
+        (self.root/'pyvenv.cfg').write_text('version = 3.13.5\ninclude-system-site-packages = true\n')
         with self.assertRaises(ValueError):validate_python(str(self.exe))
     def test_subprocess_argv_isolated_no_shell_no_environment_contamination(self):
         fake=MagicMock();fake.stdin=io.BytesIO();fake.stdout=io.BytesIO()
@@ -98,7 +98,7 @@ class ProcessContractTests(unittest.TestCase):
         sha='a'*40;code=self.root/'releases'/sha/'code';code.mkdir(parents=True)
         pointer=self.root/'current.json';pointer.write_text(json.dumps({'current':sha,'previous':None}))
         (code/'independent-install-contract.json').write_text(json.dumps({'format':2,'roles':['live'],'layout':'independent_roots_v1'}))
-        for name in ('requirements-analysis.txt','tools/check_analysis_dependencies.py','tradfi/analysis_process.py','tools/analysis_worker.py'):
+        for name in ('requirements-analysis.txt','tools/check_analysis_dependencies.py','tradfi/analysis_process.py','tradfi/analysis_runtime.py','tools/analysis_worker.py'):
             file=code/name;file.parent.mkdir(parents=True,exist_ok=True);file.write_text('offline fixture')
         target,binding=resolve_target(str(self.root),Path('/unused'))
         self.assertEqual(target,code);self.assertEqual(binding,(pointer,sha))

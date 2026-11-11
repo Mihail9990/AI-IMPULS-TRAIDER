@@ -20,6 +20,17 @@ BAR_LIMIT = 500
 RESULT_LIMIT = 4 * 1024 * 1024
 
 
+def analysis_clock():
+    """One system-wide monotonic domain for analytics owner and child.
+
+    Windows Python 3.12 monotonic uses GetTickCount64; 3.13 uses QPC.
+    Their absolute samples must never cross IPC for subtraction. perf_counter
+    uses system-wide QPC on both supported Windows interpreters (3.10+).
+    Keep this clock local to read-only analysis; no trading clock is changed.
+    """
+    return time.perf_counter()
+
+
 def empty_snapshot(symbol, timeframe, status='WARMING_UP', reason=None):
     value = dict(schema='analysis_v1', status=status, symbol=symbol,
                  timeframe=timeframe, source='MT5', generated_at=None, as_of=None,
@@ -65,7 +76,7 @@ def proof_diagnostics(proof, mono):
 
 
 def elapsed_ms(start):
-    return round((time.monotonic() - start) * 1000, 3)
+    return round((analysis_clock() - start) * 1000, 3)
 
 
 def read_bars(api, config, timeframe, now):
@@ -114,7 +125,7 @@ def identity_matches(api, config):
 
 def calculate(api, config, proof, cache, *, mono=None, analyzer=None, retry_state=None):
     """Pure orchestration around an injected read-only API, usable offline."""
-    started = time.monotonic()
+    started = analysis_clock()
     mono = started if mono is None else mono
     state = proof_status(proof, mono)
     if state != 'READY':
@@ -140,7 +151,7 @@ def calculate(api, config, proof, cache, *, mono=None, analyzer=None, retry_stat
                 # Closed history is immutable for this polling interval. Vendor
                 # corrections are picked up at the next native candle close.
                 value = deepcopy(previous)
-                value['status'] = proof_status(proof, mono + time.monotonic() - started)
+                value['status'] = proof_status(proof, mono + analysis_clock() - started)
                 diagnostic.update(cache_reused=True, reason='CACHE_REUSED', actual_closed_through=value.get('closed_through'), total_ms=elapsed_ms(started))
                 value['diagnostics'] = diagnostic
                 result[tf] = value
@@ -156,10 +167,10 @@ def calculate(api, config, proof, cache, *, mono=None, analyzer=None, retry_stat
                 diagnostic.update(reason='HISTORY_RETRY_WAIT', retry_in_seconds=max(0, retry['after']-mono), actual_closed_through=result[tf].get('closed_through'))
                 result[tf]['diagnostics'] = diagnostic
                 continue
-            phase_started = time.monotonic()
+            phase_started = analysis_clock()
             bars = read_bars(api, config, tf, now)
             diagnostic.update(history_ms=elapsed_ms(phase_started), bar_count=len(bars), actual_closed_through=bars[-1]['utc_time']+duration)
-            if proof_status(proof, mono + time.monotonic() - started) != 'READY':
+            if proof_status(proof, mono + analysis_clock() - started) != 'READY':
                 result[tf] = empty_snapshot(config['symbol'], tf, 'STALE')
                 diagnostic.update(reason='PROOF_EXPIRED_DURING_HISTORY', total_ms=elapsed_ms(started))
                 result[tf]['diagnostics'] = diagnostic
@@ -179,7 +190,7 @@ def calculate(api, config, proof, cache, *, mono=None, analyzer=None, retry_stat
                     from .analysis_adapters import analyze_bars
                     analyzer = analyze_bars
                 stage = 'CALCULATION'
-                phase_started = time.monotonic()
+                phase_started = analysis_clock()
                 value.update(analyzer(bars, tf, now))
                 diagnostic['calculation_ms'] = elapsed_ms(phase_started)
                 value['notes'].append('История использует заданное фиксированное смещение времени MT5, без автоматической сезонной поправки. Для старой истории смещение не проверялось отдельно.')
@@ -190,7 +201,7 @@ def calculate(api, config, proof, cache, *, mono=None, analyzer=None, retry_stat
                 retry_state[tf] = dict(instance=proof['instance'], after=mono + 5)
             else:
                 retry_state.pop(tf, None)
-            final_status = proof_status(proof, mono + time.monotonic() - started)
+            final_status = proof_status(proof, mono + analysis_clock() - started)
             if final_status != 'READY': value['status'] = final_status
             diagnostic.update(reason=('PROOF_EXPIRED_DURING_CALCULATION' if final_status != 'READY' else 'MISSING_LAST_CLOSED_PERIOD' if value['status'] == 'STALE' else 'CACHE_REUSED' if diagnostic['cache_reused'] else 'CALCULATED'), total_ms=elapsed_ms(started))
             value['diagnostics'] = diagnostic
@@ -218,12 +229,12 @@ def _worker(config, incoming, outgoing):
             proof = incoming.get()
             if proof is None: break
             cache = calculate(api, config, proof, cache, retry_state=retry_state)
-            final_status = proof_status(proof, time.monotonic())
+            final_status = proof_status(proof, analysis_clock())
             if final_status != 'READY':
                 for value in cache.values():
                     value['status'] = final_status
                     diagnostic = value.setdefault('diagnostics', {})
-                    diagnostic.update(proof_diagnostics(proof, time.monotonic()), reason='PROOF_EXPIRED_BEFORE_PUBLISH')
+                    diagnostic.update(proof_diagnostics(proof, analysis_clock()), reason='PROOF_EXPIRED_BEFORE_PUBLISH')
             payload = json.dumps(cache, allow_nan=False).encode('utf-8')
             if len(payload) > RESULT_LIMIT: raise ValueError('RESULT_LIMIT')
             outgoing.send_bytes(payload)
@@ -288,7 +299,8 @@ class AnalysisService:
         if configured_python is not None or (os.name == 'nt' and not getattr(broker.api, 'is_test_binding', False)):
             from pathlib import Path
             from .analysis_process import validate_python
-            candidate = configured_python or str(Path(__file__).resolve().parents[1] / '.venv-analysis' / 'Scripts' / 'python.exe')
+            from .analysis_runtime import VENV_DIRECTORY
+            candidate = configured_python or str(Path(__file__).resolve().parents[1] / VENV_DIRECTORY / 'Scripts' / 'python.exe')
             try: self.external_python = validate_python(candidate)
             except Exception:
                 self.enabled = False
@@ -317,14 +329,14 @@ class AnalysisService:
             if not math.isfinite(age) or not math.isfinite(utc): raise ValueError()
             self.proof = dict(connected=feed.get('connected', False), status=feed.get('status'),
                               timestamp_semantics=feed.get('timestamp_semantics'),
-                              monotonic=time.monotonic(), utc=utc, age=age,
+                              monotonic=analysis_clock(), utc=utc, age=age,
                               max_age=self.max_age, instance=feed.get('instance'))
         except Exception:
             self.proof = None
 
     def view(self, timeframe):
         if timeframe not in TIMEFRAMES: raise ValueError('INVALID_TIMEFRAME')
-        self.last_access = time.monotonic()
+        self.last_access = analysis_clock()
         if self.enabled and not self.stop.is_set() and self.thread is None and self.last_access >= self.retry_after:
             with self.start_lock:
                 if self.thread is None:
@@ -333,10 +345,14 @@ class AnalysisService:
                     except Exception:
                         self.thread = None
                         self.failure = 'UNAVAILABLE'
-                        self.retry_after = time.monotonic() + 60
+                        self.retry_after = analysis_clock() + 60
                         self.supervisor = dict(supervisor_state='RETRY_WAIT', failures=1, error_code='SUPERVISOR_START_FAILED')
         value = deepcopy(self.cache.get(timeframe) or empty_snapshot(self.config['symbol'], timeframe))
-        status = proof_status(self.proof, time.monotonic())
+        # observe() replaces the whole proof. Never mix two observations or
+        # compare a new proof against a clock sampled before that observation.
+        proof = self.proof
+        mono = analysis_clock()
+        status = proof_status(proof, mono)
         if not self.enabled:
             status = 'UNAVAILABLE'
             if self.unavailable_reason:
@@ -344,23 +360,23 @@ class AnalysisService:
                 value['notes'] = ['Запустите отдельную установку аналитики SETUP_ANALYSIS.cmd; торговая среда не меняется.']
         elif self.failure: status = self.failure
         elif status == 'READY': status = value['status']
-        if value['feed_instance'] and self.proof and value['feed_instance'] != self.proof['instance']:
+        if value['feed_instance'] and proof and value['feed_instance'] != proof['instance']:
             value = empty_snapshot(self.config['symbol'], timeframe)
             status = 'WARMING_UP'
-        if status == 'READY' and value['bars'] and self.proof:
-            now = self.proof['utc'] + time.monotonic() - self.proof['monotonic']
+        if status == 'READY' and value['bars'] and proof:
+            now = proof['utc'] + mono - proof['monotonic']
             offset = self.config['offset']
             expected = math.floor((now + offset) / TIMEFRAMES[timeframe]) * TIMEFRAMES[timeframe] - offset
             if value['closed_through'] < expected: status = 'STALE'
         value['status'] = status
         diagnostic = dict(value.get('diagnostics', {}))
         diagnostic.update(self.supervisor)
-        diagnostic.update(proof_diagnostics(self.proof, time.monotonic()))
+        diagnostic.update(proof_diagnostics(proof, mono))
         diagnostic.update(generated_at=value.get('generated_at'), received_at=self.received_at,
-                          cache_age_seconds=max(0, time.monotonic()-self.received_mono) if self.received_mono is not None else None,
-                          supervisor_retry_in_seconds=max(0, self.retry_after-time.monotonic()))
-        if self.proof:
-            now = self.proof['utc'] + time.monotonic() - self.proof['monotonic']
+                          cache_age_seconds=max(0, mono-self.received_mono) if self.received_mono is not None else None,
+                          supervisor_retry_in_seconds=max(0, self.retry_after-mono))
+        if proof:
+            now = proof['utc'] + mono - proof['monotonic']
             duration = TIMEFRAMES[timeframe]
             diagnostic['expected_closed_through'] = math.floor((now+self.config['offset'])/duration)*duration-self.config['offset']
         diagnostic['actual_closed_through'] = value.get('closed_through')
@@ -378,9 +394,9 @@ class AnalysisService:
 
     def diagnostic_view(self):
         # Fixed four-row cached projection only. Never calls view/start/MT5/IPC.
-        cache, supervisor = self.cache, self.supervisor
-        mono = time.monotonic()
-        current_proof = proof_diagnostics(self.proof, mono)
+        cache, supervisor, proof = self.cache, self.supervisor, self.proof
+        mono = analysis_clock()
+        current_proof = proof_diagnostics(proof, mono)
         rows = []
         for tf in TIMEFRAMES:
             value = cache.get(tf, {})
@@ -421,11 +437,11 @@ class AnalysisService:
                                           name='analysis-result-reader', daemon=True)
                 reader.start()
                 pending = None
-                launched = time.monotonic()
+                launched = analysis_clock()
                 received = False
                 next_send = 0
                 while not self.stop.wait(.05):
-                    now = time.monotonic()
+                    now = analysis_clock()
                     if now - self.last_access > 60: break
                     if not process.is_alive(): raise RuntimeError('WORKER_EXITED')
                     if not received and now - launched > self.timeout: raise TimeoutError('STARTUP_TIMEOUT')
@@ -443,10 +459,14 @@ class AnalysisService:
                             next_send = now + 1
                         except queue.Empty:
                             if now - pending > self.timeout: raise TimeoutError('RESPONSE_TIMEOUT')
-                    elif now >= next_send and proof_status(self.proof, now) == 'READY':
-                        incoming.put_nowait(self.proof)
-                        pending = now
-                        self.supervisor = dict(supervisor_state='WAITING', failures=failures)
+                    elif now >= next_send:
+                        # Validate and send the same immutable owner observation.
+                        proof = self.proof
+                        dispatched = analysis_clock()
+                        if proof_status(proof, dispatched) == 'READY':
+                            incoming.put_nowait(proof)
+                            pending = dispatched
+                            self.supervisor = dict(supervisor_state='WAITING', failures=failures)
             except Exception as exc:
                 failures += 1
                 self.supervisor = dict(supervisor_state='RETRY_WAIT', failures=failures, error_code=safe_error(exc))
@@ -487,9 +507,9 @@ class AnalysisService:
                 self.failure = 'UNAVAILABLE'
                 self.supervisor = dict(supervisor_state='CLEANUP_FAILED', failures=failures)
                 break
-            if time.monotonic() - self.last_access > 60 or self.stop.wait(5): break
+            if analysis_clock() - self.last_access > 60 or self.stop.wait(5): break
         if failures >= 3:
-            self.retry_after = time.monotonic() + 60
+            self.retry_after = analysis_clock() + 60
             self.supervisor = dict(self.supervisor, supervisor_state='RETRY_EXHAUSTED')
         if self.stop.is_set():
             self.supervisor = dict(self.supervisor, supervisor_state='STOPPED')
