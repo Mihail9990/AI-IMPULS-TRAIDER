@@ -137,6 +137,8 @@ class NativePanel:
         self.mailbox.drain(self.gateway,self.view)
         try:
             diagnostic_view=self.mailbox.view()
+            if hasattr(self.analysis, 'diagnostic_view'):
+                diagnostic_view['analysis'] = self.analysis.diagnostic_view()
             elapsed=(time.perf_counter()-step_start)*1000
             diagnostic_view['timings']={'snapshot_ms':snapshot_ms,'publish_ms':elapsed,'capture_ms':self.logs.last_capture_ms}
             diagnostic_view['latency_band']='SLOW_2000MS' if elapsed>=2000 else 'SLOW_500MS' if elapsed>=500 else 'NORMAL'
@@ -209,7 +211,7 @@ class NativePanel:
             def do_POST(self):self.handle_call()
             def handle_call(self):
                 route=urlsplit(self.path).path
-                static={'/':('index.html','text/html'),'/analysis.js':('analysis.js','text/javascript'),'/panel.js':('panel.js','text/javascript'),'/panel.css':('panel.css','text/css')}
+                static={'/':('index.html','text/html'),'/analysis.js':('analysis.js','text/javascript'),'/diagnostics.js':('diagnostics.js','text/javascript'),'/panel.js':('panel.js','text/javascript'),'/panel.css':('panel.css','text/css')}
                 if self.command=='GET' and route in static and self.headers.get('Host')==authority:
                     filename,mime=static[route];body=(ROOT/filename).read_bytes()
                     if filename=='index.html':body=panel_html(body,transport.role)

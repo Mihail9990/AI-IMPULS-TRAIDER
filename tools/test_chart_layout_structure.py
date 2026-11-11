@@ -45,3 +45,18 @@ for id in ('writeoff-history','cycle-history-rows'):assert id not in p.nodes
 assert inside('activity-recovery','bot-activity') and inside('activity-total-net','bot-activity')
 
 assert inside('v3-link-status','drawer-content') and not inside('v3-link-toggle','v3-entry-panel')
+
+# Two full-height rows, not two long scrolling cards or a desktop-only split.
+for id in ('patterns','structure'):
+    assert inside(id+'-chart','analysis-page')
+    assert inside(id+'-timeframe','analysis-page')
+    assert not inside(id+'-status',id+'-chart')
+    assert p.nodes[id+'-chart'][1]['aria-label']
+for id in ('liquidity-visible','main-trend','main-analysis-status'):
+    assert inside(id,'chart-page') and not inside(id,'chart')
+css=(ROOT/'panel.css').read_text()
+analysis_css=css[css.index('/* Both analysis charts'): ]
+assert 'grid-template-rows:repeat(2,minmax(0,1fr))' in analysis_css
+assert 'grid-template-columns:repeat(2' not in analysis_css
+assert 'analysis-license' not in (ROOT/'index.html').read_text()
+print('PASS static equal analysis rows, external status/control locations and removed permanent license paragraph. Browser geometry NOT verified.')

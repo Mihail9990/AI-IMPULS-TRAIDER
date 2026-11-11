@@ -181,12 +181,21 @@ body{background:var(--bg)}main{padding:0;max-width:none}#login{max-width:480px;m
 #v3-panels #v3-entry-panel .entry-actions button,#v3-panels #v3-sl-confirm{white-space:normal;overflow-wrap:anywhere;font-size:12px}
 #bot-activity #bot-activity-state,#bot-activity p[data-tone=info]{color:#83c3ff;font-weight:700}
 
-/* Read-only analysis is separate from the trading chart and its gesture handlers. */
-#analysis-page{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;padding:16px 12px;width:100%;box-sizing:border-box}
-#analysis-page h1{font-size:24px;margin:4px 0}#analysis-page>p{font-size:13px;color:#b5c5d5}
-.analysis-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:14px}.analysis-card{min-width:0;margin:0;padding:12px}
-.analysis-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}.analysis-heading h2{font-size:17px;margin:0}.analysis-heading label{flex:0 0 80px;font-size:12px}.analysis-heading select{width:100%;min-height:44px}
-.analysis-card svg{display:block;width:100%;height:auto;background:#10151c;border:1px solid #35465a;border-radius:8px}
-.analysis-card p,.analysis-card li{font-size:12px;overflow-wrap:anywhere}.analysis-meta{color:#a4b9cc;white-space:pre-line}.analysis-legend{color:#b5c5d5}.analysis-card [data-tone=warning]{color:#ffd18a}.analysis-card summary{cursor:pointer;min-height:44px}.analysis-card ul{max-height:220px;overflow:auto;padding-left:20px}.analysis-license{border-left:3px solid #d4a45d;padding:8px 12px}
+/* Both analysis charts always share the available screen equally, including phones. */
+#analysis-page{flex:1;min-height:0;overflow:hidden;width:100%}
+.analysis-grid{height:100%;display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:repeat(2,minmax(0,1fr));gap:0}
+.analysis-card{min-width:0;min-height:0;overflow:hidden;display:flex;flex-direction:column;padding:0 6px;border-bottom:1px solid var(--line)}
+.analysis-heading{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:44px}
+.analysis-heading h2{font-size:14px;margin:0}.analysis-heading select{width:76px;min-height:36px;padding:4px 6px;font-size:13px}
+.analysis-canvas{position:relative;flex:1;min-height:0;overflow:hidden;background:#08090b}
+.analysis-canvas>svg{position:absolute;inset:0;display:block;width:100%;height:100%}
+.analysis-card p,.analysis-card li{font-size:12px;overflow-wrap:anywhere}.analysis-card>p{flex:0 0 auto;max-height:3em;overflow:auto;margin:0;color:#ffd18a}
+.analysis-meta{color:#a4b9cc;white-space:pre-line}.analysis-info{flex:0 0 auto;max-height:40%;overflow:auto;border-top:1px solid var(--line)}
+.analysis-info summary{cursor:pointer;min-height:28px;padding:3px 2px;font-size:12px;color:#a4b9cc}.analysis-info>div{padding:4px 6px}.analysis-info ul{padding-left:20px}
+#main-analysis-controls{display:flex;align-items:center;gap:12px;flex:0 0 auto;flex-wrap:wrap;padding:0 8px;border-bottom:1px solid var(--line)}
+#main-analysis-controls label{display:flex;align-items:center;gap:5px;margin:0;min-height:44px;font-size:12px}
+#main-analysis-controls input{width:18px;min-height:18px;height:18px;margin:0;padding:0}
+#main-analysis-info{margin-left:auto;font-size:13px}#main-analysis-info summary{cursor:pointer;min-height:36px;padding:7px;list-style:none}
+#main-analysis-info[open]{flex-basis:100%;margin:0;max-height:24vh;overflow:auto}#main-analysis-info p{font-size:12px;margin:4px}
+#main-analysis-status{flex:0 0 auto;margin:0;padding:2px 8px;max-height:3em;overflow:auto;font-size:12px;color:#ffd18a}
 #bottom-tabs button{width:25%}#tab-analysis::before{content:'⌁'}
-@media(min-width:1100px){.analysis-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}

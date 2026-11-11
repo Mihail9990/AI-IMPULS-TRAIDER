@@ -208,6 +208,7 @@ class ServiceTests(unittest.TestCase):
             deadline=time.monotonic()+4
             while service.failure is None and time.monotonic()<deadline:time.sleep(.02)
             self.assertEqual(service.failure,'UNAVAILABLE')
+            self.assertIn(service.supervisor['error_code'], {'STARTUP_TIMEOUT', 'RESPONSE_TIMEOUT', 'WORKER_EXITED', 'IPC_READ_FAILED'})
             started=time.monotonic();service.close()
             self.assertLess(time.monotonic()-started,2)
             self.assertFalse(thread.is_alive())
@@ -234,6 +235,8 @@ class ServiceTests(unittest.TestCase):
         self.assertFalse(thread.is_alive());self.assertEqual(len(context.processes),3)
         self.assertTrue(all(not process.is_alive() for process in context.processes))
         self.assertGreater(service.retry_after,time.monotonic())
+        self.assertEqual(service.supervisor['supervisor_state'], 'RETRY_EXHAUSTED')
+        self.assertEqual(service.supervisor['failures'], 3)
 
     def test_optional_startup_failure_does_not_break_panel(self):
         from tradfi.web_control import NativePanel

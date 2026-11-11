@@ -32,7 +32,7 @@ async function assertQuoteGutter(page){
     if(u.pathname.endsWith('/state'))return route.fulfill({json:state});
     if(u.pathname.endsWith('/action')){actions.push(route.request().postDataJSON());return route.fulfill({json:{status:'APPLIED'}});}
     const name=u.pathname==='/'?'index.html':path.basename(u.pathname);
-    if(['index.html','panel.js','panel.css'].includes(name)){
+    if(['index.html','diagnostics.js','panel.js','panel.css'].includes(name)){
      let body=fs.readFileSync(path.join(root,name),'utf8');
      if(name==='index.html')body=body.replace('__PANEL_ROLE__',paper?'PAPER':'LIVE');
      return route.fulfill({body,contentType:name.endsWith('.js')?'application/javascript':name.endsWith('.css')?'text/css':'text/html'});

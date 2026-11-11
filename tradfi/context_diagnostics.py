@@ -20,6 +20,18 @@ ALLOWED_WORDS |= {'NORMAL','SLOW_500MS','SLOW_2000MS','CHANGE','HEARTBEAT','INIT
 ALLOWED_WORDS |= PHASES | EVENTS | ERROR_TYPES | {'EXTERNAL_UTC_HTTP_STATUS','EXTERNAL_UTC_INCONSISTENT','EXTERNAL_UTC_OFFSET_OR_UNCERTAINTY','EXTERNAL_UTC_RESPONSE','EXTERNAL_UTC_RTT','EXTERNAL_UTC_STALE','EXTERNAL_UTC_TIMEOUT','EXTERNAL_UTC_UNAVAILABLE','EXTERNAL_UTC_UNVERIFIED','INVALID_LOCAL_CLOCK','LOCAL_CLOCK_JUMP','TIME_CHECK_FAILED'}
 BOOLS = {'enabled','ready','paused_gap','stopped','read_only','connected','complete','history_complete','closed','retired','truncated'}
 
+# Bounded analytics metadata only, no bars, feed identity or native messages.
+NUMERIC |= {'generated_at','received_at','cache_age_seconds','proof_age_seconds','current_proof_age_seconds','history_ms','calculation_ms','total_ms','ipc_ms','retry_in_seconds','supervisor_retry_in_seconds','expected_closed_through','actual_closed_through','bar_count','failures'}
+CONTAINERS |= {'analysis','diagnostics'}
+TEXT |= {'timeframe','proof_status','proof_reason','supervisor_state','error_code','current_proof_status','current_proof_reason','last_failure_reason'}
+BOOLS |= {'cache_reused'}
+from .analysis_service import SAFE_ERRORS
+ALLOWED_WORDS |= SAFE_ERRORS | set("""M1 M15 M30 H1 READY UNAVAILABLE WARMING_UP TIME_UNVERIFIED
+PROOF_DISCONNECTED PROOF_TIME_UNVERIFIED PROOF_STALE PROOF_READY CACHE_REUSED HISTORY_RETRY_WAIT
+PROOF_EXPIRED_DURING_HISTORY PROOF_EXPIRED_DURING_CALCULATION PROOF_EXPIRED_BEFORE_PUBLISH MISSING_LAST_CLOSED_PERIOD CALCULATED
+ANALYSIS_SOURCE_UNAVAILABLE ANALYSIS_WORKER_UNAVAILABLE ANALYSIS_ERROR HISTORY CALCULATION STARTING WAITING RETRY_WAIT
+CLEANUP_FAILED RETRY_EXHAUSTED SUPERVISOR_START_FAILED""".split())
+
 def ident(value):
     value=str(value)
     if re.fullmatch(r'hash-[a-f0-9]{16}',value):return value

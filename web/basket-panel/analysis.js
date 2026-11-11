@@ -1,80 +1,194 @@
 'use strict';
+// Pure read-only chart helpers. No broker, action or order APIs.
+const analysisPeriods={M1:60,M15:900,M30:1800,H1:3600};
+const analysisNumber=v=>typeof v!=='boolean'&&v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v));
+function analysisSnapshotError(data){
+ const number=analysisNumber,time=t=>number(t)&&Number(t)>0&&Number(t)<8640000000000;
+ if(data?.schema!=='analysis_v1'||data.source!=='MT5'||!analysisPeriods[data.timeframe])return 'Несовместимый снимок анализа';
+ if(data.timestamp_semantics!=='VERIFIED')return 'Время не подтверждено · свечи скрыты';
+ const bars=data.bars,seconds=analysisPeriods[data.timeframe];
+ if(!Array.isArray(bars)||bars.length>10000||!time(data.as_of)||bars.some((b,i)=>!b||!time(b.utc_time)||!Number.isInteger(Number(b.utc_time))||Number(b.utc_time)+seconds>Number(data.as_of)||['open','high','low','close'].some(k=>!number(b[k])||Number(b[k])<=0)||Number(b.low)>Math.min(Number(b.open),Number(b.close))||Number(b.high)<Math.max(Number(b.open),Number(b.close))||(i>0&&Number(b.utc_time)<=Number(bars[i-1].utc_time))))return 'Некорректный снимок: свечи повреждены, не закрыты или время недопустимо';
+ return '';
+}
+function drawAnalysisOverlays({document,svg,data,groups,tx,y,left,right,top,bottom,figureLabels=false,opacity=.12,zoneColor='#67ddeb',onEvent=()=>{}}){
+ const number=analysisNumber,node=(tag,attrs={},text='')=>{const n=document.createElementNS('http://www.w3.org/2000/svg',tag);for(const[k,v]of Object.entries(attrs))n.setAttribute(k,String(v));n.textContent=String(text);return n;};
+ const clip=node('svg',{x:left,y:top,width:right-left,height:bottom-top,viewBox:left+' '+top+' '+(right-left)+' '+(bottom-top),overflow:'hidden','pointer-events':'none','data-analysis-layer':'true'});
+ let count=0;
+ for(const[key,module]of groups){
+  if(data.modules?.[module]?.status!=='READY')continue;
+  for(const o of (Array.isArray(data.overlays?.[key])?data.overlays[key]:[]).slice(-150)){
+   if(!o||typeof o!=='object')continue;
+   const points=Array.isArray(o.points)?o.points:[];if(points.length>40)continue;
+   const xx=tx(o.start_time??points[0]?.time??o.formed_at),end=tx(o.end_time??points.at(-1)?.time??o.start_time??o.formed_at);
+   const figure=key==='figures',liquidity=o.kind==='liquidity_zone',sweep=o.kind==='liquidity_sweep';
+   const color=figure?'#d5a4ff':liquidity||sweep?zoneColor:['bullish','BUY','BULLISH',1].includes(o.direction)?'#5dd6b0':['bearish','SELL','BEARISH',-1].includes(o.direction)?'#ff8585':'#e6be70';
+   let shape=null;
+   if(points.length>=2){if(points.some(p=>!p||tx(p.time)===null||!number(p.price)||Number(p.price)<=0||!Number.isFinite(y(p.price))))continue;shape=node('polyline',{points:points.map(p=>tx(p.time)+','+y(p.price)).join(' '),fill:'none',stroke:color,'stroke-width':2});}
+   else if(xx!==null&&end!==null&&number(o.top)&&number(o.bottom)&&Number(o.top)>=Number(o.bottom)&&Number(o.bottom)>0)shape=node('rect',{x:Math.min(xx,end),y:y(o.top),width:Math.max(3,Math.abs(end-xx)),height:Math.max(2,Math.abs(y(o.top)-y(o.bottom))),fill:color,'fill-opacity':opacity,stroke:color});
+   else if(xx!==null&&number(o.price)&&Number(o.price)>0){const yy=y(o.price);if(sweep)shape=node('polygon',{points:[[xx,yy-7],[xx+7,yy],[xx,yy+7],[xx-7,yy]].map(p=>p.join(',')).join(' '),fill:'#10151c',stroke:color,'stroke-width':2});else shape=end!==null&&end!==xx?node('line',{x1:xx,x2:end,y1:yy,y2:yy,stroke:color,'stroke-width':2}):node('circle',{cx:xx,cy:yy,r:5,fill:color});}
+   const coordinates=points.length>=2?points.map(p=>tx(p.time)):[xx,end??xx];
+   if(!shape||coordinates.some(v=>v===null||!Number.isFinite(v))||Math.max(...coordinates)<left||Math.min(...coordinates)>right)continue;
+   shape.setAttribute('data-analysis-kind',String(o.kind??key));if(figure||liquidity)shape.setAttribute('stroke-dasharray',figure?'8 4':'3 4');if(figure)shape.setAttribute('stroke-width',3);
+   clip.append(shape);
+   // Labels identify detected patterns/figures, never standing explanations or legends.
+   if(figureLabels&&(figure||key==='candlestick')){const candidates=figure?points:[{time:o.start_time??o.formed_at,price:o.price}];const anchor=candidates.filter(p=>tx(p.time)>=left&&tx(p.time)<=right&&y(p.price)>=top&&y(p.price)<=bottom).at(-1);if(anchor)clip.append(node('text',{x:Math.min(Math.max(left+4,tx(anchor.time)),right-4),y:Math.min(bottom-4,Math.max(top+14,y(anchor.price)-8)),fill:color,'font-size':13,'text-anchor':tx(anchor.time)<(left+right)/2?'start':'end','data-figure-label':figure?'true':'false','data-pattern-label':key==='candlestick'?'true':'false'},String(o.label??o.kind).slice(0,45)));}
+   onEvent(o,key);count++;
+  }
+ }
+ svg.append(clip);return count;
+}
 // Independent, read-only analysis transport. Never consumes trading chart candles.
-function createAnalysisUI({document,fetch,getHeaders}){
+function analysisDiagnosticFacts(data){const d=data?.diagnostics;return {analysis_status:data?.status,timestamp_semantics:data?.timestamp_semantics,generated_at:data?.generated_at,as_of:data?.as_of,closed_through:data?.closed_through,bar_count:Array.isArray(data?.bars)?data.bars.length:undefined,analysis_reason:d?.reason??data?.reason,last_failure_reason:d?.last_failure_reason,worker_error:d?.error_code,worker_state:d?.supervisor_state,worker_failures:d?.failures,proof_status:d?.proof_status,proof_age_seconds:d?.proof_age_seconds,expected_closed_through:d?.expected_closed_through,history_ms:d?.history_ms,calculation_ms:d?.calculation_ms,ipc_ms:d?.ipc_ms,cache_age_seconds:d?.cache_age_seconds,cache_reused:d?.cache_reused};}
+function analysisDiagnosticReport(diagnostics,value){try{diagnostics?.record(value);}catch{}}
+function analysisDiagnosticNow(diagnostics){try{return diagnostics?.now()??0;}catch{return 0;}}
+function createAnalysisUI({document,fetch,getHeaders,diagnostics=null}){
  const $=id=>document.getElementById(id),ns='http://www.w3.org/2000/svg',periods=['M1','M15','M30','H1'];
- const cards=['patterns','structure'].map(id=>({id,seq:0,controller:null}));
+ const cards=['patterns','structure'].map(id=>({id,seq:0,controller:null,data:null}));
  const states={READY:'Готово',STALE:'Устаревшие данные',DISCONNECTED:'Нет связи с MT5',TIME_UNVERIFIED:'Время не подтверждено',WARMING_UP:'Недостаточно истории',UNAVAILABLE:'Недоступно',ERROR:'Ошибка',LICENSE_PENDING:'Лицензия не согласована'};
  let visible=false,timer=null;
  const number=v=>typeof v!=='boolean'&&v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v));
  const stamp=t=>number(t)&&Number(t)>0&&Number(t)<8640000000000?new Date(Number(t)*1000).toISOString().replace('T',' ').slice(0,19)+' UTC':'—';
  const node=(tag,attrs={},text='')=>{const n=document.createElementNS(ns,tag);for(const [k,v]of Object.entries(attrs))n.setAttribute(k,String(v));n.textContent=String(text);return n;};
  const active=()=>visible&&!document.hidden&&!$('workspace').hidden;
- function clear(card,message){$(card.id+'-chart').replaceChildren(node('text',{x:25,y:190,fill:'#b5c5d5','font-size':18},message));$(card.id+'-events').replaceChildren();$(card.id+'-source').textContent='';$(card.id+'-modules').textContent='';$(card.id+'-empty').textContent='';$(card.id+'-notes').textContent='';}
- function status(card,message,warning=true){$(card.id+'-status').textContent=message;$(card.id+'-status').dataset.tone=warning?'warning':'info';}
+ function clear(card){card.data=null;$(card.id+'-chart').replaceChildren();$(card.id+'-events').replaceChildren();$(card.id+'-source').textContent='';$(card.id+'-modules').textContent='';$(card.id+'-empty').textContent='';$(card.id+'-notes').textContent='';}
+ function status(card,message,warning=true){$(card.id+'-status').hidden=!warning;$(card.id+'-status').textContent=message;$(card.id+'-status').dataset.tone=warning?'warning':'info';}
  function render(card,data){
-  const id=card.id,svg=$(id+'-chart'),moduleKeys=id==='patterns'?['talib']:['smc','trendln','geometry'];
+  const id=card.id,svg=$(id+'-chart'),moduleKeys=id==='patterns'?['talib']:['geometry'];
   clear(card,'Нет подтверждённых закрытых свечей');
+  card.data=data;
   status(card,(states[data.status]??'Неизвестное состояние')+(data.reason?' · '+String(data.reason):''),data.status!=='READY');
   $(id+'-source').textContent=String(data.symbol??'')+' · '+data.timeframe+' · MT5 · снимок '+stamp(data.as_of)+'\nЗакрыто по '+stamp(data.closed_through)+' · рассчитано '+stamp(data.generated_at);
   $(id+'-modules').textContent=moduleKeys.map(k=>k+': '+(states[data.modules?.[k]?.status]??'Недоступно')+(data.modules?.[k]?.reason?' · '+data.modules[k].reason:'')).join('\n');
   $(id+'-notes').textContent=(Array.isArray(data.notes)?data.notes:[]).slice(0,12).map(note=>String(note).slice(0,500)).join(' · ');
   // Unverified or unknown snapshots must not present apparently authoritative UTC candles.
   if(!['READY','STALE'].includes(data.status))return;
-  if(data.timestamp_semantics!=='VERIFIED'){status(card,'Время не подтверждено · свечи скрыты');return;}
-  const allBars=data.bars,seconds={M1:60,M15:900,M30:1800,H1:3600}[data.timeframe];
-  const validSnapshotTime=t=>number(t)&&Number(t)>0&&Number(t)<8640000000000;
-  const validTime=t=>validSnapshotTime(t)&&Number.isInteger(Number(t));
-  const invalid=!Array.isArray(allBars)||allBars.length>10000||!validSnapshotTime(data.as_of)||!seconds||allBars.some((b,i)=>!b||!validTime(b.utc_time)||Number(b.utc_time)+seconds>Number(data.as_of)||['open','high','low','close'].some(k=>!number(b[k])||Number(b[k])<=0)||Number(b.low)>Math.min(Number(b.open),Number(b.close))||Number(b.high)<Math.max(Number(b.open),Number(b.close))||(i>0&&Number(b.utc_time)<=Number(allBars[i-1].utc_time)));
-  if(invalid){status(card,'Некорректный снимок: свечи повреждены, не закрыты или время недопустимо');return;}
+  const invalid=analysisSnapshotError(data);if(invalid){status(card,invalid);return;}
+  const allBars=data.bars;
   const bars=allBars.slice(-100),offset=allBars.length-bars.length;
-  if(!bars.length)return;
+  if(!bars.length){status(card,'Нет подтверждённых закрытых свечей');return;}
   svg.replaceChildren();
   const min=Math.min(...bars.map(b=>Number(b.low))),max=Math.max(...bars.map(b=>Number(b.high))),pad=Math.max((max-min)*.08,Math.abs(max)*.00005,.00001),lo=min-pad,hi=max+pad;
-  const left=12,right=710,top=22,bottom=355,step=(right-left)/bars.length,y=p=>bottom-(Number(p)-lo)/(hi-lo)*(bottom-top),x=i=>left+(i+.5)*step;
+  const width=Math.max(240,svg.clientWidth||800),height=Math.max(80,svg.clientHeight||400);svg.setAttribute('viewBox','0 0 '+width+' '+height);
+  const left=8,right=width-78,top=16,bottom=height-25,step=(right-left)/bars.length,y=p=>bottom-(Number(p)-lo)/(hi-lo)*(bottom-top),x=i=>left+(i+.5)*step;
   // Overlay endpoints must refer to actual closed bars. Map full-history indices
   // into the visible window, then clip SVG geometry. Never invent bars in gaps.
   const barIndices=new Map(allBars.map((b,i)=>[Number(b.utc_time),i]));
   function tx(t){if(!number(t)||!barIndices.has(Number(t)))return null;return x(barIndices.get(Number(t))-offset);}
-  for(let i=0;i<5;i++){const price=lo+(hi-lo)*i/4,yy=y(price);svg.append(node('line',{x1:left,x2:right,y1:yy,y2:yy,stroke:'#293545'}),node('text',{x:718,y:yy+4,fill:'#a4b9cc','font-size':12},price.toFixed(2)));}
+  for(let i=0;i<5;i++){const price=lo+(hi-lo)*i/4,yy=y(price);svg.append(node('line',{x1:left,x2:right,y1:yy,y2:yy,stroke:'#293545'}),node('text',{x:right+8,y:yy+4,fill:'#a4b9cc','font-size':12},price.toFixed(2)));}
   bars.forEach((b,i)=>{const color=Number(b.close)>=Number(b.open)?'#26a69a':'#ef5350',xx=x(i),body=node('rect',{x:xx-step*.32,y:Math.min(y(b.open),y(b.close)),width:Math.max(1,step*.64),height:Math.max(1,Math.abs(y(b.open)-y(b.close))),fill:color});body.append(node('title',{},stamp(b.utc_time)+' · O '+b.open+' H '+b.high+' L '+b.low+' C '+b.close));svg.append(node('line',{x1:xx,x2:xx,y1:y(b.high),y2:y(b.low),stroke:color}),body);});
-  for(const index of [...new Set([0,Math.floor((bars.length-1)/2),bars.length-1])])svg.append(node('text',{x:x(index),y:379,fill:'#a4b9cc','font-size':11,'text-anchor':index===0?'start':index===bars.length-1?'end':'middle'},stamp(bars[index].utc_time).slice(5,16)));
-  svg.append(node('text',{x:738,y:379,fill:'#a4b9cc','font-size':11},'UTC'));
-  const groups=id==='patterns'?[['candlestick','talib']]:[['structure','smc'],['trendlines','trendln'],['figures','geometry']];let count=0;
-  for(const [key,module]of groups){if(data.modules?.[module]?.status!=='READY')continue;for(const o of (Array.isArray(data.overlays?.[key])?data.overlays[key]:[]).slice(-150)){
-   const points=Array.isArray(o.points)?o.points:[],xx=tx(o.start_time??points[0]?.time??o.formed_at),end=tx(o.end_time??points.at(-1)?.time??o.start_time??o.formed_at);
-   const figure=key==='figures',liquidity=o.kind==='liquidity_zone',sweep=o.kind==='liquidity_sweep';
-   const color=figure?'#d5a4ff':liquidity||sweep?'#67ddeb':['bullish','BUY','BULLISH',1].includes(o.direction)?'#5dd6b0':['bearish','SELL','BEARISH',-1].includes(o.direction)?'#ff8585':'#e6be70';
-   let shape=null;
-   if(points.length>=2&&points.every(p=>tx(p.time)!==null&&number(p.price)))shape=node('polyline',{points:points.map(p=>tx(p.time)+','+y(p.price)).join(' '),fill:'none',stroke:color,'stroke-width':2});
-   else if(xx!==null&&end!==null&&number(o.top)&&number(o.bottom))shape=node('rect',{x:Math.min(xx,end),y:y(Math.max(o.top,o.bottom)),width:Math.max(3,Math.abs(end-xx)),height:Math.max(2,Math.abs(y(o.top)-y(o.bottom))),fill:color,'fill-opacity':.12,stroke:color});
-   else if(sweep&&xx!==null&&number(o.price)){const yy=y(o.price);shape=node('polygon',{points:[[xx,yy-7],[xx+7,yy],[xx,yy+7],[xx-7,yy]].map(p=>p.join(',')).join(' '),fill:'#10151c',stroke:color,'stroke-width':2});}
-   else if(xx!==null&&number(o.price)){shape=end!==null&&end!==xx?node('line',{x1:xx,x2:end,y1:y(o.price),y2:y(o.price),stroke:color,'stroke-width':2}):node('circle',{cx:xx,cy:y(o.price),r:5,fill:color});}
-   if(shape){shape.setAttribute('data-analysis-kind',String(o.kind??key));if(figure||liquidity)shape.setAttribute('stroke-dasharray',figure?'8 4':'3 4');if(figure)shape.setAttribute('stroke-width',3);}
-   const coordinates=points.length>=2?points.map(p=>tx(p.time)):[xx,end??xx];
-   if(!shape||coordinates.some(v=>v===null)||Math.max(...coordinates)<left||Math.min(...coordinates)>right)continue;
-   const label=String(o.label??o.kind??module),detail=(figure?'Геометрия · ':liquidity?'Зона OHLC · ':sweep?'Пересечение OHLC · ':'')+label+' · '+String(o.status??'')+' · сформировано '+stamp(o.formed_at)+' · обнаружено в снимке '+stamp(o.known_at)+(liquidity?' · '+String(o.zone_state??''):'');
-   const clipped=node('svg',{x:left,y:top,width:right-left,height:bottom-top,viewBox:left+' '+top+' '+(right-left)+' '+(bottom-top),overflow:'hidden'});shape.append(node('title',{},detail));clipped.append(shape);svg.append(clipped);
-   if(xx!==null&&xx>=left&&xx<=right&&number(o.price)&&y(o.price)>=top&&y(o.price)<=bottom)svg.append(node('text',{x:Math.min(xx+6,right-100),y:Math.max(top+12,y(o.price)-8),fill:color,'font-size':11},label.slice(0,28)));
-   const li=document.createElement('li');li.textContent=detail;$(id+'-events').append(li);count++;
-  }}
+  for(const index of [...new Set([0,Math.floor((bars.length-1)/2),bars.length-1])])svg.append(node('text',{x:x(index),y:height-6,fill:'#a4b9cc','font-size':11,'text-anchor':index===0?'start':index===bars.length-1?'end':'middle'},stamp(bars[index].utc_time).slice(5,16)));
+  svg.append(node('text',{x:right+8,y:height-6,fill:'#a4b9cc','font-size':11},'UTC'));
+  const groups=id==='patterns'?[['candlestick','talib']]:[['figures','geometry']];
+  const count=drawAnalysisOverlays({document,svg,data,groups,tx,y,left,right,top,bottom,figureLabels:true,onEvent(o,key){
+   const detail=(key==='figures'?'Геометрия · ':'')+String(o.label??o.kind)+' · '+String(o.status??'')+' · сформировано '+stamp(o.formed_at)+' · обнаружено в снимке '+stamp(o.known_at);
+   const li=document.createElement('li');li.textContent=detail;$(id+'-events').append(li);
+  }});
   const ready=moduleKeys.every(k=>data.modules?.[k]?.status==='READY');
+  if(data.status==='READY'&&!ready)status(card,moduleKeys.filter(k=>data.modules?.[k]?.status!=='READY').map(k=>k+': '+(states[data.modules?.[k]?.status]??'Недоступно')+(data.modules?.[k]?.reason?' · '+String(data.modules[k].reason):'')).join(' · '));
   $(id+'-empty').textContent=count?'Отображено событий: '+count:ready?'На показанных свечах подтверждённых признаков нет.':'Признаки недоступны или история ещё накапливается. Отсутствие меток не означает отсутствие паттернов.';
  }
  async function load(card){
   if(!active())return;
   const timeframe=$(card.id+'-timeframe').value;if(!periods.includes(timeframe))return;
   const seq=++card.seq;card.controller?.abort();const controller=new AbortController();card.controller=controller;
-  const timeout=setTimeout(()=>controller.abort(),8000);
-  status(card,'Загрузка '+timeframe+'…',false);
-  try{const r=await fetch('/api/analysis?timeframe='+timeframe,{method:'GET',headers:getHeaders(),signal:controller.signal,cache:'no-store'});if(!r.ok)throw Error('Анализ недоступен: HTTP '+r.status);const data=await r.json();
-   if(seq!==card.seq||!active()||$(card.id+'-timeframe').value!==timeframe)return;
-   if(data.schema!=='analysis_v1'||data.timeframe!==timeframe||data.source!=='MT5')throw Error('Несовместимый снимок анализа');render(card,data);
-  }catch(e){if(seq!==card.seq||!active())return;clear(card,'Данные анализа недоступны');status(card,e.name==='AbortError'?'Истекло время ожидания анализа':e.message);}
+  const timeout=setTimeout(()=>controller.abort(),8000),started=analysisDiagnosticNow(diagnostics),source=card.id==='patterns'?'ANALYSIS_PATTERNS':'ANALYSIS_STRUCTURE';
+  let stage='FETCH',httpStatus,data,mark=started;const timings={};
+  const finishStage=key=>{const end=analysisDiagnosticNow(diagnostics);timings[key]=Math.max(0,end-mark);mark=end;};
+  const report=(outcome,reason,error)=>analysisDiagnosticReport(diagnostics,{source,stage,outcome,reason,error_type:error?.name,timeframe,http_status:httpStatus,request_ms:analysisDiagnosticNow(diagnostics)-started,...timings,...analysisDiagnosticFacts(data)});
+  if(!card.data)status(card,'Загрузка '+timeframe+'…');
+  try{const r=await fetch('/api/analysis?timeframe='+timeframe,{method:'GET',headers:getHeaders(),signal:controller.signal,cache:'no-store'});httpStatus=r.status;finishStage('fetch_ms');if(!r.ok)throw Error('Анализ недоступен: HTTP '+r.status);
+   stage='PARSE';data=await r.json();finishStage('parse_ms');
+   if(seq!==card.seq||!active()||$(card.id+'-timeframe').value!==timeframe){report('CANCELLED','REQUEST_ABORTED');return;}
+   stage='VALIDATE';if(data.schema!=='analysis_v1'||data.timeframe!==timeframe||data.source!=='MT5')throw Error('Несовместимый снимок анализа');finishStage('validation_ms');
+   stage='RENDER';render(card,data);finishStage('render_ms');if(['READY','STALE'].includes(data.status)&&analysisSnapshotError(data)){stage='VALIDATE';report('ERROR','SNAPSHOT_INVALID');}else{stage='COMPLETE';report('OK');}
+  }catch(e){
+   const failedTiming={FETCH:'fetch_ms',PARSE:'parse_ms',VALIDATE:'validation_ms',RENDER:'render_ms'}[stage];if(failedTiming&&timings[failedTiming]===undefined)timings[failedTiming]=Math.max(0,analysisDiagnosticNow(diagnostics)-mark);
+   if(seq!==card.seq||!active()){report('CANCELLED','REQUEST_ABORTED',e);return;}
+   const timedOut=['FETCH','PARSE'].includes(stage)&&['AbortError','TimeoutError'].includes(e?.name);
+   const reason=timedOut?'REQUEST_TIMEOUT':stage==='FETCH'?(httpStatus>=400?'HTTP_ERROR':'NETWORK_ERROR'):({PARSE:'JSON_INVALID',VALIDATE:'SNAPSHOT_INVALID',RENDER:'RENDER_ERROR'}[stage]??'OTHER');report('ERROR',reason,e);
+   clear(card,'Данные анализа недоступны');status(card,e.name==='AbortError'?'Истекло время ожидания анализа':e.message);
+  }
   finally{clearTimeout(timeout);if(seq===card.seq)card.controller=null;}
  }
  function stop(){clearInterval(timer);timer=null;for(const card of cards){card.seq++;card.controller?.abort();card.controller=null;}}
- function start(){stop();if(!active())return;cards.forEach(load);timer=setInterval(()=>{if(!active())return;for(const card of cards)if(!card.controller)load(card);},15000);}
- for(const card of cards)$(card.id+'-timeframe').onchange=()=>{card.seq++;card.controller?.abort();clear(card,'Ожидание '+$(card.id+'-timeframe').value);load(card);};
+ function start(){stop();if(!active())return;for(const card of cards){card.data=null;clear(card);load(card);}timer=setInterval(()=>{if(!active())return;for(const card of cards)if(!card.controller)load(card);},15000);}
+ for(const card of cards)$(card.id+'-timeframe').onchange=()=>{card.seq++;card.controller?.abort();card.data=null;clear(card);load(card);};
  document.addEventListener('visibilitychange',()=>{if(document.hidden)stop();else if(visible)start();});
+ if(typeof ResizeObserver!=='undefined'){const observer=new ResizeObserver(()=>{if(active())for(const card of cards)if(card.data)render(card,card.data);});for(const card of cards)observer.observe($(card.id+'-chart'));}
  return{setVisible(value){visible=value;if(visible)start();else stop();}};
+}
+
+// M1 overlays are display-only. They never replace the trading feed or enter its price domain.
+function createMainAnalysisUI({document,fetch,getHeaders,getPreferences,onChange,diagnostics=null}){
+ const $=id=>document.getElementById(id),number=analysisNumber;
+ let visible=true,feed=null,fresh=false,data=null,received=0,seq=0,controller=null,timer=null,context='';
+ const active=()=>visible&&!document.hidden&&!$('workspace').hidden&&(getPreferences().liquidity||getPreferences().mainTrend);
+ const status=text=>{if($('main-analysis-status').textContent!==text)$('main-analysis-status').textContent=text;$('main-analysis-status').hidden=!text;};
+ function reason(){
+  if(feed&&feed.timestamp_semantics!=='VERIFIED')return 'Анализ: время не подтверждено';
+  if(!fresh||!feed||feed.status!=='FRESH'||feed.connected!==true)return 'Анализ: нет свежего снимка MT5';
+  if(feed.source!=='MT5'||!feed.instance||!feed.symbol)return 'Анализ: источник не подтверждён';
+  return '';
+ }
+ function stop(){seq++;controller?.abort();controller=null;clearInterval(timer);timer=null;data=null;received=0;$('main-analysis-source').textContent='';}
+ function refresh(){
+  const next=[visible,document.hidden,$('workspace').hidden,getPreferences().liquidity,getPreferences().mainTrend,feed?.instance,feed?.symbol,feed?.connected,feed?.source,fresh,feed?.status,feed?.timestamp_semantics].join('|');
+  if(next===context)return;context=next;stop();
+  if(!active()){status('');onChange();return;}
+  if(reason()){status(reason());onChange();return;}
+  load();timer=setInterval(()=>{if(active()&&!controller)load();},15000);onChange();
+ }
+ async function load(){
+  if(!active()||reason())return;
+  const mine=++seq;controller=new AbortController();const request=controller,timeout=setTimeout(()=>request.abort(),8000),started=analysisDiagnosticNow(diagnostics);
+  let stage='FETCH',httpStatus,value,diagnosticReason,mark=started;const timings={};
+  const finishStage=key=>{const end=analysisDiagnosticNow(diagnostics);timings[key]=Math.max(0,end-mark);mark=end;};
+  const report=(outcome,code,error)=>analysisDiagnosticReport(diagnostics,{source:'ANALYSIS_MAIN',stage,outcome,reason:code,error_type:error?.name,timeframe:'M1',http_status:httpStatus,request_ms:analysisDiagnosticNow(diagnostics)-started,...timings,...analysisDiagnosticFacts(value)});
+  if(!data)status('Анализ: загрузка M1…');
+  try{
+   const r=await fetch('/api/analysis?timeframe=M1',{method:'GET',headers:getHeaders(),signal:request.signal,cache:'no-store'});httpStatus=r.status;finishStage('fetch_ms');
+   if(!r.ok)throw Error('Анализ: HTTP '+r.status);
+   stage='PARSE';value=await r.json();finishStage('parse_ms');if(mine!==seq||!active()){report('CANCELLED','REQUEST_ABORTED');return;}
+   stage='VALIDATE';const state={TIME_UNVERIFIED:'время не подтверждено',STALE:'данные устарели',WARMING_UP:'ожидание закрытых свечей',UNAVAILABLE:'недоступно',DISCONNECTED:'нет связи с MT5',ERROR:'ошибка'};
+   diagnosticReason='ANALYSIS_NOT_READY';if(value.status!=='READY')throw Error('Анализ: '+(state[value.status]??'неизвестное состояние')+(value.reason?' · '+String(value.reason):''));
+   diagnosticReason='SNAPSHOT_INVALID';const invalid=analysisSnapshotError(value);if(invalid||value.timeframe!=='M1')throw Error(invalid||'Анализ: неверный период');
+   const end=Number(value.bars.at(-1)?.utc_time)+60;
+   if(!number(value.closed_through)||!Number.isInteger(Number(value.closed_through))||Number(value.closed_through)!==end||Number(value.closed_through)>Number(value.as_of))throw Error('Анализ: некорректное время закрытых свечей');
+   if(value.symbol!==feed.symbol||value.feed_instance!==feed.instance)throw Error('Анализ: источник изменился, слои скрыты');
+   finishStage('validation_ms');data=value;received=Date.now();stage='COMPLETE';report('OK');
+  }catch(e){
+   const failedTiming={FETCH:'fetch_ms',PARSE:'parse_ms',VALIDATE:'validation_ms'}[stage];if(failedTiming&&timings[failedTiming]===undefined)timings[failedTiming]=Math.max(0,analysisDiagnosticNow(diagnostics)-mark);
+   if(mine!==seq||!active()){report('CANCELLED','REQUEST_ABORTED',e);return;}
+   const timedOut=['FETCH','PARSE'].includes(stage)&&['AbortError','TimeoutError'].includes(e?.name);
+   const code=timedOut?'REQUEST_TIMEOUT':stage==='FETCH'?(httpStatus>=400?'HTTP_ERROR':'NETWORK_ERROR'):stage==='PARSE'?'JSON_INVALID':diagnosticReason??'OTHER';report('ERROR',code,e);
+   data=null;$('main-analysis-source').textContent='';status(e.name==='AbortError'?'Анализ: истекло время ожидания':String(e.message));
+  }
+  finally{clearTimeout(timeout);if(mine===seq){controller=null;onChange();}}
+ }
+ function draw({svg,candles,x,y,left,right,top,bottom}){
+  if(!active())return;
+  const blocked=reason();if(blocked){status(blocked);return;}if(!data)return;
+  if(Date.now()-received>20000||Date.now()<received){status('Анализ: снимок устарел, слои скрыты');return;}
+  const now=Number(feed.timestamp)+Number(feed.age_seconds??0),expected=Math.floor(now/60)*60;
+  if(!number(feed.timestamp)||!number(feed.age_seconds??0)||!number(data.closed_through)||Number(data.closed_through)<expected){status('Анализ: ожидается расчёт последней закрытой M1');return;}
+  const history=data.bars,indices=new Map(history.map((b,i)=>[Number(b.utc_time),i]));
+  let anchor=null;
+  for(let i=0;i<candles.length;i++){
+   const candle=candles[i],index=indices.get(Number(candle.utc_time));if(index===undefined)continue;
+   if(['open','high','low','close'].some(k=>Number(candle[k])!==Number(history[index][k]))){status('Анализ: свечи источников различаются, слои скрыты');return;}
+   if(anchor===null)anchor={index,visible:i};
+   else if(index-anchor.index!==i-anchor.visible){status('Анализ: история изменилась, слои скрыты');return;}
+  }
+  if(anchor===null){status('Анализ: нет совпадающих закрытых свечей');return;}
+  const tx=t=>number(t)&&indices.has(Number(t))?x(indices.get(Number(t))-anchor.index+anchor.visible):null;
+  const prefs=getPreferences(),groups=[];if(prefs.liquidity)groups.push(['structure','smc']);if(prefs.mainTrend)groups.push(['trendlines','trendln']);
+  const problems=groups.flatMap(([,name])=>{const module=data.modules?.[name];return module?.status==='READY'?[]:[name+': '+String(module?.reason??module?.status??'недоступно')];});
+  // A READY SMC module may still have failed components. Surface them outside the canvas.
+  if(prefs.liquidity)for(const[name,value]of Object.entries(data.modules?.smc?.components??{}))if(value?.status!=='READY')problems.push('SMC '+name+': '+String(value?.reason??value?.status??'недоступно'));
+  status(problems.length?'Анализ: '+problems.join(' · '):'');
+  $('main-analysis-source').textContent='M1 · '+data.symbol+' · закрыто по '+new Date(Number(data.closed_through)*1000).toISOString().replace('T',' ').slice(0,19)+' UTC';
+  drawAnalysisOverlays({document,svg,data,groups,tx,y,left,right,top,bottom,opacity:prefs.opacity/100,zoneColor:prefs.colors.zone});
+ }
+ document.addEventListener('visibilitychange',refresh);
+ return{draw(args){try{draw(args);}catch(e){analysisDiagnosticReport(diagnostics,{source:'ANALYSIS_MAIN',stage:'DISPLAY',outcome:'ERROR',reason:'RENDER_ERROR',error_type:e?.name,timeframe:'M1',...analysisDiagnosticFacts(data)});data=null;$('main-analysis-source').textContent='';status('Анализ: ошибка отображения, слои скрыты');}},refresh,setVisible(value){visible=value;refresh();},updateFeed(value,isFresh){feed=value;fresh=isFresh;refresh();}};
 }

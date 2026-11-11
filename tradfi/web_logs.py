@@ -34,7 +34,7 @@ class SafeRotatingFileHandler(RotatingFileHandler):
 
 def stable_context(value):
     if isinstance(value,dict):
-        volatile={'quote','timestamp','sequence','age_seconds','time_msc','utc_time','profit','timings'}
+        volatile={'quote','timestamp','sequence','age_seconds','time_msc','utc_time','profit','timings','analysis'}
         return {k:stable_context(v) for k,v in value.items() if k not in volatile}
     if isinstance(value,list):return [stable_context(v) for v in value]
     return value

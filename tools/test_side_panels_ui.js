@@ -16,7 +16,7 @@ state.feed.candles=Array.from({length:300},(_,i)=>({utc_time:1700000000+i*60,ope
    if(u.pathname.endsWith('/state'))return route.fulfill({json:current});
    if(u.pathname.endsWith('/action')){actions.push(route.request().postDataJSON());return route.fulfill({json:{status:receipt}});}
    const name=u.pathname==='/'?'index.html':path.basename(u.pathname);
-   if(['index.html','panel.js','panel.css'].includes(name))return route.fulfill({body:fs.readFileSync(path.join(root,name),'utf8'),contentType:name.endsWith('.js')?'application/javascript':name.endsWith('.css')?'text/css':'text/html'});
+   if(['index.html','diagnostics.js','panel.js','panel.css'].includes(name))return route.fulfill({body:fs.readFileSync(path.join(root,name),'utf8'),contentType:name.endsWith('.js')?'application/javascript':name.endsWith('.css')?'text/css':'text/html'});
    return route.abort();
   });
   await page.goto('http://localhost:8765/');await page.locator('#workspace').waitFor({state:'visible'});
