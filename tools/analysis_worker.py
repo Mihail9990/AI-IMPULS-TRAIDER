@@ -10,7 +10,7 @@ def main():
     # Preserve IPC on a private duplicate, then silence Python AND native vendor
     # stdout (SMC prints a banner on import). Never mix it into framed JSON.
     output = os.fdopen(os.dup(sys.stdout.fileno()), 'wb', buffering=0)
-    null = open(os.devnull, 'w')
+    null = open(os.devnull, 'w', encoding='utf-8', errors='replace')
     os.dup2(null.fileno(), sys.stdout.fileno())
     sys.stdout = null
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))

@@ -49,7 +49,7 @@ def smoke_check():
                      'open': price, 'high': max(price, close) + .15,
                      'low': min(price, close) - .15, 'close': close,
                      'tick_volume': 100 + index % 30, 'real_volume': 0})
-    with open(os.devnull, 'w') as quiet, contextlib.redirect_stdout(quiet):
+    with open(os.devnull, 'w', encoding='utf-8', errors='replace') as quiet, contextlib.redirect_stdout(quiet):
         result = analyze_bars(bars, 'M1', start + len(bars) * 60)
     # Prove the renderer's transport contract rejects NaN and Infinity.
     json.dumps(result, allow_nan=False)
