@@ -1,0 +1,47 @@
+name: Optional analysis Windows smoke
+
+# Manual only. This workflow never reads LIVE configuration or starts MT5.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-analysis:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Install the isolated analysis lock
+        shell: pwsh
+        run: |
+          python -m venv .venv-analysis
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./.venv-analysis/Scripts/python.exe -I -m pip install --only-binary=:all: --index-url https://pypi.org/simple -r requirements-analysis.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./.venv-analysis/Scripts/python.exe -I -m pip check
+          exit $LASTEXITCODE
+      - name: Run real vendor calculations without a terminal
+        shell: pwsh
+        run: |
+          ./.venv-analysis/Scripts/python.exe -I tools/check_analysis_dependencies.py --smoke --require-lock | Tee-Object analysis-windows-smoke.json
+          exit $LASTEXITCODE
+      - name: Test analytics and read-only transport
+        shell: pwsh
+        run: |
+          ./.venv-analysis/Scripts/python.exe -m unittest discover -s tests -p "test_analysis*.py" -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./.venv-analysis/Scripts/python.exe -m unittest discover -s tests -p "test_tradfi_analysis_service.py" -v
+          exit $LASTEXITCODE
+      - name: Preserve the offline smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: analysis-windows-smoke
+          path: analysis-windows-smoke.json
+          if-no-files-found: ignore

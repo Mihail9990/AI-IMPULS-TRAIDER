@@ -289,7 +289,7 @@
  function domain(){if(preview?.dragDomain)return preview.dragDomain;const prices=[...lines.map(l=>l.price),...visibleCandles().flatMap(c=>[Number(c.low),Number(c.high)]),Number(view?.feed?.quote?.bid),Number(view?.feed?.quote?.ask)].filter(x=>Number.isFinite(x)&&x>0);let lo=Math.min(...prices),hi=Math.max(...prices);if(!prices.length){lo=0;hi=1;}const mid=(lo+hi)/2+pan,span=Math.max(1,hi-lo)*1.25/zoom;return{min:mid-span/2,max:mid+span/2};}
  function syncPreviewDialog(){
   const active=!!preview,open=active&&!preview.dragging;$('preview-backdrop').hidden=!open;$('preview').hidden=!open;
-  for(const id of ['command-drawer','v3-panels','settings-page','history-page','bottom-tabs','analysis-pane','bot-activity'])$(id).inert=active;
+  for(const id of ['command-drawer','v3-panels','settings-page','history-page','bottom-tabs','analysis-page','bot-activity'])$(id).inert=active;
   if(open&&!previewWasOpen){cancelSidePanelDrags();previewFocus=document.activeElement;$('cancel-level').focus({preventScroll:true});}
   if(!open&&previewWasOpen)(previewFocus?.isConnected?previewFocus:$('drawer-toggle')).focus({preventScroll:true});
   previewWasOpen=open;
@@ -299,7 +299,7 @@
   if(!view)return;lines=[];const colors=prefs.colors;
   for(const [side,price] of Object.entries(view.levels)){const pendingOrder=view.orders.some(o=>o.side===side&&Number(o.price)===Number(price));if(pendingOrder||view.frozen_levels)lines.push({key:'trigger-'+side,kind:'trigger',side,price:Number(price),label:side+(pendingOrder?' STOP':' · уровень цикла'),color:colors[side]});}
   for(const p of view.positions)for(const key of ['entry','tp','sl'])lines.push({key:p.id+'-'+key,kind:key,pid:p.id,price:Number(p[key]),label:key.toUpperCase()+(Number.isInteger(view.tickets?.find(t=>t.id===p.id)?.index)?' · ступень '+(view.tickets.find(t=>t.id===p.id).index+1):'')+' · #'+(p.ticket??p.id).slice(-6),color:colors[key]});
-  if(!lines.length&&!(view.feed.candles??[]).length&&!Number(view.feed.quote?.bid)){svg.replaceChildren(node('text',{x:230,y:250,fill:'#969ba6','font-size':28},'Ожидание реальных данных MT5'));$('level-buttons').replaceChildren();drawAnalysis();return;}
+  if(!lines.length&&!(view.feed.candles??[]).length&&!Number(view.feed.quote?.bid)){svg.replaceChildren(node('text',{x:230,y:250,fill:'#969ba6','font-size':28},'Ожидание реальных данных MT5'));$('level-buttons').replaceChildren();return;}
   frameHeight=Math.max(240,svg.clientHeight/Math.max(1,svg.clientWidth)*1000);plotBottom=frameHeight-45;plotHeight=plotBottom-20;svg.setAttribute('viewBox','0 0 1000 '+frameHeight);
   const labelSize=svg.clientWidth<680?32:17;const labelRows=[];
   // Reserve a price-only gutter before positioning any candle, at every zoom level.
@@ -327,7 +327,7 @@
   if(!feedUtcVerified())svg.append(node('title',{},'Время MT5 не проверено; часовые метки скрыты.'));
   if(!candles.length)svg.append(node('text',{x:300,y:250,fill:'#969ba6','font-size':20},'Ожидание данных MT5'));
   if(preview){const py=y(preview.value);svg.append(node('line',{x1:0,x2:plotRight,y1:py,y2:py,stroke:'#fff','stroke-width':4,'stroke-dasharray':'none'}));}
-  drawAnalysis();
+
   $('level-buttons').replaceChildren();for(const l of lines){const b=document.createElement('button');b.textContent=l.label+' '+l.price.toFixed(2);b.style.borderColor=l.color;b.disabled=l.kind==='entry';b.onclick=()=>openPreview(l,l.price);$('level-buttons').append(b);}
  }
  function openPreview(line,value,dragging=false){
@@ -423,12 +423,10 @@
  const defaultPrefs={mainTrend:false,mainCycle:true,pane:null,pattern:{trend:false,cycle:true},figure:{trend:false,cycle:true},liquidity:false,opacity:20,colors:{BUY:'#26a69a',SELL:'#ef5350',sl:'#ef5350',tp:'#26a69a',entry:'#e0b565',up:'#26a69a',down:'#ef5350',grid:'#25282e',zone:'#e0b565'}};
  let prefs=structuredClone(defaultPrefs);try{const saved=JSON.parse(localStorage.getItem('chart-preferences-v1')??'null');if(saved){for(const k of ['mainTrend','mainCycle','liquidity'])if(typeof saved[k]==='boolean')prefs[k]=saved[k];if(['pattern','figure',null].includes(saved.pane))prefs.pane=saved.pane;for(const pane of ['pattern','figure'])for(const k of ['trend','cycle'])if(typeof saved[pane]?.[k]==='boolean')prefs[pane][k]=saved[pane][k];if(Number.isFinite(saved.opacity))prefs.opacity=Math.max(0,Math.min(100,saved.opacity));for(const k of Object.keys(prefs.colors))if(/^#[0-9a-f]{6}$/i.test(saved.colors?.[k]))prefs.colors[k]=saved.colors[k];}}catch{}
  const savePrefs=()=>{localStorage.setItem('chart-preferences-v1',JSON.stringify(prefs));layout();draw();};
- function layout(){$('analysis-pane').hidden=!prefs.pane;$('chart-workspace').classList.toggle('split',!!prefs.pane);$('main-trend').checked=prefs.mainTrend;$('main-cycle').checked=prefs.mainCycle;$('liquidity-visible').checked=prefs.liquidity;$('zone-opacity').value=prefs.opacity;if(prefs.pane){$('analysis-title').textContent=prefs.pane==='pattern'?'Свечные паттерны':'Графические фигуры';$('analysis-trend').checked=prefs[prefs.pane].trend;$('analysis-cycle').checked=prefs[prefs.pane].cycle;}}
- function drawAnalysis(){const target=$('analysis-chart');target.replaceChildren();if(!prefs.pane)return;const height=Math.max(240,target.clientHeight/Math.max(1,target.clientWidth)*1000),ratio=(height-65)/plotHeight;target.setAttribute('viewBox','0 0 1000 '+height);for(const child of svg.children){if(child.hasAttribute('data-line')&&!prefs[prefs.pane].cycle)continue;const copy=child.cloneNode(true);if(copy.hasAttribute('data-line'))copy.setAttribute('visibility','visible');for(const element of [copy,...copy.querySelectorAll('*')]){for(const attr of ['y','y1','y2'])if(element.hasAttribute(attr)){const value=Number(element.getAttribute(attr));element.setAttribute(attr,value>=frameHeight-15?height-10:20+(value-20)*ratio);}if(element.tagName==='rect'&&element.hasAttribute('height'))element.setAttribute('height',Number(element.getAttribute('height'))*ratio);}target.append(copy);}}
-
- $('open-pattern').onclick=()=>{prefs.pane=prefs.pane==='pattern'?null:'pattern';savePrefs();};$('open-figure').onclick=()=>{prefs.pane=prefs.pane==='figure'?null:'figure';savePrefs();};$('close-analysis').onclick=()=>{prefs.pane=null;savePrefs();};
+ const analysisUI=typeof createAnalysisUI==='function'?createAnalysisUI({document,fetch,getHeaders:headers}):null;
+ function layout(){$('main-trend').checked=prefs.mainTrend;$('main-cycle').checked=prefs.mainCycle;$('liquidity-visible').checked=prefs.liquidity;$('zone-opacity').value=prefs.opacity;}
+ $('open-pattern').onclick=()=>{setTab('analysis');$('patterns-timeframe').focus();};$('open-figure').onclick=()=>{setTab('analysis');$('structure-timeframe').focus();};
  for(const [id,key]of [['main-trend','mainTrend'],['main-cycle','mainCycle'],['liquidity-visible','liquidity']])$(id).onchange=e=>{prefs[key]=e.target.checked;savePrefs();};
- for(const key of ['trend','cycle'])$('analysis-'+key).onchange=e=>{if(prefs.pane){prefs[prefs.pane][key]=e.target.checked;savePrefs();}};
  $('zone-opacity').oninput=e=>{prefs.opacity=Number(e.target.value);savePrefs();};
  const colorNames={BUY:'BUY STOP',SELL:'SELL STOP',sl:'SL',tp:'TP',entry:'Вход',up:'Растущая свеча',down:'Падающая свеча',grid:'Сетка',zone:'Будущие зоны'};
  for(const [k,v]of Object.entries(prefs.colors)){const label=document.createElement('label');label.textContent=colorNames[k];const input=document.createElement('input');input.type='color';input.id='color-'+k;input.value=v;input.oninput=()=>{prefs.colors[k]=input.value;savePrefs();};label.append(input);$('color-fields').append(label);}
@@ -461,9 +459,9 @@
  applyChartHeight();
  // Presentation-only navigation: the LIVE role and API paths never change.
  let activeTab='chart';
- function setTab(tab){if(preview)return;cancelGesture();cancelSidePanelDrags();for(const name of [...sidePanelOrder])setSidePanel(name,false);activeTab=['chart','history','settings'].includes(tab)?tab:'chart';for(const name of ['chart','history','settings']){$(name+'-page').hidden=activeTab!==name;$('tab-'+name).setAttribute('aria-selected',String(activeTab===name));}requestAnimationFrame(draw);}
- $('tab-chart').onclick=()=>setTab('chart');$('tab-history').onclick=()=>setTab('history');$('tab-settings').onclick=()=>setTab('settings');
- for(const name of ['chart','history','settings'])$('tab-'+name).addEventListener('keydown',e=>{if(['ArrowLeft','ArrowRight'].includes(e.key)){e.preventDefault();const tabs=['chart','history','settings'],other=tabs[(tabs.indexOf(name)+(e.key==='ArrowRight'?1:2))%tabs.length];setTab(other);$('tab-'+other).focus();}});
+ const tabs=['chart','analysis','history','settings'];
+ function setTab(tab){if(preview)return;cancelGesture();cancelSidePanelDrags();for(const name of [...sidePanelOrder])setSidePanel(name,false);activeTab=tabs.includes(tab)?tab:'chart';for(const name of tabs){$(name+'-page').hidden=activeTab!==name;$('tab-'+name).setAttribute('aria-selected',String(activeTab===name));$('tab-'+name).setAttribute('tabindex',activeTab===name?'0':'-1');}if(typeof analysisUI!=='undefined')analysisUI?.setVisible(activeTab==='analysis');requestAnimationFrame(draw);}
+ for(const name of tabs){$('tab-'+name).onclick=()=>setTab(name);$('tab-'+name).setAttribute('tabindex',name==='chart'?'0':'-1');$('tab-'+name).addEventListener('keydown',e=>{if(['ArrowLeft','ArrowRight','Home','End'].includes(e.key)){e.preventDefault();if(preview)return;const other=e.key==='Home'?tabs[0]:e.key==='End'?tabs.at(-1):tabs[(tabs.indexOf(name)+(e.key==='ArrowRight'?1:tabs.length-1))%tabs.length];setTab(other);$('tab-'+other).focus();}});}
  function setDrawer(open){$('command-drawer').dataset.open=String(open);$('drawer-toggle').setAttribute('aria-expanded',String(open));$('drawer-content').hidden=!open;requestAnimationFrame(draw);}
  $('drawer-toggle').onclick=()=>setDrawer($('command-drawer').dataset.open!=='true');
  let drawerY=null,drawerSwiped=false;

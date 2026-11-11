@@ -21,3 +21,9 @@ tradfi_demo.json
 tradfi_xauusdt_demo.sqlite3*
 *.demo.sqlite3*
 *.diagnostic.jsonl*
+
+# Optional analysis environment and local installation/smoke artifacts
+.venv-analysis/
+analysis-wheelhouse/
+analysis-smoke*.json
+analysis-install*.log
