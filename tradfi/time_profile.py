@@ -4,6 +4,16 @@ import math
 
 BYBIT_PROFILE = 'bybit_live6_time_v1'
 TEST_PROFILE = 'injected_utc_test_v1'
+RAW_MARKET_MODE = 'mt5_raw_v1'
+
+
+def validate_market_time_mode(config):
+    mode = config.get('market_time_mode', 'fixed_utc_v1')
+    if mode not in {'fixed_utc_v1', RAW_MARKET_MODE}:
+        raise TimeProfileError('INVALID_MARKET_TIME_MODE')
+    if mode == RAW_MARKET_MODE and config.get('market_time_offset_seconds', 0) != 0:
+        raise TimeProfileError('RAW_MARKET_TIME_REQUIRES_ZERO_OFFSET')
+    return mode
 
 
 class TimeProfileError(ValueError):
@@ -84,8 +94,8 @@ def market_timestamp_to_utc(raw_seconds, offset_seconds=0):
     return result
 
 
-def market_tick_to_utc(tick, offset_seconds=0):
-    """Validate raw seconds/milliseconds agreement before applying the fixed offset."""
+def market_tick_raw_seconds(tick):
+    """Validate native seconds/milliseconds agreement without assigning a timezone."""
     raw = getattr(tick, 'time_msc', None)
     seconds = getattr(tick, 'time', None)
     raw = raw.item() if hasattr(raw, 'item') else raw
@@ -96,4 +106,9 @@ def market_tick_to_utc(tick, offset_seconds=0):
     stamp = raw / 1000
     if not 0 <= stamp - seconds < 1:
         raise TimeProfileError('TICK_SECONDS_MILLISECONDS_DISAGREE')
-    return market_timestamp_to_utc(stamp, offset_seconds)
+    return stamp
+
+
+def market_tick_to_utc(tick, offset_seconds=0):
+    """Validate raw seconds/milliseconds agreement before applying the fixed offset."""
+    return market_timestamp_to_utc(market_tick_raw_seconds(tick), offset_seconds)

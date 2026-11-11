@@ -48,6 +48,9 @@ def empty_snapshot(symbol, timeframe, status='WARMING_UP', reason=None):
 
 def proof_status(proof, mono):
     if not proof or not proof.get('connected'): return 'DISCONNECTED'
+    if proof.get('timestamp_semantics') == 'BROKER_RAW':
+        stamp = proof.get('broker_time')
+        return 'READY' if not isinstance(stamp, bool) and isinstance(stamp, (int, float)) and math.isfinite(stamp) and stamp > 0 else 'TIME_UNVERIFIED'
     if proof.get('timestamp_semantics') != 'VERIFIED': return 'TIME_UNVERIFIED'
     elapsed = mono - proof['monotonic']
     if elapsed < 0 or not math.isfinite(elapsed): return 'TIME_UNVERIFIED'
@@ -81,6 +84,8 @@ def elapsed_ms(start):
 
 def read_bars(api, config, timeframe, now):
     """Exact native TF, closed bars only; no interpolation or aggregation."""
+    if config['time_mode'] == 'mt5_raw_v1':
+        return read_raw_bars(api, config, timeframe, now)
     duration = TIMEFRAMES[timeframe]
     raw = api.copy_rates_from_pos(config['symbol'], getattr(api, 'TIMEFRAME_' + timeframe), 1, BAR_LIMIT)
     if raw is None or not len(raw): raise ValueError('HISTORY_UNAVAILABLE')
@@ -113,6 +118,65 @@ def read_bars(api, config, timeframe, now):
     return bars
 
 
+def read_raw_bars(api, config, timeframe, source_tick):
+    """MT5 native bar0 identifies the open candle; never use host time."""
+    duration = TIMEFRAMES[timeframe]
+    raw = api.copy_rates_from_pos(config['symbol'], getattr(api, 'TIMEFRAME_' + timeframe), 0, BAR_LIMIT + 1)
+    if raw is None or len(raw) < 2: raise ValueError('HISTORY_NO_CLOSED_BARS')
+    if len(raw) > BAR_LIMIT + 1: raise ValueError('HISTORY_LIMIT')
+    bars, previous = [], 0
+    for source in raw:
+        stamp = float(source['time'])
+        if not math.isfinite(stamp) or stamp <= previous or stamp % duration:
+            raise ValueError('HISTORY_ORDER_OR_BOUNDARY')
+        if stamp > source_tick: raise ValueError('HISTORY_FUTURE')
+        previous = stamp
+        row = {key: float(source[key]) for key in ('open', 'high', 'low', 'close')}
+        if not all(math.isfinite(x) and x > 0 for x in row.values()): raise ValueError('HISTORY_OHLC')
+        if not row['low'] <= min(row['open'], row['close']) <= max(row['open'], row['close']) <= row['high']:
+            raise ValueError('HISTORY_OHLC')
+        row.update(raw_time=stamp, broker_time=stamp, utc_time=None, time_domain='BROKER_RAW', closed=True)
+        for key in ('tick_volume', 'real_volume'):
+            try: value = float(source[key])
+            except (KeyError, ValueError, TypeError, IndexError): continue
+            if not math.isfinite(value) or value < 0: raise ValueError('HISTORY_VOLUME')
+            row[key] = value
+        bars.append(row)
+    # Last returned bar is native position zero. Gaps remain gaps.
+    return bars[:-1]
+
+
+def calculate_raw(api, config, proof, cache, *, analyzer=None):
+    result = {}
+    now = proof['broker_time']
+    for tf, duration in TIMEFRAMES.items():
+        try:
+            bars = read_raw_bars(api, config, tf, now)
+            if not identity_matches(api, config): raise ValueError('SOURCE_IDENTITY_MISMATCH')
+            previous = cache.get(tf)
+            reused = bool(previous and previous.get('timestamp_semantics') == 'BROKER_RAW'
+                          and previous.get('feed_instance') == proof['instance'] and previous.get('bars') == bars)
+            value = deepcopy(previous) if reused else empty_snapshot(config['symbol'], tf, 'READY')
+            if not reused:
+                if analyzer is None:
+                    from .analysis_adapters import analyze_bars
+                    analyzer = analyze_bars
+                value.update(analyzer(bars, tf, now))
+                value['notes'].append('Время MT5 без преобразования в UTC. Принимается последнее наблюдение, без проверки давности; пропуски свечей не заполняются.')
+            value.update(status='READY', bars=bars, generated_at=now, as_of=now, broker_time=now,
+                         closed_through=bars[-1]['broker_time'] + duration,
+                         timestamp_semantics='BROKER_RAW', time_domain='BROKER_RAW',
+                         freshness_policy='ACCEPT_LAST_OBSERVED', feed_instance=proof['instance'])
+            value['diagnostics'] = dict(reason='CACHE_REUSED' if reused else 'CALCULATED', cache_reused=reused,
+                                       bar_count=len(bars), actual_closed_through=value['closed_through'])
+            json.dumps(value, allow_nan=False)
+            result[tf] = value
+        except Exception as exc:
+            result[tf] = empty_snapshot(config['symbol'], tf, 'UNAVAILABLE', 'ANALYSIS_SOURCE_UNAVAILABLE')
+            result[tf]['diagnostics']['error_code'] = safe_error(exc)
+    return result
+
+
 def identity_matches(api, config):
     account = api.account_info()
     terminal = api.terminal_info()
@@ -134,6 +198,12 @@ def calculate(api, config, proof, cache, *, mono=None, analyzer=None, retry_stat
         return values
     if not identity_matches(api, config):
         return {tf: empty_snapshot(config['symbol'], tf, 'DISCONNECTED', 'SOURCE_IDENTITY_MISMATCH') for tf in TIMEFRAMES}
+    if config['time_mode'] == 'mt5_raw_v1':
+        if proof.get('timestamp_semantics') != 'BROKER_RAW':
+            return {tf: empty_snapshot(config['symbol'], tf, 'TIME_UNVERIFIED') for tf in TIMEFRAMES}
+        return calculate_raw(api, config, proof, cache, analyzer=analyzer)
+    if proof.get('timestamp_semantics') == 'BROKER_RAW':
+        return {tf: empty_snapshot(config['symbol'], tf, 'TIME_UNVERIFIED') for tf in TIMEFRAMES}
     now = proof['utc'] + mono - proof['monotonic']
     retry_state = {} if retry_state is None else retry_state
     result = {}
@@ -289,9 +359,9 @@ class AnalysisService:
         if login is None and account[0].isdigit(): login = int(account[0])
         self.config = dict(terminal_path=getattr(broker, 'path', ''), symbol=broker.symbol,
                            expected_login=login, expected_server=getattr(broker, 'server', ''),
-                           time_mode='fixed' if hasattr(broker, 'market_time_offset_seconds') or getattr(broker, 'time_profile', None) == TEST_PROFILE else 'server',
+                           time_mode='mt5_raw_v1' if getattr(broker, 'config', {}).get('market_time_mode') == 'mt5_raw_v1' else 'fixed' if hasattr(broker, 'market_time_offset_seconds') or getattr(broker, 'time_profile', None) == TEST_PROFILE else 'server',
                            offset=getattr(broker, 'market_time_offset_seconds', 0))
-        self.enabled = bool(self.config['time_mode'] == 'fixed' and self.config['terminal_path'] and login and self.config['expected_server'] and
+        self.enabled = bool(self.config['time_mode'] in ('fixed', 'mt5_raw_v1') and self.config['terminal_path'] and login and self.config['expected_server'] and
                             not getattr(broker.api, 'is_test_binding', False) and getattr(broker, 'time_profile', None) != TEST_PROFILE)
         self.external_python = None
         self.unavailable_reason = None
@@ -324,6 +394,11 @@ class AnalysisService:
     def observe(self, feed):
         """Owner handoff: no locks, IO, queues, process start or calculation."""
         try:
+            if self.config['time_mode'] == 'mt5_raw_v1':
+                self.proof = dict(connected=feed.get('connected', False), status=feed.get('status'),
+                    timestamp_semantics=feed.get('timestamp_semantics'), broker_time=feed.get('broker_time'),
+                    monotonic=analysis_clock(), age=0, max_age=self.max_age, instance=feed.get('instance'))
+                return
             age = float(feed.get('age_seconds') or 0)
             utc = float(feed.get('timestamp') or 0) + age
             if not math.isfinite(age) or not math.isfinite(utc): raise ValueError()
@@ -363,7 +438,7 @@ class AnalysisService:
         if value['feed_instance'] and proof and value['feed_instance'] != proof['instance']:
             value = empty_snapshot(self.config['symbol'], timeframe)
             status = 'WARMING_UP'
-        if status == 'READY' and value['bars'] and proof:
+        if status == 'READY' and value['bars'] and proof and self.config['time_mode'] != 'mt5_raw_v1':
             now = proof['utc'] + mono - proof['monotonic']
             offset = self.config['offset']
             expected = math.floor((now + offset) / TIMEFRAMES[timeframe]) * TIMEFRAMES[timeframe] - offset
@@ -375,7 +450,7 @@ class AnalysisService:
         diagnostic.update(generated_at=value.get('generated_at'), received_at=self.received_at,
                           cache_age_seconds=max(0, mono-self.received_mono) if self.received_mono is not None else None,
                           supervisor_retry_in_seconds=max(0, self.retry_after-mono))
-        if proof:
+        if proof and self.config['time_mode'] != 'mt5_raw_v1':
             now = proof['utc'] + mono - proof['monotonic']
             duration = TIMEFRAMES[timeframe]
             diagnostic['expected_closed_through'] = math.floor((now+self.config['offset'])/duration)*duration-self.config['offset']

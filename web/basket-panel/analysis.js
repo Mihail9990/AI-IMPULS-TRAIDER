@@ -2,12 +2,21 @@
 // Pure read-only chart helpers. No broker, action or order APIs.
 const analysisPeriods={M1:60,M15:900,M30:1800,H1:3600};
 const analysisNumber=v=>typeof v!=='boolean'&&v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v));
+// Numeric broker coordinates are formatted as a calendar only, never converted to UTC.
+const analysisRaw=data=>data?.timestamp_semantics==='BROKER_RAW'&&data?.time_domain==='BROKER_RAW';
+const analysisDomain=data=>analysisRaw(data)?'BROKER_RAW':data?.timestamp_semantics==='VERIFIED'&&(!data.time_domain||data.time_domain==='UTC')?'UTC':null;
+const analysisBarTime=(bar,data)=>analysisRaw(data)?bar?.broker_time??bar?.raw_time:bar?.utc_time;
+const analysisTimeLabel=data=>analysisRaw(data)?'время MT5':'UTC';
+function analysisStamp(value,data){
+ if(!analysisDomain(data)||!analysisNumber(value)||Number(value)<=0||Number(value)>=8640000000000)return '—';
+ return new Date(Number(value)*1000).toISOString().replace('T',' ').slice(0,19)+' '+analysisTimeLabel(data);
+}
 function analysisSnapshotError(data){
  const number=analysisNumber,time=t=>number(t)&&Number(t)>0&&Number(t)<8640000000000;
  if(data?.schema!=='analysis_v1'||data.source!=='MT5'||!analysisPeriods[data.timeframe])return 'Несовместимый снимок анализа';
- if(data.timestamp_semantics!=='VERIFIED')return 'Время не подтверждено · свечи скрыты';
+ if(!analysisDomain(data))return 'Время не подтверждено · свечи скрыты';
  const bars=data.bars,seconds=analysisPeriods[data.timeframe];
- if(!Array.isArray(bars)||bars.length>10000||!time(data.as_of)||bars.some((b,i)=>!b||!time(b.utc_time)||!Number.isInteger(Number(b.utc_time))||Number(b.utc_time)+seconds>Number(data.as_of)||['open','high','low','close'].some(k=>!number(b[k])||Number(b[k])<=0)||Number(b.low)>Math.min(Number(b.open),Number(b.close))||Number(b.high)<Math.max(Number(b.open),Number(b.close))||(i>0&&Number(b.utc_time)<=Number(bars[i-1].utc_time))))return 'Некорректный снимок: свечи повреждены, не закрыты или время недопустимо';
+ if(!Array.isArray(bars)||bars.length>10000||!time(data.as_of)||bars.some((b,i)=>{const t=analysisBarTime(b,data);return !b||!time(t)||!Number.isInteger(Number(t))||Number(t)+seconds>Number(data.as_of)||(analysisRaw(data)&&(b.closed!==true||b.time_domain!=='BROKER_RAW'||b.utc_time!=null||(b.raw_time!=null&&Number(b.raw_time)!==Number(t))))||['open','high','low','close'].some(k=>!number(b[k])||Number(b[k])<=0)||Number(b.low)>Math.min(Number(b.open),Number(b.close))||Number(b.high)<Math.max(Number(b.open),Number(b.close))||(i>0&&Number(t)<=Number(analysisBarTime(bars[i-1],data)));}))return 'Некорректный снимок: свечи повреждены, не закрыты или время недопустимо';
  return '';
 }
 function drawAnalysisOverlays({document,svg,data,groups,tx,y,left,right,top,bottom,figureLabels=false,opacity=.12,zoneColor='#67ddeb',onEvent=()=>{}}){
@@ -38,7 +47,7 @@ function drawAnalysisOverlays({document,svg,data,groups,tx,y,left,right,top,bott
  svg.append(clip);return count;
 }
 // Independent, read-only analysis transport. Never consumes trading chart candles.
-function analysisDiagnosticFacts(data){const d=data?.diagnostics;return {analysis_status:data?.status,timestamp_semantics:data?.timestamp_semantics,generated_at:data?.generated_at,as_of:data?.as_of,closed_through:data?.closed_through,bar_count:Array.isArray(data?.bars)?data.bars.length:undefined,analysis_reason:d?.reason??data?.reason,last_failure_reason:d?.last_failure_reason,worker_error:d?.error_code,worker_state:d?.supervisor_state,worker_failures:d?.failures,proof_status:d?.proof_status,proof_age_seconds:d?.proof_age_seconds,expected_closed_through:d?.expected_closed_through,history_ms:d?.history_ms,calculation_ms:d?.calculation_ms,ipc_ms:d?.ipc_ms,cache_age_seconds:d?.cache_age_seconds,cache_reused:d?.cache_reused};}
+function analysisDiagnosticFacts(data){const d=data?.diagnostics;return {analysis_status:data?.status,timestamp_semantics:data?.timestamp_semantics,time_domain:data?.time_domain,generated_at:data?.generated_at,as_of:data?.as_of,closed_through:data?.closed_through,bar_count:Array.isArray(data?.bars)?data.bars.length:undefined,analysis_reason:d?.reason??data?.reason,last_failure_reason:d?.last_failure_reason,worker_error:d?.error_code,worker_state:d?.supervisor_state,worker_failures:d?.failures,proof_status:d?.proof_status,proof_age_seconds:d?.proof_age_seconds,expected_closed_through:d?.expected_closed_through,history_ms:d?.history_ms,calculation_ms:d?.calculation_ms,ipc_ms:d?.ipc_ms,cache_age_seconds:d?.cache_age_seconds,cache_reused:d?.cache_reused};}
 function analysisDiagnosticReport(diagnostics,value){try{diagnostics?.record(value);}catch{}}
 function analysisDiagnosticNow(diagnostics){try{return diagnostics?.now()??0;}catch{return 0;}}
 function createAnalysisUI({document,fetch,getHeaders,diagnostics=null}){
@@ -47,20 +56,19 @@ function createAnalysisUI({document,fetch,getHeaders,diagnostics=null}){
  const states={READY:'Готово',STALE:'Устаревшие данные',DISCONNECTED:'Нет связи с MT5',TIME_UNVERIFIED:'Время не подтверждено',WARMING_UP:'Недостаточно истории',UNAVAILABLE:'Недоступно',ERROR:'Ошибка',LICENSE_PENDING:'Лицензия не согласована'};
  let visible=false,timer=null;
  const number=v=>typeof v!=='boolean'&&v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v));
- const stamp=t=>number(t)&&Number(t)>0&&Number(t)<8640000000000?new Date(Number(t)*1000).toISOString().replace('T',' ').slice(0,19)+' UTC':'—';
  const node=(tag,attrs={},text='')=>{const n=document.createElementNS(ns,tag);for(const [k,v]of Object.entries(attrs))n.setAttribute(k,String(v));n.textContent=String(text);return n;};
  const active=()=>visible&&!document.hidden&&!$('workspace').hidden;
  function clear(card){card.data=null;$(card.id+'-chart').replaceChildren();$(card.id+'-events').replaceChildren();$(card.id+'-source').textContent='';$(card.id+'-modules').textContent='';$(card.id+'-empty').textContent='';$(card.id+'-notes').textContent='';}
  function status(card,message,warning=true){$(card.id+'-status').hidden=!warning;$(card.id+'-status').textContent=message;$(card.id+'-status').dataset.tone=warning?'warning':'info';}
  function render(card,data){
-  const id=card.id,svg=$(id+'-chart'),moduleKeys=id==='patterns'?['talib']:['geometry'];
+  const id=card.id,svg=$(id+'-chart'),moduleKeys=id==='patterns'?['talib']:['geometry'],stamp=t=>analysisStamp(t,data),barTime=b=>analysisBarTime(b,data);
   clear(card,'Нет подтверждённых закрытых свечей');
   card.data=data;
   status(card,(states[data.status]??'Неизвестное состояние')+(data.reason?' · '+String(data.reason):''),data.status!=='READY');
   $(id+'-source').textContent=String(data.symbol??'')+' · '+data.timeframe+' · MT5 · снимок '+stamp(data.as_of)+'\nЗакрыто по '+stamp(data.closed_through)+' · рассчитано '+stamp(data.generated_at);
   $(id+'-modules').textContent=moduleKeys.map(k=>k+': '+(states[data.modules?.[k]?.status]??'Недоступно')+(data.modules?.[k]?.reason?' · '+data.modules[k].reason:'')).join('\n');
   $(id+'-notes').textContent=(Array.isArray(data.notes)?data.notes:[]).slice(0,12).map(note=>String(note).slice(0,500)).join(' · ');
-  // Unverified or unknown snapshots must not present apparently authoritative UTC candles.
+  // Only an explicit UTC or BROKER_RAW domain can provide time coordinates.
   if(!['READY','STALE'].includes(data.status))return;
   const invalid=analysisSnapshotError(data);if(invalid){status(card,invalid);return;}
   const allBars=data.bars;
@@ -72,12 +80,12 @@ function createAnalysisUI({document,fetch,getHeaders,diagnostics=null}){
   const left=8,right=width-78,top=16,bottom=height-25,step=(right-left)/bars.length,y=p=>bottom-(Number(p)-lo)/(hi-lo)*(bottom-top),x=i=>left+(i+.5)*step;
   // Overlay endpoints must refer to actual closed bars. Map full-history indices
   // into the visible window, then clip SVG geometry. Never invent bars in gaps.
-  const barIndices=new Map(allBars.map((b,i)=>[Number(b.utc_time),i]));
+  const barIndices=new Map(allBars.map((b,i)=>[Number(barTime(b)),i]));
   function tx(t){if(!number(t)||!barIndices.has(Number(t)))return null;return x(barIndices.get(Number(t))-offset);}
   for(let i=0;i<5;i++){const price=lo+(hi-lo)*i/4,yy=y(price);svg.append(node('line',{x1:left,x2:right,y1:yy,y2:yy,stroke:'#293545'}),node('text',{x:right+8,y:yy+4,fill:'#a4b9cc','font-size':12},price.toFixed(2)));}
-  bars.forEach((b,i)=>{const color=Number(b.close)>=Number(b.open)?'#26a69a':'#ef5350',xx=x(i),body=node('rect',{x:xx-step*.32,y:Math.min(y(b.open),y(b.close)),width:Math.max(1,step*.64),height:Math.max(1,Math.abs(y(b.open)-y(b.close))),fill:color});body.append(node('title',{},stamp(b.utc_time)+' · O '+b.open+' H '+b.high+' L '+b.low+' C '+b.close));svg.append(node('line',{x1:xx,x2:xx,y1:y(b.high),y2:y(b.low),stroke:color}),body);});
-  for(const index of [...new Set([0,Math.floor((bars.length-1)/2),bars.length-1])])svg.append(node('text',{x:x(index),y:height-6,fill:'#a4b9cc','font-size':11,'text-anchor':index===0?'start':index===bars.length-1?'end':'middle'},stamp(bars[index].utc_time).slice(5,16)));
-  svg.append(node('text',{x:right+8,y:height-6,fill:'#a4b9cc','font-size':11},'UTC'));
+  bars.forEach((b,i)=>{const color=Number(b.close)>=Number(b.open)?'#26a69a':'#ef5350',xx=x(i),body=node('rect',{x:xx-step*.32,y:Math.min(y(b.open),y(b.close)),width:Math.max(1,step*.64),height:Math.max(1,Math.abs(y(b.open)-y(b.close))),fill:color});body.append(node('title',{},stamp(barTime(b))+' · O '+b.open+' H '+b.high+' L '+b.low+' C '+b.close));svg.append(node('line',{x1:xx,x2:xx,y1:y(b.high),y2:y(b.low),stroke:color}),body);});
+  for(const index of [...new Set([0,Math.floor((bars.length-1)/2),bars.length-1])])svg.append(node('text',{x:x(index),y:height-6,fill:'#a4b9cc','font-size':11,'text-anchor':index===0?'start':index===bars.length-1?'end':'middle'},stamp(barTime(bars[index])).slice(5,16)));
+  svg.append(node('text',{x:right+8,y:height-6,fill:'#a4b9cc','font-size':11},analysisTimeLabel(data)));
   const groups=id==='patterns'?[['candlestick','talib']]:[['figures','geometry']];
   const count=drawAnalysisOverlays({document,svg,data,groups,tx,y,left,right,top,bottom,figureLabels:true,onEvent(o,key){
    const detail=(key==='figures'?'Геометрия · ':'')+String(o.label??o.kind)+' · '+String(o.status??'')+' · сформировано '+stamp(o.formed_at)+' · обнаружено в снимке '+stamp(o.known_at);
@@ -125,14 +133,14 @@ function createMainAnalysisUI({document,fetch,getHeaders,getPreferences,onChange
  const active=()=>visible&&!document.hidden&&!$('workspace').hidden&&(getPreferences().liquidity||getPreferences().mainTrend);
  const status=text=>{if($('main-analysis-status').textContent!==text)$('main-analysis-status').textContent=text;$('main-analysis-status').hidden=!text;};
  function reason(){
-  if(feed&&feed.timestamp_semantics!=='VERIFIED')return 'Анализ: время не подтверждено';
-  if(!fresh||!feed||feed.status!=='FRESH'||feed.connected!==true)return 'Анализ: нет свежего снимка MT5';
+  if(feed&&!analysisDomain(feed))return 'Анализ: время не подтверждено';
+  if(!fresh||!feed||feed.status!==(analysisRaw(feed)?'OBSERVED':'FRESH')||feed.connected!==true)return 'Анализ: нет свежего снимка MT5';
   if(feed.source!=='MT5'||!feed.instance||!feed.symbol)return 'Анализ: источник не подтверждён';
   return '';
  }
  function stop(){seq++;controller?.abort();controller=null;clearInterval(timer);timer=null;data=null;received=0;$('main-analysis-source').textContent='';}
  function refresh(){
-  const next=[visible,document.hidden,$('workspace').hidden,getPreferences().liquidity,getPreferences().mainTrend,feed?.instance,feed?.symbol,feed?.connected,feed?.source,fresh,feed?.status,feed?.timestamp_semantics].join('|');
+  const next=[visible,document.hidden,$('workspace').hidden,getPreferences().liquidity,getPreferences().mainTrend,feed?.instance,feed?.symbol,feed?.connected,feed?.source,fresh,feed?.status,feed?.timestamp_semantics,feed?.time_domain].join('|');
   if(next===context)return;context=next;stop();
   if(!active()){status('');onChange();return;}
   if(reason()){status(reason());onChange();return;}
@@ -152,9 +160,9 @@ function createMainAnalysisUI({document,fetch,getHeaders,getPreferences,onChange
    stage='VALIDATE';const state={TIME_UNVERIFIED:'время не подтверждено',STALE:'данные устарели',WARMING_UP:'ожидание закрытых свечей',UNAVAILABLE:'недоступно',DISCONNECTED:'нет связи с MT5',ERROR:'ошибка'};
    diagnosticReason='ANALYSIS_NOT_READY';if(value.status!=='READY')throw Error('Анализ: '+(state[value.status]??'неизвестное состояние')+(value.reason?' · '+String(value.reason):''));
    diagnosticReason='SNAPSHOT_INVALID';const invalid=analysisSnapshotError(value);if(invalid||value.timeframe!=='M1')throw Error(invalid||'Анализ: неверный период');
-   const end=Number(value.bars.at(-1)?.utc_time)+60;
+   const end=Number(analysisBarTime(value.bars.at(-1),value))+60;
    if(!number(value.closed_through)||!Number.isInteger(Number(value.closed_through))||Number(value.closed_through)!==end||Number(value.closed_through)>Number(value.as_of))throw Error('Анализ: некорректное время закрытых свечей');
-   if(value.symbol!==feed.symbol||value.feed_instance!==feed.instance)throw Error('Анализ: источник изменился, слои скрыты');
+   if(value.symbol!==feed.symbol||value.feed_instance!==feed.instance||analysisDomain(value)!==analysisDomain(feed))throw Error('Анализ: источник изменился, слои скрыты');
    finishStage('validation_ms');data=value;received=Date.now();stage='COMPLETE';report('OK');
   }catch(e){
    const failedTiming={FETCH:'fetch_ms',PARSE:'parse_ms',VALIDATE:'validation_ms'}[stage];if(failedTiming&&timings[failedTiming]===undefined)timings[failedTiming]=Math.max(0,analysisDiagnosticNow(diagnostics)-mark);
@@ -168,13 +176,16 @@ function createMainAnalysisUI({document,fetch,getHeaders,getPreferences,onChange
  function draw({svg,candles,x,y,left,right,top,bottom}){
   if(!active())return;
   const blocked=reason();if(blocked){status(blocked);return;}if(!data)return;
-  if(Date.now()-received>20000||Date.now()<received){status('Анализ: снимок устарел, слои скрыты');return;}
-  const now=Number(feed.timestamp)+Number(feed.age_seconds??0),expected=Math.floor(now/60)*60;
-  if(!number(feed.timestamp)||!number(feed.age_seconds??0)||!number(data.closed_through)||Number(data.closed_through)<expected){status('Анализ: ожидается расчёт последней закрытой M1');return;}
-  const history=data.bars,indices=new Map(history.map((b,i)=>[Number(b.utc_time),i]));
+  if(!analysisRaw(data)&&(Date.now()-received>20000||Date.now()<received)){status('Анализ: снимок устарел, слои скрыты');return;}
+  if(analysisDomain(data)!==analysisDomain(feed)){status('Анализ: источник изменился, слои скрыты');return;}
+  // In raw mode the observed native bars, not wall time or quote age, define closure.
+  const raw=analysisRaw(feed),closedBars=raw?(feed.candles??[]).filter(b=>b.closed===true):[];
+  const expected=raw?(closedBars.length?Number(analysisBarTime(closedBars.at(-1),feed))+60:NaN):Math.floor((Number(feed.timestamp)+Number(feed.age_seconds??0))/60)*60;
+  if((!raw&&(!number(feed.timestamp)||!number(feed.age_seconds??0)))||!Number.isFinite(expected)||!number(data.closed_through)||Number(data.closed_through)<expected){status('Анализ: ожидается расчёт последней закрытой M1');return;}
+  const history=data.bars,indices=new Map(history.map((b,i)=>[Number(analysisBarTime(b,data)),i]));
   let anchor=null;
   for(let i=0;i<candles.length;i++){
-   const candle=candles[i],index=indices.get(Number(candle.utc_time));if(index===undefined)continue;
+   const candle=candles[i];if(raw&&candle.closed!==true)continue;const index=indices.get(Number(analysisBarTime(candle,feed)));if(index===undefined)continue;
    if(['open','high','low','close'].some(k=>Number(candle[k])!==Number(history[index][k]))){status('Анализ: свечи источников различаются, слои скрыты');return;}
    if(anchor===null)anchor={index,visible:i};
    else if(index-anchor.index!==i-anchor.visible){status('Анализ: история изменилась, слои скрыты');return;}
@@ -186,7 +197,7 @@ function createMainAnalysisUI({document,fetch,getHeaders,getPreferences,onChange
   // A READY SMC module may still have failed components. Surface them outside the canvas.
   if(prefs.liquidity)for(const[name,value]of Object.entries(data.modules?.smc?.components??{}))if(value?.status!=='READY')problems.push('SMC '+name+': '+String(value?.reason??value?.status??'недоступно'));
   status(problems.length?'Анализ: '+problems.join(' · '):'');
-  $('main-analysis-source').textContent='M1 · '+data.symbol+' · закрыто по '+new Date(Number(data.closed_through)*1000).toISOString().replace('T',' ').slice(0,19)+' UTC';
+  $('main-analysis-source').textContent='M1 · '+data.symbol+' · закрыто по '+analysisStamp(data.closed_through,data);
   drawAnalysisOverlays({document,svg,data,groups,tx,y,left,right,top,bottom,opacity:prefs.opacity/100,zoneColor:prefs.colors.zone});
  }
  document.addEventListener('visibilitychange',refresh);

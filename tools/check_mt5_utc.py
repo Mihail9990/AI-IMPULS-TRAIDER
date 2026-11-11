@@ -15,6 +15,11 @@ def main():
     try:
         config=json.loads(Path(args.config).read_text(encoding='utf-8'))
         config['enable_trading']=False
+        if config.get('market_time_mode')=='mt5_raw_v1':
+            print(json.dumps(dict(status='RAW_MODE_NO_UTC_CHECK',trading=False,
+                market_data_time_status='BROKER_RAW',trusted_utc=None,
+                reason='Raw mode intentionally does not verify quote age or UTC semantics. Use --inspect for read-only data checks.')))
+            return 2
         broker=MT5EvidenceBroker(config)  # No Store: no state/database mutation.
         broker.connect()
         safety=broker.time_safety

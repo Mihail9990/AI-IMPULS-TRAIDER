@@ -38,6 +38,20 @@ async function reload(data){ui.setVisible(false);ui.setVisible(true);await settl
  ui.setVisible(false);document.hidden=true;ui.setVisible(true);const before=requests.length;listeners.visibilitychange();assert.equal(requests.length,before);document.hidden=false;listeners.visibilitychange();assert.equal(requests.length,before+1);await settle(requests.at(-1),snapshot());assert.equal(kinds().length,3);
  await reload(snapshot({overlays:{trendlines:[{kind:'trendline',points:[{time:bars[40].utc_time-1800,price:100},{time:bars.at(-1).utc_time,price:102}]}]}}));assert.equal(kinds().length,0,'missing timestamp never fabricated');
  await reload(snapshot());const create=document.createElementNS;document.createElementNS=()=>{throw Error('synthetic render fault');};assert.doesNotThrow(()=>kinds(),'overlay fault cannot escape into main chart rendering');document.createElementNS=create;assert(get('main-analysis-status').textContent.includes('ошибка отображения'));assert.equal(kinds().length,0);
+
+ // Raw-mode closure is established by observed native bars, including session gaps.
+ const rawBars=bars.map(b=>({...b,broker_time:b.utc_time,raw_time:b.utc_time,utc_time:null,time_domain:'BROKER_RAW',closed:true}));
+ const rawFeed={...feed(),timestamp_semantics:'BROKER_RAW',time_domain:'BROKER_RAW',status:'OBSERVED',timestamp:null,age_seconds:null,broker_time:closed+3*86400,candles:[...rawBars,{broker_time:closed+3*86400,raw_time:closed+3*86400,utc_time:null,closed:false,open:102,close:103,low:101,high:104}]};
+ const rawSnapshot={...snapshot(),timestamp_semantics:'BROKER_RAW',time_domain:'BROKER_RAW',as_of:rawFeed.broker_time,bars:rawBars};
+ const rawKinds=()=>draw(rawFeed.candles.slice(-80)).filter(n=>n.attributes['data-analysis-kind']);
+ ui.updateFeed(rawFeed,true);await settle(requests.at(-1),rawSnapshot);assert.equal(rawKinds().length,3);
+ assert(get('main-analysis-source').textContent.includes('время MT5'));assert(!get('main-analysis-source').textContent.includes('UTC'));
+ clock+=4*86400000;assert.equal(rawKinds().length,3,'wall-clock delay does not expire raw analysis');
+ ui.updateFeed({...rawFeed,broker_time:rawFeed.broker_time+60},true);assert.equal(rawKinds().length,3,'tick alone does not invent a closed native bar');
+ ui.updateFeed({...rawFeed,candles:[...rawFeed.candles.slice(0,-1),{...rawFeed.candles.at(-1),closed:true}]},true);assert.equal(rawKinds().length,0,'newly observed closed candle hides old analysis');
+ ui.updateFeed(rawFeed,false);assert.equal(rawKinds().length,0,'HTTP freshness gate still applies');ui.updateFeed(rawFeed,true);await settle(requests.at(-1),rawSnapshot);assert.equal(rawKinds().length,3);
+ await reload(snapshot());assert.equal(rawKinds().length,0,'UTC analysis cannot overlay a raw feed');
+ ui.setVisible(false);ui.setVisible(true);const obsoleteRaw=requests.at(-1);ui.updateFeed(feed(),true);await settle(requests.at(-1),snapshot());await settle(obsoleteRaw,rawSnapshot);assert.equal(kinds().length,3,'old domain response cannot replace new domain');
  assert(requests.every(r=>r.options.method==='GET'&&r.url==='/api/analysis?timeframe=M1'));assert(redraws>0);ui.setVisible(false);
  console.log('PASS main M1 overlays: toggles, bounded polling, native source binding, OHLC alignment/gaps, clipping, freshness, partial errors, disconnect/recovery, abort races, hidden tabs and zero trade calls. Browser rendering NOT verified.');
 })().catch(e=>{console.error(e);process.exitCode=1;});

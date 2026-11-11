@@ -11,6 +11,7 @@ ctx.view={metrics:{recovery_total:'12.3456',all_closed_net:'-2.3456',currency:'U
 assert.equal($('activity-totals-note').hidden,true);assert.equal($('activity-totals-note').textContent,'');
 assert.equal($('activity-recovery').textContent,'-12.3456 UST');assert.equal($('activity-total-net').textContent,'-2.3456 UST');assert.equal($('activity-total-net').dataset.tone,'loss');
 const card=$('position-history-list').children[0];assert.equal(card.children[0].textContent,'BUY');assert.equal(card.children.at(-1).textContent,'TP · 2.74 UST');assert(card.children[1].textContent.includes('1970-01-01'));assert(card.children[2].textContent.includes('4000'));
+ctx.view.feed={timestamp_semantics:'BROKER_RAW',time_domain:'BROKER_RAW'};run();assert.equal($('position-history-list').children[0].children[1].textContent,'Открытие: —','history has no raw-time evidence contract');delete ctx.view.feed;
 ctx.view.metrics.recovery_total='0.000';ctx.view.metrics.all_closed_net='0';run();assert.equal($('activity-recovery').textContent,'0 UST');assert.equal($('activity-total-net').textContent,'0 UST');
 assert.equal($('activity-total-net').dataset.tone,'success');
 ctx.view.metrics.all_closed_net='1.25';run();assert.equal($('activity-total-net').dataset.tone,'success');

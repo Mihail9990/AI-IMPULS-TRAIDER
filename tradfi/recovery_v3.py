@@ -209,7 +209,9 @@ class ControlledRecoveryController(LatestCloseBasketController):
         request=dict(order_type=a['order_type'],timing=a['timing'],side=a['side'],count=count,distance=self.state['v3_settings']['entry_distance'],recovery_profile=profile)
         if a['timing']=='now':self._arm_v3(snap,request,a['side']);return
         accepted=getattr(self,'_deferred_action_accepted_utc',None)
-        request['bar_id']=int(number(snap['now'] if accepted is None else accepted)//60)*60+(60 if a['timing']=='next' else 0)
+        if snap.get('market_time_mode')=='mt5_raw_v1':
+            accepted=getattr(self,'_deferred_action_accepted_market_time',None)
+        request['bar_id']=int(number(self._market_now(snap) if accepted is None else accepted)//60)*60+(60 if a['timing']=='next' else 0)
         c['v3_request']=request;self.state['phase']='V3_WAIT_CANDLE';self.save('v3_schedule_created')
 
     def _recovery_tps(self,cfg,spec,side,entries,sizes,debt):
@@ -533,7 +535,7 @@ class ControlledRecoveryController(LatestCloseBasketController):
         request=c.get('v3_request')
         if request:
             bar=snap['candle'];target=request['bar_id']
-            if number(snap['now'])<target+60:self.state['phase']='V3_WAIT_CANDLE';return
+            if number(self._market_now(snap))<target+60:self.state['phase']='V3_WAIT_CANDLE';return
             if bar['id']!=target or not self._fresh_closed_candle(snap):
                 c.pop('v3_request');self.notify('Свеча V3 пропущена или данные устарели. Вход отменён, выберите новую свечу.');self.save('v3_missed_candle');return
             c.pop('v3_request');self.save('v3_schedule_consumed')

@@ -5,13 +5,18 @@ from types import ModuleType
 from .mt5_adapter import MT5Broker, QuoteFreshnessError, NotSent, EntryDataWait, dec
 from .settings import number
 from .native_time import M1_TRANSITION_WAIT
-from .time_profile import TEST_PROFILE, BYBIT_PROFILE, HistoryTimeUnverified, TimeProfileError, market_timestamp_to_utc, validate_market_time_offset
+from .time_profile import TEST_PROFILE, BYBIT_PROFILE, RAW_MARKET_MODE, HistoryTimeUnverified, TimeProfileError, market_timestamp_to_utc, market_tick_raw_seconds, validate_market_time_offset, validate_market_time_mode
 
 
 class MT5EvidenceBroker(MT5Broker):
     evidence_contract='per_obligation_v1'
 
     def __init__(self, config, store=None, *, api=None, time_safety=None, **kwargs):
+        if store is not None:
+            from .market_time_state import resolve_market_time_config
+            config=resolve_market_time_config(store,config)
+        self.market_time_mode=validate_market_time_mode(config)
+        self.raw_market=None
         self.market_time_offset_seconds=validate_market_time_offset(config)
         if config.get('time_profile')==TEST_PROFILE and (api is None or isinstance(api,ModuleType)):
             raise HistoryTimeUnverified()
@@ -19,10 +24,18 @@ class MT5EvidenceBroker(MT5Broker):
             from .market_time_state import bind_market_time_state
             bind_market_time_state(store,config)
         super().__init__(config,store=store,api=api,**kwargs)
+        from .raw_market_time import MT5DisplayClock
+        self.display_clock=MT5DisplayClock(self.monotonic)
+        if self.market_time_mode == RAW_MARKET_MODE:
+            from .raw_market_time import RawMarketTime
+            self.raw_market=RawMarketTime(self.monotonic)
         self.read_only=not self.enable_trading
         from .time_safety import TimeSafety
         self.time_safety = time_safety
-        if self.time_profile == BYBIT_PROFILE and self.time_safety is None:
+        if getattr(self,'raw_market',None) is not None:
+            if time_safety is not None:
+                raise ValueError('Raw market mode cannot use a UTC verifier')
+        elif self.time_profile == BYBIT_PROFILE and self.time_safety is None:
             self.time_safety = TimeSafety(clock=self.clock, monotonic=self.monotonic)
             # Only the normal unconfigured safety object receives the native verifier.
             # Explicit injected safety doubles retain their test contract.
@@ -31,9 +44,13 @@ class MT5EvidenceBroker(MT5Broker):
                 self.time_safety.semantics_verifier=NativeUTCVerifier(self,self.time_safety)
 
     def market_time_to_utc(self,stamp):
+        if getattr(self,'raw_market',None) is not None:
+            raise TimeProfileError('RAW_MARKET_TIME_IS_NOT_VERIFIED_UTC')
         return market_timestamp_to_utc(stamp,self.market_time_offset_seconds)
 
     def _timestamp_semantics_verified(self):
+        if getattr(self,'raw_market',None) is not None:
+            return False
         if self.time_profile == TEST_PROFILE:
             return True
         try:
@@ -49,6 +66,10 @@ class MT5EvidenceBroker(MT5Broker):
         return super()._quote_clock()
 
     def _check_quote_time(self, tick, stage):
+        if getattr(self,'raw_market',None) is not None:
+            stamp=market_tick_raw_seconds(tick)
+            return dict(raw_time_msc=getattr(tick,'time_msc'),broker_time=stamp,
+                        utc_time=None,offset_seconds=None,age_s=None)
         if not self._timestamp_semantics_verified():
             if getattr(self, '_cancel_request', False) and stage != 'cancel_freeze_check':
                 return None  # ticket-only REMOVE; a nonzero freeze level is checked separately
@@ -77,14 +98,76 @@ class MT5EvidenceBroker(MT5Broker):
         old=getattr(self,'_manual_readonly',False)
         if mutation: self._manual_readonly=False
         try:
-            return super()._context(mutation=mutation,stage=stage)
+            value=super()._context(mutation=mutation,stage=stage)
+            display=getattr(self,'display_clock',None)
+            if display is not None:display.connection(True)
+            if getattr(self,'raw_market',None) is not None:self.raw_market.observe(value[3])
+            return value
+        except (ValueError,OSError,TimeoutError,ArithmeticError) as exc:
+            disconnected=isinstance(exc,OSError) and str(exc) in {
+                'MT5 adapter is not connected','MT5 terminal unavailable/disconnected'}
+            if getattr(self,'raw_market',None) is not None:
+                self.raw_market.invalidate(disconnected=disconnected)
+            display=getattr(self,'display_clock',None)
+            source_changed=isinstance(exc,ValueError) and str(exc) in {
+                'Unexpected MT5 account/server','MT5 account changed','Unexpected MT5 terminal path'}
+            if (disconnected or source_changed) and display is not None:display.connection(False)
+            raise
         finally:
             self._manual_readonly=old
+
+    def observe_raw_market(self):
+        """Read-only eligibility: connection, valid quote and coherent native bars.
+
+        No age/UTC/clock-offset requirement. Reconnection may accept cached data.
+        """
+        if getattr(self,'raw_market',None) is None:return False
+        try:
+            from .raw_market_time import closed_pair
+            _,_,_,tick,_=self._context(stage='raw_market_observation')
+            closed_pair(tick,self.api.copy_rates_from_pos(self.symbol,self.api.TIMEFRAME_M1,0,2))
+            return True
+        except (ValueError,OSError,TimeoutError,ArithmeticError,TypeError,KeyError):
+            self.raw_market.invalidate()
+            return False
+
+    def close(self):
+        if getattr(self,'raw_market',None) is not None:self.raw_market.invalidate(disconnected=True)
+        display=getattr(self,'display_clock',None)
+        if display is not None:display.connection(False)
+        super().close()
+
+    def sync_display_clock(self):
+        _,_,_,tick,_=self._context(stage='display_clock_alignment')
+        return self.display_clock.align(tick)
+
+    def activate_raw_market_time(self):
+        """Only after the durable, explicitly requested migration commits."""
+        from .raw_market_time import RawMarketTime
+        self.config.update(market_time_mode=RAW_MARKET_MODE,market_time_offset_seconds=0)
+        self.market_time_mode=RAW_MARKET_MODE
+        self.market_time_offset_seconds=0
+        self.time_safety=None
+        self.raw_market=RawMarketTime(self.monotonic)
+        self.clock_anchor=None
+        self.clock_failed=False
 
     def _raise_entry_wait(self):
         waiting = getattr(self, 'entry_waiting', None)
         if waiting is not None and waiting() is True:
-            raise EntryDataWait('MT5_UTC_M1_TRANSITION_WAIT')
+            raise EntryDataWait('MT5_RAW_WAIT_DATA' if getattr(self,'raw_market',None) is not None else 'MT5_UTC_M1_TRANSITION_WAIT')
+
+    def preflight(self):
+        if getattr(self,'raw_market',None) is None:return super().preflight()
+        snap=self.snapshot()
+        return dict(backend=self.backend_id,time_profile=self.time_profile,
+                    market_time_mode=self.market_time_mode,mode='READ_ONLY',inspect_status='OK',
+                    market_data_time_status='BROKER_RAW',freshness_policy='ACCEPT_LAST_OBSERVED',
+                    history_time_status='UNVERIFIED',history_complete=False,execution_ready=False,
+                    adapter_trading_enabled=False,connected=True,hedging=True,symbol=self.symbol,
+                    currency=snap['spec']['currency'],spec=snap['spec'],quote=snap['quote'],
+                    candle=snap['candle'],market_observation=snap['market_observation'],
+                    orders=len(snap['orders']),positions=len(snap['positions']))
 
     def _request(self, command):
         guard=getattr(self,'before_mutation',None)
@@ -142,13 +225,20 @@ class MT5EvidenceBroker(MT5Broker):
         audit=self.reconciliation_evidence()
         orders=self.api.orders_get(symbol=self.symbol)
         positions=self.api.positions_get(symbol=self.symbol)
-        rates=self.api.copy_rates_from_pos(self.symbol,self.api.TIMEFRAME_M1,1,1)
-        if orders is None or positions is None or rates is None or len(rates)!=1:
+        raw_mode=getattr(self,'raw_market',None) is not None
+        rates=self.api.copy_rates_from_pos(self.symbol,self.api.TIMEFRAME_M1,0 if raw_mode else 1,2 if raw_mode else 1)
+        if orders is None or positions is None or rates is None or len(rates)!=(2 if raw_mode else 1):
             raise OSError('Incomplete current market observation')
         quote_time=self._check_quote_time(tick,'evidence_market_time')
         semantics_verified = self._timestamp_semantics_verified()
         candle_time=number(rates[0]['time']) if semantics_verified else 0
-        if not semantics_verified or quote_time is None:
+        current_candle=None
+        if raw_mode:
+            from .raw_market_time import closed_pair
+            closed,current_candle=closed_pair(tick,rates)
+            rates=[closed]
+            candle_time=number(closed['time'])
+        elif not semantics_verified or quote_time is None:
             # Unknown MT5 wall-time is display-only, never a UTC candle identity.
             quote_time = None
             candle_time = 0
@@ -218,7 +308,7 @@ class MT5EvidenceBroker(MT5Broker):
                     self._save_row(cid,dict(row,result=dict(status=proven,reason='OBLIGATION_EVIDENCE')),'evidence_readback')
         self._context(stage='evidence_snapshot_return')
         quote_time = self._check_quote_time(tick,'evidence_snapshot_return')
-        if quote_time is None:
+        if quote_time is None and not raw_mode:
             candle_time = 0
         # Native rates use NumPy int64. Normalize display metadata only; raw
         # epoch value and the independently verified UTC contract stay unchanged.
@@ -226,13 +316,17 @@ class MT5EvidenceBroker(MT5Broker):
                     reconciliation_contract=self.evidence_contract,history_complete=False,
                     observations_usable=usable,obligations=obligations,ledger_facts=facts['deal'],
                     history_time_status='UNVERIFIED',settlement_basis='cycle_scoped_identity_v1',
-                    mt5_timestamp_semantics='VERIFIED' if semantics_verified else 'UNVERIFIED',
+                    mt5_timestamp_semantics='BROKER_RAW' if raw_mode else ('VERIFIED' if semantics_verified else 'UNVERIFIED'),
+                    market_time_mode=self.market_time_mode,
+                    market_observation=self.raw_market.view() if raw_mode else None,
                     mt5_display_time=dict(tick_time_msc=getattr(tick,'time_msc',None),
                         candle_time=rates[0]['time'].item() if hasattr(rates[0]['time'],'item') else rates[0]['time'],
-                        server_display_utc_offset_seconds=self.market_time_offset_seconds if quote_time else None),
+                        server_display_utc_offset_seconds=self.market_time_offset_seconds if quote_time and not raw_mode else None),
                     now=self.clock(),spec=spec,quote=dict(bid=dec(tick.bid),ask=dec(tick.ask),
-                        utc_time=quote_time['utc_time'] if quote_time else None),
-                    candle=dict(id=int(candle_time),open=dec(rates[0]['open']),close=dec(rates[0]['close'])),
+                        utc_time=quote_time['utc_time'] if quote_time else None,
+                        **(dict(broker_time=quote_time['broker_time'],raw_time_msc=int(tick.time_msc)) if raw_mode else {})),
+                    candle=dict(id=int(candle_time),open=dec(rates[0]['open']),close=dec(rates[0]['close']),
+                        **(dict(current_id=current_candle,closed=True,time_domain='BROKER_RAW') if raw_mode else {})),
                     orders=[order_json(plain(o)) for o in orders],order_history=[order_json(r) for r in facts['order'].values()],
                     positions=[dict(id=str(p.identifier),ticket=str(p.ticket),owned=str(p.identifier) in owned_positions,
                                     side='BUY' if p.type==self.api.POSITION_TYPE_BUY else 'SELL',entry=dec(p.price_open),

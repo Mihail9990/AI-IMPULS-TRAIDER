@@ -27,6 +27,10 @@ def _numeric(value):
     return value
 
 
+def _coordinate(row):
+    return row['broker_time'] if row.get('time_domain') == 'BROKER_RAW' else row['utc_time']
+
+
 def _prepare(bars, timeframe, as_of):
     seconds = SECONDS[timeframe]
     now = _numeric(as_of)
@@ -34,15 +38,15 @@ def _prepare(bars, timeframe, as_of):
         raise ValueError('invalid input')
     rows, last = [], -1
     for bar in bars:
-        t = _numeric(bar['utc_time'])
+        t = _numeric(_coordinate(bar))
         prices = {k: _numeric(bar[k]) for k in ('open', 'high', 'low', 'close')}
         if t <= last or t <= 0 or not t.is_integer():
             raise ValueError('invalid time')
         last = t
         if min(prices.values()) <= 0 or prices['high'] < max(prices.values()) or prices['low'] > min(prices.values()):
             raise ValueError('invalid prices')
-        if t + seconds <= now:
-            rows.append(dict(prices, utc_time=int(t)))
+        if t + seconds <= now and (bar.get('time_domain') != 'BROKER_RAW' or bar.get('closed') is True):
+            rows.append(dict(prices, **({'broker_time': int(t), 'time_domain': 'BROKER_RAW', 'closed': True} if bar.get('time_domain') == 'BROKER_RAW' else {'utc_time': int(t)})))
     return rows[-MAX_BARS:], now
 
 
@@ -66,14 +70,14 @@ def _pivots(rows):
 
 
 def _figure(kind, label, pivots, rows, now, seconds, points=None):
-    coords = [{'time': rows[p[0]]['utc_time'], 'price': p[2]} for p in (points or pivots)]
-    return {'id': f"geometry:{kind}:{rows[pivots[0][0]]['utc_time']}:{rows[pivots[-1][0]]['utc_time']}",
+    coords = [{'time': _coordinate(rows[p[0]]), 'price': p[2]} for p in (points or pivots)]
+    return {'id': f"geometry:{kind}:{_coordinate(rows[pivots[0][0]])}:{_coordinate(rows[pivots[-1][0]])}",
             'kind': 'figure_' + kind, 'label': label + ' · экспериментально',
             'direction': 'neutral', 'status': 'EXPERIMENTAL_CANDIDATE',
-            'start_time': rows[pivots[0][0]]['utc_time'], 'end_time': rows[pivots[-1][0]]['utc_time'],
+            'start_time': _coordinate(rows[pivots[0][0]]), 'end_time': _coordinate(rows[pivots[-1][0]]),
             'price': pivots[-1][2], 'top': None, 'bottom': None, 'points': coords,
-            'formed_at': rows[pivots[-1][0]]['utc_time'], 'known_at': now,
-            'confirmed_through': rows[pivots[-1][0]+RADIUS]['utc_time'] + seconds}
+            'formed_at': _coordinate(rows[pivots[-1][0]]), 'known_at': now,
+            'confirmed_through': _coordinate(rows[pivots[-1][0]+RADIUS]) + seconds}
 
 
 def _detect(rows, now, seconds):
@@ -129,7 +133,7 @@ def _detect(rows, now, seconds):
             if kind:
                 found.append(_figure(kind, label, six, rows, now, seconds, points=[h0, h1, l1, l0, h0]))
     retained = []
-    by_time = {r['utc_time']: i for i, r in enumerate(rows)}
+    by_time = {_coordinate(r): i for i, r in enumerate(rows)}
     for mark in found:
         index = by_time[mark['formed_at']]
         if len(rows)-1-index >= 100:

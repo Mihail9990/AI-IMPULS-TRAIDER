@@ -118,6 +118,7 @@ class NativePanel:
         self.logs=DiagnosticLogs(controller.broker.config.get('log_file','tradfi_mt5.log') if hasattr(controller.broker,'config') else None)
         self.transport=WebTransport(self.mailbox,authority=authority,password=password,clock=monotonic,public_origin=public_origin,logs=self.logs,analysis=self.analysis)
         self.authority=authority;self.next_feed=0;self.snapshot=None;self.server=None
+        self.market_time_mode=getattr(controller.broker,'market_time_mode','fixed_utc_v1')
         if 'web_store_id' not in controller.state:
             controller.state['web_store_id']=uuid.uuid4().hex
             controller.save('bind_web_store_identity')
@@ -150,6 +151,17 @@ class NativePanel:
         # Presentation only: use cached diagnostics, never probe MT5/network or
         # replace/clear the latched execution guard while rendering a view.
         state=self.controller.state
+        display=getattr(self.controller.broker,'display_clock',None)
+        from .market_time_migration import migration_availability
+        can_switch,switch_reason=migration_availability(self.controller,getattr(self,'snapshot',None))
+        extras=dict(display_clock=display.view() if display is not None else None,
+                    can_switch_raw=can_switch,switch_reason=switch_reason,
+                    market_time_mode=getattr(self.controller.broker,'market_time_mode','fixed_utc_v1'))
+        raw=getattr(self.controller.broker,'raw_market',None)
+        if raw is not None:
+            return dict(latched_reason=(state.get('time_block') or {}).get('reason'),
+                        current_reason=raw.reason,waiting_data=not raw.available,
+                        **extras,**raw.view())
         safety=getattr(self.controller.broker,'time_safety',None)
         verifier=getattr(safety,'semantics_verifier',None)
         current=getattr(verifier,'reason',None)
@@ -157,9 +169,22 @@ class NativePanel:
         if current is None and isinstance(result,dict) and not result.get('ok'):
             current=result.get('reason')
         return dict(latched_reason=(state.get('time_block') or {}).get('reason'),current_reason=current,
-                    waiting_data=bool(not state.get('time_block') and current=='MT5_UTC_M1_TRANSITION_WAIT'))
+                    waiting_data=bool(not state.get('time_block') and current=='MT5_UTC_M1_TRANSITION_WAIT'),**extras)
+
+    def _reset_market_view(self):
+        mode=getattr(self.controller.broker,'market_time_mode','fixed_utc_v1')
+        if mode==getattr(self,'market_time_mode',mode):return
+        # Time domains cannot share candle/cache identities after migration.
+        self.analysis.close()
+        from .analysis_service import AnalysisService,DisabledAnalysisService
+        try:self.analysis=AnalysisService(self.controller.broker)
+        except Exception:self.analysis=DisabledAnalysisService(self.controller.broker.symbol)
+        self.transport.analysis=self.analysis
+        self.feed=ChartFeed(self.controller.broker,clock=self.clock,monotonic=self.monotonic)
+        self.snapshot=None;self.next_feed=0;self.market_time_mode=mode
 
     def view(self):
+        self._reset_market_view()
         s=self.controller.state;c=s.get('cycle') or {};snap=self.snapshot or {}
         feed=self.feed.view()
         if 'basket_settings' in s:

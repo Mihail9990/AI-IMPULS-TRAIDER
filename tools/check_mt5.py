@@ -30,11 +30,12 @@ def failure(code):
 
 def summarize(data):
     """Allowlist output, including numeric types; never forward raw stdout/stderr or config."""
+    raw_mode=isinstance(data,dict) and data.get('market_time_mode')=='mt5_raw_v1'
     if (not isinstance(data,dict) or data.get('inspect_status')!='OK'
             or data.get('mode')!='READ_ONLY' or data.get('adapter_trading_enabled') is not False
             or data.get('execution_ready') is not False or data.get('history_complete') is not False
             or data.get('connected') is not True or data.get('hedging') is not True
-            or data.get('currency')!='UST' or data.get('market_data_time_status')!='VERIFIED'):
+            or data.get('currency')!='UST' or data.get('market_data_time_status')!=('BROKER_RAW' if raw_mode else 'VERIFIED')):
         return failure('INVALID_RESULT')
     audit=data.get('reconciliation',{})
     if (not isinstance(audit,dict) or audit.get('execution_ready') is not False
@@ -49,22 +50,31 @@ def summarize(data):
         value=source.get(key)
         if type(value) is not int or not 0<=value<10**12: return failure('INVALID_RESULT')
         metrics[name]=value
-    quote=data.get('quote_time')
+    quote=data.get('quote') if raw_mode else data.get('quote_time')
     if not isinstance(quote,dict): return failure('INVALID_RESULT')
-    for key in ('age_s','offset_seconds'):
-        value=quote.get(key)
-        if type(value) not in (int,float) or not math.isfinite(value): return failure('INVALID_RESULT')
-        metrics[key]=value
-    if abs(metrics['age_s'])>5 or metrics['offset_seconds'] not in (7200,10800):
-        return failure('INVALID_RESULT')
+    if raw_mode:
+        stamp=quote.get('broker_time')
+        if (quote.get('utc_time') is not None or type(stamp) not in (int,float)
+                or not math.isfinite(stamp) or stamp<=0
+                or data.get('freshness_policy')!='ACCEPT_LAST_OBSERVED'):
+            return failure('INVALID_RESULT')
+    else:
+        for key in ('age_s','offset_seconds'):
+            value=quote.get(key)
+            if type(value) not in (int,float) or not math.isfinite(value): return failure('INVALID_RESULT')
+            metrics[key]=value
+        if abs(metrics['age_s'])>5 or metrics['offset_seconds'] not in (7200,10800):
+            return failure('INVALID_RESULT')
     warnings=['Historical UTC remains UNVERIFIED; history_complete=false.',
               'No ownership journal supplied; discovered history is not owned strategy evidence.',
               'Execution remains disabled; this report does not approve trading.']
+    if raw_mode:warnings.append('BROKER_RAW: quote age is intentionally unchecked; timestamps are not verified UTC.')
     if metrics['orders'] or metrics['positions']: warnings.append('Existing live objects observed; nothing was modified.')
     if metrics['unavailable_sources']: warnings.append('Some evidence sources are unavailable; repeat only after resolving availability.')
     return dict(status='WARN',code='READ_ONLY_OK',explanation=CODES['READ_ONLY_OK'],
                 read_only_checks='PASS',execution_ready=False,history_complete=False,
-                history_time_status='UNVERIFIED',journal_source='none',metrics=metrics,warnings=warnings)
+                history_time_status='UNVERIFIED',journal_source='none',metrics=metrics,warnings=warnings,
+                market_data_time_status='BROKER_RAW' if raw_mode else 'VERIFIED')
 
 
 def check(root, *, run=subprocess.run, platform=None):

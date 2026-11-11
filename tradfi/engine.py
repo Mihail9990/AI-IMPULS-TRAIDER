@@ -70,6 +70,12 @@ class Controller:
             self.save('entry_wait_restart_cancelled')
 
     def _time_guard(self):
+        raw=getattr(self.broker,'raw_market',None)
+        if raw is not None:
+            from .raw_market_time import RAW_DATA_WAIT
+            ready=self.broker.observe_raw_market()
+            self._time_wait_reason=None if ready else RAW_DATA_WAIT
+            return not ready or bool(self.state.get('time_block'))
         safety = getattr(self.broker, 'time_safety', None)
         reason = safety.check() if safety is not None else None
         self._time_wait_reason = reason if reason == M1_TRANSITION_WAIT else None
@@ -93,7 +99,8 @@ class Controller:
     def _time_waiting(self):
         # Cache only. All decision points call _time_guard first; views never
         # invoke MT5 or replace a durable latch.
-        return bool(getattr(self, '_time_wait_reason', None) == M1_TRANSITION_WAIT
+        from .raw_market_time import RAW_DATA_WAIT
+        return bool(getattr(self, '_time_wait_reason', None) in {M1_TRANSITION_WAIT,RAW_DATA_WAIT}
                     and not self.state.get('time_block'))
 
     def refresh_time(self):
@@ -123,6 +130,12 @@ class Controller:
             self.save('time_resumed_explicitly')
 
     def _resume_time(self, update_id):
+        if getattr(self.broker,'raw_market',None) is not None:
+            self._time_guard()
+            if update_id is not None:self.state['command_offset']=update_id+1
+            self.notify('MT5 raw: давность котировки не проверяется; связь и корректность данных проверяются при исполнении.')
+            self.save('raw_market_status_requested')
+            return
         safety = getattr(self.broker, 'time_safety', None)
         if safety is None:
             raise ActionRejected('Independent time verification is unavailable')
@@ -138,6 +151,32 @@ class Controller:
         except BaseException:
             self._resume_time_token = None
             raise
+
+    def _sync_mt5_time(self,update_id=None):
+        sync=getattr(self.broker,'sync_display_clock',None)
+        if sync is None:raise ActionRejected('Часы MT5 недоступны в этом подключении.')
+        try:sync()
+        except (ValueError,OSError,TimeoutError):
+            raise ActionRejected('Не удалось получить котировку MT5 для отображаемых часов.',
+                                 public_message='Нужна доступная корректная котировка MT5. Настройки и торговый режим не изменены.') from None
+        if update_id is not None:self.state['command_offset']=update_id+1
+        self.notify('Отображаемые часы привязаны к последнему тику MT5. Это оценка, не проверенное UTC; торговый режим и часы Windows не изменены.')
+        self.save('mt5_display_clock_aligned')
+
+    def _use_mt5_raw_time(self,update_id=None):
+        from .market_time_migration import migrate_market_time
+        result=migrate_market_time(self)
+        if result['already_migrated'] and getattr(self.broker,'raw_market',None) is not None:
+            self.notify('Режим исходного времени MT5 уже включён; текущее состояние не изменено.')
+            self.save('mt5_raw_mode_already_selected')
+            return result
+        if getattr(self.broker,'raw_market',None) is None:self.broker.activate_raw_market_time()
+        self._time_wait_reason=None
+        self._resume_time_token=None
+        if update_id is not None:self.state['command_offset']=update_id+1
+        self.notify('Выбрано исходное время MT5 без проверки давности. История и долг сохранены. Новые входы остановлены; запуск только отдельной командой Старт.')
+        self.save('mt5_raw_mode_activated')
+        return result
 
     def _validate_currency(self):
         records = [self.state, *self.state['completed']]
@@ -243,6 +282,8 @@ class Controller:
         return snap
 
     def command(self, text, update_id=None):
+        if text.strip().lower()=='/sync_mt5_time':return self._sync_mt5_time(update_id)
+        if text.strip().lower()=='/use_mt5_raw_time':return self._use_mt5_raw_time(update_id)
         self._deadline_guard()
         self._time_guard()
         if update_id is not None and update_id < self.state['command_offset']:
@@ -412,12 +453,28 @@ class Controller:
 
     @staticmethod
     def _fresh_closed_candle(snap):
+        if snap.get('market_time_mode')=='mt5_raw_v1':
+            bar=snap['candle']
+            return bool(bar.get('closed') is True and bar.get('time_domain')=='BROKER_RAW'
+                        and 0<number(bar['id'])<number(bar['current_id'])
+                        and int(number(snap['quote']['broker_time'])//60)*60==bar['current_id'])
         return number(snap['candle']['id'])==int(number(snap['now'])//60)*60-60
+
+    @staticmethod
+    def _market_now(snap):
+        return snap['quote']['broker_time'] if snap.get('market_time_mode')=='mt5_raw_v1' else snap['now']
+
+    @classmethod
+    def _candle_boundary(cls,snap):
+        return max(snap['candle']['id'],int(number(cls._market_now(snap))//60)*60-60)
 
     def status(self):
         c = self.state['cycle'] or {}
         safety = getattr(self.broker, 'time_safety', None)
         time_check = {'reason': safety.check(), 'measurement': safety.result} if safety else {'reason': 'OFFLINE_INJECTED_CLOCK'}
+        raw = getattr(self.broker, 'raw_market', None)
+        if raw is not None:
+            time_check = {'reason': raw.reason, 'market_time_mode': 'mt5_raw_v1', 'measurement': raw.view()}
         return (f"TradFi {'READ_ONLY' if getattr(self.broker,'read_only',False) else 'EXECUTION'} {self.state['phase']} stop={self.state['stop']} "
                 f"time_block={self.state.get('time_block', '-')} time_check={json.dumps(time_check, sort_keys=True)} "
                 f"branch_started_at_utc={c.get('branch_started_at_utc', '-')} branch_started_date_utc={c.get('branch_started_date_utc', '-')} "
@@ -992,7 +1049,7 @@ class Controller:
         rejected = [cmd for cmd in modifications if cmd['status'] == 'REJECTED' and not cmd.get('retry_replaced')]
         if any(not cmd.get('result', {}).get('retryable_not_sent') for cmd in rejected):
             self.pause('Protection modification rejected; original SL/TP retained'); return
-        if self.evidence_contract == 'per_obligation_v1' and snap['quote'].get('utc_time') is None:
+        if self.evidence_contract == 'per_obligation_v1' and snap['quote'].get('utc_time') is None and snap.get('market_time_mode')!='mt5_raw_v1':
             return  # identity reconciliation is usable; price-sensitive protection must wait
         if rejected:
             cmd = rejected[0]

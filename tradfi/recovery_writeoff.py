@@ -111,7 +111,7 @@ class RecoveryWriteoff:
         try:
             snap=self._guard(entry=True)
             spec=Spec.load(snap['spec'])
-            boundary=max(snap['candle']['id'],int(number(snap['now'])//60)*60-60)
+            boundary=self._candle_boundary(snap)
         except TransientDataWait:raise
         except ActionRejected:
             _reject('Списание недоступно: активна защитная блокировка; проверьте статус, время и завершите сверку')

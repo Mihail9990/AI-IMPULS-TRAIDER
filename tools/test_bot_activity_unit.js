@@ -5,6 +5,7 @@ const code=src.slice(src.indexOf(' // Activity uses controller snapshots'),src.i
 const elements={};let writes=0;
 const $=id=>elements[id]??=new class{constructor(){this.value='';this.dataset={};}get textContent(){return this.value;}set textContent(value){writes++;this.value=value;}};
 const ctx=vm.createContext({$,view:null,mode:'live',v3Fresh:true,busy:false,pending:null,pendingScope:null,lastActionReceipt:null,feedUtcVerified:()=>true,timeSafetyText:()=> 'Блокировка времени сохраняется.',send:()=>assert.fail('Notifications are read-only')});
+vm.runInContext(src.split('\n').find(line=>line.includes(' const feedBrokerRaw=')),ctx);
 const run=()=>vm.runInContext('updateBotActivity()',ctx);
 vm.runInContext(src.slice(src.indexOf(' function friendlyReason('),src.indexOf(' function error(')),ctx);vm.runInContext(code,ctx);run();assert($('bot-activity-state').textContent.includes('Ожидание снимка'));
 ctx.view={scope:'live',phase:'V3_WAIT_ENTRY',feed:{status:'FRESH'},positions:[],orders:[],journal:[],action_results:{}};run();assert($('bot-activity-state').textContent.includes('Ожидаю ручной ордер'));
@@ -31,3 +32,10 @@ assert(css.includes('#bot-activity #bot-activity-state,#bot-activity p[data-tone
 const html=fs.readFileSync(path.join(__dirname,'../web/basket-panel/index.html'),'utf8');
 assert(!html.includes('id="bot-activity-event"'));assert(html.includes('id="journal"'));
 assert(css.includes('width:clamp(104px,30vw,132px)'));assert(css.includes('#v3-panels .sl-stepper{grid-template-columns:minmax(0,1fr)'));
+
+ctx.view.feed={timestamp_semantics:'BROKER_RAW',time_domain:'BROKER_RAW',status:'OBSERVED',connected:true};ctx.view.manual_reason=null;ctx.view.time_block=null;ctx.view.time_status={waiting_data:true};ctx.lastActionReceipt={status:'WAITING_DATA'};run();
+assert(!$('bot-activity-warning').textContent.includes('не подтверждены'));
+assert($('bot-activity-state').textContent.includes('следующее изменение'));
+assert($('bot-activity-action').textContent.includes('следующее изменение'));
+assert(!$('bot-activity-action').textContent.includes('3 секунд'));
+ctx.view.read_only=true;run();assert($('bot-activity-warning').textContent.includes('Только просмотр'));

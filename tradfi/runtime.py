@@ -47,7 +47,11 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
     if inspect:
         # No SQLite, account owner lock, web listener or credentials. Never inherit execution opt-in.
         config = dict(config, enable_trading=False)
-        broker = MT5Broker(config,api=api,clock=clock,monotonic=monotonic)
+        broker_type=MT5Broker
+        if config.get('market_time_mode')=='mt5_raw_v1':
+            from .evidence_broker import MT5EvidenceBroker
+            broker_type=MT5EvidenceBroker
+        broker = broker_type(config,api=api,clock=clock,monotonic=monotonic)
         try:
             broker.connect()
             result = broker.preflight()
@@ -105,7 +109,8 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
         resources.enter_context(owner_lock(account_lock_path(config)))
         store = Store(state_file)
         resources.callback(store.close)
-        from .market_time_state import bind_market_time_state
+        from .market_time_state import bind_market_time_state, resolve_market_time_config
+        config = resolve_market_time_config(store, config)
         bind_market_time_state(store, config)
         bind_state(state_file, instance="live")
         from .evidence_broker import MT5EvidenceBroker

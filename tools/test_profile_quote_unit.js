@@ -56,6 +56,7 @@ accept=false;$('refresh-settings').onclick();assert.equal(reloads,0,'refresh can
 accept=true;$('refresh-settings').onclick();assert.equal(reloads,1);
 // Draw actual SVG nodes over narrow/wide panes, candle counts and zoom levels.
 Object.assign(ctx,{svg:$('chart'),ns:'svg',lines:[],zoom:1,pan:0,timeOffset:0,visibleCount:60,frameHeight:520,plotBottom:480,plotHeight:450,plotRight:855,innerWidth:1280,preview:null,previewFocus:null,previewWasOpen:false,prefs:{colors:{}},drawAnalysis:()=>{},utcLabel:()=>'',feedUtcVerified:()=>true});
+vm.runInContext(source.slice(source.indexOf(' const feedUtcVerified='),source.indexOf(' function timeSafetyText()')),ctx);
 vm.runInContext(source.slice(source.indexOf(' function node('),source.indexOf(' function openPreview(')),ctx);
 let cases=0;
 for(const width of [220,320,390,680,1280])for(const height of [120,520])for(const count of [1,10,60,240])for(const zoom of [1,2])for(const base of [4000,100000]){

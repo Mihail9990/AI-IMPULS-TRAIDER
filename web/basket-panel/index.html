@@ -53,6 +53,11 @@
 <small>AI IMPULS / XAUUSD.s</small><h1>__PANEL_ROLE__</h1>
 </div>
 <button id="logout">Выйти</button></header>
+<section id="mt5-time-controls" class="card" aria-labelledby="mt5-time-title"><h2 id="mt5-time-title">Время MT5</h2>
+<p id="mt5-display-clock" role="timer" aria-live="off">Оценка времени MT5: —</p><p id="mt5-clock-status" role="status">Для оценки времени выполните сверку.</p>
+<div class="controls"><button id="sync-mt5-time" type="button" disabled>Сверить часы MT5…</button><button id="use-mt5-raw-time" type="button" disabled>Использовать время MT5…</button></div>
+<p id="mt5-time-mode" role="status"></p><p id="mt5-switch-reason" role="status"></p>
+<p>Сверка задаёт только отображаемую оценку по последнему доступному тику, даже задержанному. Часы Windows, котировки и торговый режим не меняются. После перезапуска или переподключения сверку нужно повторить.</p></section>
 <details id="service-controls" class="card"><summary>Управление сервисом</summary>
 <div class="controls">
 <button id="start">Старт</button><button id="stop">Стоп новых входов</button><button id="resume">Проверить время…</button><button id="reset">Ручная сверка…</button>

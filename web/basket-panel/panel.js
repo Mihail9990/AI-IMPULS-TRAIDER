@@ -6,7 +6,7 @@
  let diagnosticRenderComponent=null;
  const diagnosticNow=()=>{try{return diagnostics?.now()??0;}catch{return 0;}};
  function diagnosticRecord(value){try{diagnostics?.record(value);}catch{}}
- function diagnosticFacts(value=view){return {feed_status:value?.feed?.status,timestamp_semantics:value?.feed?.timestamp_semantics,feed_sequence:value?.feed?.sequence,quote_age_seconds:value?.feed?.age_seconds,read_only:value?.read_only,fresh_gate:v3Fresh,document_hidden:document.hidden,render_component:diagnosticRenderComponent};}
+ function diagnosticFacts(value=view){return {feed_status:value?.feed?.status,timestamp_semantics:value?.feed?.timestamp_semantics,time_domain:value?.feed?.time_domain,feed_sequence:value?.feed?.sequence,quote_age_seconds:value?.feed?.age_seconds,read_only:value?.read_only,fresh_gate:v3Fresh,document_hidden:document.hidden,render_component:diagnosticRenderComponent};}
  const diagnosticText=()=>{try{return diagnostics?.text()??'Browser diagnostics unavailable. No raw data exported.\n';}catch{return 'Browser diagnostics unavailable. No raw data exported.\n';}};
 
  let plotBottom=480,plotHeight=450,frameHeight=520,plotRight=855;
@@ -70,9 +70,40 @@
  $('reset').onclick=()=>command('/reset_manual','Подтвердить ручную сверку всех ордеров и билетов? Требуются доказанное закрытие и отсутствие неопределённости. Долг сохраняется.');
  $('login-button').onclick=async()=>{const password=$('password').value;$('password').value='';try{const r=await fetch('/api/login',{method:'POST',headers:{...headers(),'Content-Type':'application/json'},body:JSON.stringify({password}),signal:AbortSignal.timeout(3000)});if(!r.ok)throw Error('Вход отклонён');$('login-error').textContent='';await poll();}catch(e){$('login-error').textContent=e.message;}};
  $('logout').onclick=async()=>{await fetch('/api/logout',{method:'POST',headers:{...headers(),'Content-Type':'application/json'},body:'{}'});location.reload();};
+ // MT5 clock controls are separate from manual reconciliation and trade readiness.
+ let mt5DisplayAnchor=null;
+ const mt5TimeActionBlocked=()=>!view||!v3Fresh||busy||!!pending;
+ const mt5RawSwitchBlocked=()=>mt5TimeActionBlocked()||view.time_status?.can_switch_raw!==true||view.time_status?.market_time_mode==='mt5_raw_v1';
+ const mt5DisplayNumber=value=>typeof value==='number'&&Number.isFinite(value)&&value>0&&value<8640000000000;
+ function mt5DisplayNow(){try{const value=performance.now();return typeof value==='number'&&Number.isFinite(value)&&value>=0?value:null;}catch{return null;}}
+ function observeMt5DisplayClock(){
+  mt5DisplayAnchor=null;const clock=view?.time_status?.display_clock,now=mt5DisplayNow();
+  if(v3Fresh&&clock?.status==='ALIGNED'&&clock.timestamp_semantics==='BROKER_RAW'&&clock.verified_utc===false&&clock.source_connected===true&&mt5DisplayNumber(clock.estimated_broker_time)&&now!==null)mt5DisplayAnchor={value:clock.estimated_broker_time,received:now,scope:view.scope};
+ }
+ function renderMt5TimeControls(){
+  const write=(id,text)=>{if($(id).textContent!==text)$(id).textContent=text;};
+  const clock=view?.time_status?.display_clock,raw=view?.time_status?.market_time_mode==='mt5_raw_v1',now=mt5DisplayNow();
+  $('sync-mt5-time').disabled=mt5TimeActionBlocked();$('use-mt5-raw-time').disabled=mt5RawSwitchBlocked();
+  write('mt5-time-mode',raw?'Временная шкала: исходное время MT5, без проверки давности.':'Временная шкала торговли не переключена на исходное время MT5.');
+  write('mt5-switch-reason',raw?'Режим исходного времени MT5 уже включён.':view?.time_status?.switch_reason??'Переключение доступно только после проверки состояния сервером.');
+  let stamp='—',status=!v3Fresh?'Нет свежего снимка сервиса. Оценка времени приостановлена.':clock?.status==='DISCONNECTED'||clock?.source_connected===false?'Нет связи с MT5. После подключения выполните сверку снова.':'Для оценки времени выполните сверку.';
+  if(v3Fresh&&mt5DisplayAnchor&&mt5DisplayAnchor.scope===view?.scope&&clock?.status==='ALIGNED'&&clock.source_connected===true&&now!==null&&now>=mt5DisplayAnchor.received){
+   const value=mt5DisplayAnchor.value+(now-mt5DisplayAnchor.received)/1000;
+   if(mt5DisplayNumber(value)){stamp=new Date(value*1000).toISOString().replace('T',' ').slice(0,19);status='Оценка по последнему доступному тику и монотонному таймеру. Давность тика не проверяется.';}
+  }
+  write('mt5-display-clock','Оценка времени MT5: '+stamp);write('mt5-clock-status',status);
+ }
+ async function runMt5TimeCommand(text,message,blocked){
+  if(blocked())return;const revision=view.revision,scope=view.scope;
+  if(!confirm(message))return;
+  if(blocked()||view.revision!==revision||view.scope!==scope){error('Контекст изменился; обновите данные и подтвердите действие заново.');return;}
+  try{await send({type:'command',text},revision,scope);}catch(e){error(e.message);}
+ }
+ $('sync-mt5-time').onclick=()=>runMt5TimeCommand('/sync_mt5_time','Сверить отображаемые часы по последнему доступному тику MT5? Возраст тика не проверяется: тик может быть задержанным. Далее показывается оценка времени MT5 по монотонному таймеру. Котировки, свечи, торговый режим и часы Windows не меняются. После перезапуска или переподключения сверку нужно повторить.',mt5TimeActionBlocked);
+ $('use-mt5-raw-time').onclick=()=>runMt5TimeCommand('/use_mt5_raw_time','Переключить торговую временную шкалу с UTC на исходное время MT5 без преобразования и без проверки давности котировок? Это отдельное изменение режима, не сверка отображаемых часов. Переключение разрешено только без активного цикла, ордеров, позиций и неразрешённых команд. История и долг сохраняются; после переключения новые входы будут остановлены. Часы Windows не меняются.',mt5RawSwitchBlocked);
  // Activity uses controller snapshots and receipts, never inferred fills.
  function actionReceiptText(status,reason){
-  if(status==='WAITING_DATA')return 'Команда принята. Ожидаю свежий тик и M1 до 3 секунд; Стоп и отмена доступны.';
+  if(status==='WAITING_DATA')return feedBrokerRaw()?'Команда принята. Ожидаю следующее изменение данных MT5; Стоп и отмена доступны.':'Команда принята. Ожидаю свежий тик и M1 до 3 секунд; Стоп и отмена доступны.';
   if(status==='APPLIED')return 'Команда обработана контроллером; исполнение и позиции проверяются отдельно по снимку.';
   if(status==='REJECTED')return 'Команда отклонена до исполнения'+(reason?': '+friendlyReason(reason):'.');
   if(status==='CONFLICT')return 'Команда отклонена: снимок устарел. Обновите данные и повторите команду.';
@@ -87,13 +118,13 @@
   if(view.read_only)warnings.push('Только просмотр: торговые команды отключены');
   if(view.migration_block)warnings.push(friendlyReason(view.migration_block));if(view.manual_reason)warnings.push(friendlyReason(view.manual_reason));
   if(view.time_block)warnings.push(timeSafetyText());
-  if(view.feed?.status!=='FRESH'||!feedUtcVerified())warnings.push('Котировки или время не подтверждены как свежие.');
+  if(feedBrokerRaw()){if(view.feed?.connected!==true||view.feed?.status!=='OBSERVED')warnings.push('Нет наблюдаемого снимка MT5.');}else if(view.feed?.status!=='FRESH'||!feedUtcVerified())warnings.push('Котировки или время не подтверждены как свежие.');
   write('bot-activity-warning',warnings.join(' · '));$('bot-activity-warning').dataset.tone='warning';$('bot-activity-state').dataset.tone='info';
   let detail=phases[view.phase]??('Состояние контроллера: '+(view.phase??'не указано'));
   const safetyBlocked=!v3Fresh||view.manual_reason||view.migration_block||view.time_block||['MANUAL','SAFE_PAUSE','MIGRATION_BLOCK'].includes(view.phase);
   if(!safetyBlocked){if(view.positions?.length)detail='Ожидаю исполнения TP или SL';else if(view.orders?.length)detail='Ожидаю исполнения триггер ордера';}
   else if(!v3Fresh)detail='';else detail='Действия приостановлены: требуется проверка';
-  if(view.time_status?.waiting_data)detail='Переход M1: ожидаю свежие данные до 3 секунд. Команды принимаются, новые входы ждут.';
+  if(view.time_status?.waiting_data)detail=feedBrokerRaw()?'Ожидаю следующее изменение данных MT5. Команды принимаются, новые входы ждут.':'Переход M1: ожидаю свежие данные до 3 секунд. Команды принимаются, новые входы ждут.';
   if(busy||pending)detail='Ожидаю подтверждения команды; повтор недоступен';
   if(view.v3_request)detail+=' · Запланирован '+view.v3_request.order_type+' по закрытию выбранной свечи';
   if(view.v3_link?.cancel)detail+=' · Отмена связанных триггеров ожидает сверки';
@@ -111,6 +142,15 @@
  // V3 reuses scoped receipts and snapshot revisions; no live execution is enabled here.
  // Display-only helpers: timestamp labels never establish a trading time contract.
  const feedUtcVerified=()=>view?.feed?.timestamp_semantics==='VERIFIED';
+ const feedBrokerRaw=()=>view?.feed?.timestamp_semantics==='BROKER_RAW'&&view?.feed?.time_domain==='BROKER_RAW';
+ const marketCoordinate=value=>feedBrokerRaw()?value?.broker_time??value?.raw_time:value?.utc_time;
+ const marketTimeSuffix=()=>feedBrokerRaw()?'время MT5':feedUtcVerified()?'UTC':'RAW';
+ function marketLabel(timestamp,short=false){
+  if(!feedBrokerRaw())return utcLabel(timestamp,short);
+  if(typeof timestamp==='boolean'||timestamp===null||timestamp===undefined||timestamp==='')return '';
+  const date=new Date(Number(timestamp)*1000);
+  return Number.isFinite(date.getTime())?(short?date.toISOString().slice(11,16):date.toISOString().replace('T',' ').slice(0,19)+' время MT5'):'';
+ }
  function utcLabel(timestamp,short=false){
   if(!feedUtcVerified()||timestamp===null||timestamp===undefined||timestamp==='')return '';
   const date=new Date(Number(timestamp)*1000);
@@ -127,11 +167,11 @@
  const v3Enabled=()=>view?.recovery_mode==='V3';
  const v3Blocked=()=>!view||!v3Fresh||busy||!!pending||view.read_only||!!view.manual_reason||!!view.migration_block||!!view.time_block;
  function connectionLabel(){
-  const status=view?.feed?.status,verified=feedUtcVerified(),fresh=v3Fresh&&status==='FRESH'&&verified;
+  const status=view?.feed?.status,verified=feedUtcVerified(),raw=feedBrokerRaw(),fresh=v3Fresh&&(raw?status==='OBSERVED'&&view.feed.connected===true:status==='FRESH'&&verified);
   const role=view?.read_only?'LIVE · READ ONLY':'LIVE';
-  const warning=!v3Fresh?'нет свежего снимка':!verified?'время не проверено':status!=='FRESH'?'котировки не свежие':'';
+  const warning=!v3Fresh?'нет свежего снимка':raw?(!fresh?'нет наблюдаемого снимка MT5':''):!verified?'время не проверено':status!=='FRESH'?'котировки не свежие':'';
   $('drawer-toggle').textContent='Команды';
-  $('drawer-toggle').dataset.warning='false';$('drawer-toggle').title=role+' · '+(warning||'Свежие данные')+' · возраст котировки: '+(view?.feed?.age_seconds??'—')+' сек.';
+  $('drawer-toggle').dataset.warning='false';$('drawer-toggle').title=role+' · '+(warning||(raw?'Последнее наблюдение MT5, без проверки давности':'Свежие данные'))+(raw?'':' · возраст котировки: '+(view?.feed?.age_seconds??'—')+' сек.');
   svg.dataset.feedFresh=String(fresh);
  }
  // Profile editor keeps draft strings intact: broker validation never rounds volumes or TP.
@@ -213,14 +253,14 @@
   $('v3-submit-entry').disabled=blocked||!enabled||controls.can_enter!==true;
   $('v3-cancel-request').hidden=!(view?.v3_request||waitingAction('v3_entry'));
   $('v3-cancel-request').disabled=blocked||!enabled||!(view?.v3_request||waitingAction('v3_entry'));
-  const request=view?.v3_request;const targetTime=request&&Number.isFinite(Number(request.bar_id))?(utcLabel(Number(request.bar_id)+60)?utcLabel(Number(request.bar_id)+60).slice(11,19)+' UTC':'выбранной свечи (время не проверено)'):'выбранной свечи';
+  const request=view?.v3_request;const targetTime=request&&Number.isFinite(Number(request.bar_id))?(marketLabel(Number(request.bar_id)+60)?marketLabel(Number(request.bar_id)+60).slice(11,19)+' '+marketTimeSuffix():'выбранной свечи (время не проверено)'):'выбранной свечи';
   $('v3-request-status').textContent=request?'Ожидается закрытие '+targetTime+': '+request.order_type+', '+profileSummary(request.recovery_profile)+'. Направление по цвету свечи; doji — пропуск.':'Нет запланированного входа. Для следующей попытки RECOVERY дождитесь закрытия всей корзины.';
   const queuedLink=waitingAction('v3_link'),linked=!!view?.v3_link||queuedLink,canCancel=controls.can_cancel_link===true||queuedLink;
   $('v3-link-toggle').textContent=linked?'Отменить триггеры на SL':'Выставить триггеры на SL';
   $('v3-link-toggle').dataset.cancel=String(linked);
   $('v3-link-toggle').disabled=blocked||!enabled||(linked?!canCancel:controls.can_link!==true);
   const link=view?.v3_link;
-  $('v3-link-status').textContent=queuedLink?'Команда принята; ожидаются свежие данные M1.':linked?(link.cancel?'Отмена запрошена; ожидается сверка MT5.':link.replace?'Перенос SL и связанных триггеров; ожидается сверка.':profileSummary(link.recovery_profile)+' · '+link.side+' STOP на '+link.price+'.'):'';
+  $('v3-link-status').textContent=queuedLink?(feedBrokerRaw()?'Команда принята; ожидается следующее изменение данных MT5.':'Команда принята; ожидаются свежие данные M1.'):linked?(link.cancel?'Отмена запрошена; ожидается сверка MT5.':link.replace?'Перенос SL и связанных триггеров; ожидается сверка.':profileSummary(link.recovery_profile)+' · '+link.side+' STOP на '+link.price+'.'):'';
   $('v3-link-status').hidden=!linked;
   $('v3-control-reason').textContent=!v3Fresh?'Нет свежего снимка. Действия заблокированы.':friendlyReason(controls.reason);
   $('v3-cancel-entry').hidden=controls.can_cancel_entry!==true;
@@ -315,7 +355,7 @@
   const badgeX=Math.max(500,998-quoteWidth);plotRight=badgeX-18;
   const d=domain(),y=p=>plotBottom-(p-d.min)/(d.max-d.min)*plotHeight;svg.replaceChildren();
   for(let i=0;i<=6;i++){const price=d.min+(d.max-d.min)*i/6,py=y(price);svg.append(node('line',{x1:0,x2:plotRight,y1:py,y2:py,stroke:colors.grid}),node('text',{x:badgeX+7,y:py+5,fill:'#afc0d2','font-size':labelSize},price.toFixed(2)));}
-  const candles=visibleCandles(),w=(plotRight-20)/Math.max(3,candles.length+2);svg.dataset.firstCandle=String(candles[0]?.utc_time??'');svg.dataset.visibleCount=String(candles.length);candles.forEach((c,i)=>{const x=10+(i+.5)*w,green=Number(c.close)>=Number(c.open),color=green?colors.up:colors.down;svg.append(node('line',{x1:x,x2:x,y1:y(Number(c.high)),y2:y(Number(c.low)),stroke:color}),node('rect',{x:x-w*.3,y:Math.min(y(Number(c.open)),y(Number(c.close))),width:Math.max(2,w*.6),height:Math.max(1,Math.abs(y(Number(c.open))-y(Number(c.close)))),fill:color}));});
+  const candles=visibleCandles(),w=(plotRight-20)/Math.max(3,candles.length+2);svg.dataset.firstCandle=String(marketCoordinate(candles[0])??'');svg.dataset.visibleCount=String(candles.length);candles.forEach((c,i)=>{const x=10+(i+.5)*w,green=Number(c.close)>=Number(c.open),color=green?colors.up:colors.down;svg.append(node('line',{x1:x,x2:x,y1:y(Number(c.high)),y2:y(Number(c.low)),stroke:color}),node('rect',{x:x-w*.3,y:Math.min(y(Number(c.open)),y(Number(c.close))),width:Math.max(2,w*.6),height:Math.max(1,Math.abs(y(Number(c.open))-y(Number(c.close)))),fill:color}));});
   if(typeof mainAnalysisUI!=='undefined')mainAnalysisUI?.draw({svg,candles,x:i=>10+(i+.5)*w,y,left:0,right:plotRight,top:20,bottom:plotBottom});
   for(const l of lines){const py=y(l.price);if(py<0||py>frameHeight)continue;const g=node('g',{'data-line':l.key,visibility:prefs.mainCycle?'visible':'hidden'});g.append(node('line',{x1:0,x2:plotRight,y1:py,y2:py,stroke:l.color,'stroke-width':4,'stroke-dasharray':'none'}),node('line',{x1:0,x2:plotRight,y1:py,y2:py,stroke:'transparent','stroke-width':18}));g.append(node('title',{},l.label+' '+l.price.toFixed(2)));if(!labelRows.some(row=>Math.abs(row-py)<labelSize)){g.append(node('text',{x:badgeX+7,y:py-5,fill:l.color,'font-size':labelSize-2},l.price.toFixed(2)));labelRows.push(py);}svg.append(g);}
   // Bid/Ask are display-only live quote lines, never draggable trading levels.
@@ -330,9 +370,9 @@
    const g=node('g',{'data-quote':key,'pointer-events':'none'});
    g.append(node('line',{x1:0,x2:badgeX-5,y1:py,y2:py,stroke:color,'stroke-width':1.5,'stroke-dasharray':'3 4'}),node('line',{x1:badgeX-5,x2:badgeX,y1:py,y2:ly,stroke:color}),node('rect',{x:badgeX,y:ly-labelSize/2-5,width:998-badgeX,height:labelSize+10,rx:7,fill:'#08090b',stroke:color}),node('text',{x:badgeX+7,y:ly+labelSize/3,fill:'#f1f3f5','font-size':labelSize*.9},quoteText(key)));svg.append(g);
   }
-  candles.forEach((c,i)=>{if(i%Math.max(1,Math.floor(candles.length/5))===0&&utcLabel(c.utc_time,true)){const label=utcLabel(c.utc_time,true);svg.append(node('text',{x:10+(i+.5)*w,y:frameHeight-10,fill:'#969ba6','font-size':labelSize},label));}});
-  svg.append(node('text',{x:badgeX+7,y:frameHeight-10,fill:'#969ba6','font-size':labelSize},feedUtcVerified()?'UTC':'RAW'));
-  if(!feedUtcVerified())svg.append(node('title',{},'Время MT5 не проверено; часовые метки скрыты.'));
+  candles.forEach((c,i)=>{if(i%Math.max(1,Math.floor(candles.length/5))===0&&marketLabel(marketCoordinate(c),true)){const label=marketLabel(marketCoordinate(c),true);svg.append(node('text',{x:10+(i+.5)*w,y:frameHeight-10,fill:'#969ba6','font-size':labelSize},label));}});
+  svg.append(node('text',{x:badgeX+7,y:frameHeight-10,fill:'#969ba6','font-size':labelSize},marketTimeSuffix()));
+  if(!feedUtcVerified()&&!feedBrokerRaw())svg.append(node('title',{},'Время MT5 не проверено; часовые метки скрыты.'));
   if(!candles.length)svg.append(node('text',{x:300,y:250,fill:'#969ba6','font-size':20},'Ожидание данных MT5'));
   if(preview){const py=y(preview.value);svg.append(node('line',{x1:0,x2:plotRight,y1:py,y2:py,stroke:'#fff','stroke-width':4,'stroke-dasharray':'none'}));}
 
@@ -394,7 +434,7 @@
   $('position-history-note').textContent=metrics?.history_note??(metrics?.history_complete===true?'':'Нет подтверждённой полной истории.');
   $('position-history-empty').textContent=records.length?'':'Исполненных позиций пока нет.';
   $('position-history-list').replaceChildren();
-  const stamp=value=>{if(value===null||value===undefined||value==='')return '—';const date=new Date(Number(value)*1000);return Number.isFinite(date.getTime())?date.toISOString().replace('T',' ').replace('.000Z',' UTC'):'—';};
+  const stamp=value=>{if(view?.feed?.timestamp_semantics==='BROKER_RAW'||value===null||value===undefined||value==='')return '—';const date=new Date(Number(value)*1000);return Number.isFinite(date.getTime())?date.toISOString().replace('T',' ').replace('.000Z',' UTC'):'—';};
   const reasons={TP:'TP',SL:'SL',MANUAL:'Ручное закрытие',MANUAL_CLOSE:'Ручное закрытие',PAPER_INTERRUPT:'Прерывание пользователем',EXPERT:'Закрытие советником',MIXED:'Несколько причин закрытия'};
   for(const record of records){
    const card=document.createElement('article');card.className='position-history-card';
@@ -413,13 +453,13 @@
   diagnosticRenderComponent='STATUS';connectionLabel();updateBotActivity();
   $('phase').textContent=view.phase;$('cycle').textContent=view.cycle_id??'Ожидание цикла';$('debt').textContent=view.debt+' UST';$('realized').textContent='Учёт с переносом: '+view.realized+(view.metrics?.currency?' '+view.metrics.currency:'');$('feed-status').textContent=view.feed.status;$('mode').textContent=view.read_only?'READ_ONLY':view.stopped?'Новые входы остановлены':'EXECUTION';
   $('safety').textContent=''; // Safety is shown once in the colored activity area.
-  diagnosticRenderComponent='QUOTE';$('quote').textContent='Bid '+(view.feed.quote?.bid??'—')+' / Ask '+(view.feed.quote?.ask??'—')+' · возраст '+(view.feed.age_seconds??'—')+' сек.';
+  diagnosticRenderComponent='QUOTE';$('quote').textContent='Bid '+(view.feed.quote?.bid??'—')+' / Ask '+(view.feed.quote?.ask??'—')+(feedBrokerRaw()?' · последнее наблюдение MT5, без проверки давности':' · возраст '+(view.feed.age_seconds??'—')+' сек.');
   $('state-heading').textContent='Брокерское состояние';
-  $('source-label').textContent='Источник: MT5 / торговый контур'+' · '+(utcLabel(view.feed.timestamp)||'время MT5 не проверено');
+  $('source-label').textContent='Источник: MT5 / торговый контур'+' · '+(marketLabel(feedBrokerRaw()?marketCoordinate(view.feed):view.feed.timestamp)||'время MT5 не проверено');
   diagnosticRenderComponent='STATE';$('edit-status').textContent=view.edit?'Правка '+view.edit.stage+': показываются фактические данные брокера. При частичном отказе автоматизация остановится.':'';$('journal').textContent=view.journal.join('\n');
   diagnosticRenderComponent='TICKETS';$('tickets').replaceChildren();for(const p of [...view.positions.map(p=>({...p,label:'Позиция'})),...view.orders.map(p=>({...p,entry:p.price,label:'STOP'}))]){const row=document.createElement('tr');for(const text of[p.ticket??p.id,p.label,p.side+' / '+p.size,p.entry,p.tp,p.sl]){const td=document.createElement('td');td.textContent=text;row.append(td);}$('tickets').append(row);}
   $('request-status').textContent=pending?'Запрос '+pending+': '+(pendingScope===view.scope?view.action_results[pending]?.status??'ожидание':'другой контекст')+'. До сверки новые команды запрещены. При UNKNOWN проверьте журнал и брокера на VPS; перезагрузка не разрешает повтор.':'';
-  diagnosticRenderComponent='CONTROLS';for(const id of ['start','stop','resume','reset','cancel-initial','save-settings','reverse-enable','reverse-disable','save-tp-grid','apply-level'])$(id).disabled=!!pending||busy;
+  diagnosticRenderComponent='CONTROLS';renderMt5TimeControls();for(const id of ['start','stop','resume','reset','cancel-initial','save-settings','reverse-enable','reverse-disable','save-tp-grid','apply-level'])$(id).disabled=!!pending||busy;
   $('own-entry-sl').disabled=!!pending||busy||view.read_only||!view.positions.length||(!v3Enabled()||view.v3_controls?.can_own_entry_sl!==true)||!!view.edit||!!view.manual_close||!!view.manual_reason||!!view.migration_block||!!view.time_block;
   $('writeoff-recovery').disabled=v3Blocked()||view.positions.length>0||view.v3_controls?.can_writeoff_recovery!==true;
   $('reverse-enable').disabled=!!pending||busy||view.reverse_controls?.can_enable!==true;
@@ -436,7 +476,7 @@
    if(!r.ok){if([401,403].includes(r.status)){$('login').hidden=false;$('workspace').hidden=true;}throw Error('Нет авторизованного снимка');}
    stage='PARSE';const v=await r.json();finishStage('parse_ms');
    stage='VALIDATE';if(v.contract!=='ticket_basket_v1'||v.mode==='PAPER')throw Error('Несовместимая версия контроллера');finishStage('validation_ms');
-   view=v;v3Fresh=true;stage='RECONCILE';
+   view=v;v3Fresh=true;observeMt5DisplayClock();stage='RECONCILE';
    const status=pending&&pendingScope===v.scope?v.action_results[pending]?.status:null;if(status==='WAITING_DATA')rememberWaiting();
    if(['APPLIED','REJECTED','CONFLICT','WAITING_DATA'].includes(status)){lastActionReceipt={status,reason:v.action_results[pending]?.reason};clearPending();}
    reconcileWaiting();finishStage('reconcile_ms');$('login').hidden=true;$('workspace').hidden=false;
@@ -445,11 +485,11 @@
   }catch(e){
    const failedTiming={FETCH:'fetch_ms',PARSE:'parse_ms',VALIDATE:'validation_ms',RECONCILE:'reconcile_ms',RENDER:'render_ms'}[stage];if(failedTiming&&timings[failedTiming]===undefined)timings[failedTiming]=Math.max(0,diagnosticNow()-mark);
    // Preserve the original fail-closed gate even for a display exception.
-   v3Fresh=false;
+   v3Fresh=false;mt5DisplayAnchor=null;
    const interrupted=['FETCH','PARSE'].includes(stage)?(e?.name==='TimeoutError'?'REQUEST_TIMEOUT':e?.name==='AbortError'?'REQUEST_ABORTED':null):null;
    const reason=interrupted??(stage==='FETCH'?(httpStatus>=400?'HTTP_ERROR':'NETWORK_ERROR'):({PARSE:'JSON_INVALID',VALIDATE:'CONTRACT_MISMATCH',RECONCILE:'RECONCILE_ERROR',RENDER:'RENDER_ERROR'}[stage]??'OTHER'));
    diagnosticRecord({source:'STATE',stage,outcome:'ERROR',reason,error_type:e?.name,http_status:httpStatus,request_ms:diagnosticNow()-started,...timings,...diagnosticFacts()});
-   try{diagnosticRenderComponent='RECOVERY_ANALYSIS';mainAnalysisUI?.updateFeed(view?.feed,false);if(view){diagnosticRenderComponent='RECOVERY_V3';v3Render();diagnosticRenderComponent='RECOVERY_STATUS';connectionLabel();updateBotActivity();diagnosticRenderComponent='RECOVERY_CHART';draw();}}
+   try{renderMt5TimeControls();diagnosticRenderComponent='RECOVERY_ANALYSIS';mainAnalysisUI?.updateFeed(view?.feed,false);if(view){diagnosticRenderComponent='RECOVERY_V3';v3Render();diagnosticRenderComponent='RECOVERY_STATUS';connectionLabel();updateBotActivity();diagnosticRenderComponent='RECOVERY_CHART';draw();}}
    catch(recoveryError){diagnosticRecord({source:'STATE',stage:'RECOVERY_RENDER',outcome:'ERROR',reason:'RECOVERY_RENDER_ERROR',error_type:recoveryError?.name,...diagnosticFacts()});}
    const message={FETCH:'Нет свежего снимка',PARSE:'Ответ сервера не прочитан',VALIDATE:'Несовместимый снимок контроллера',RECONCILE:'Ошибка обработки снимка',RENDER:'Ошибка отображения снимка'}[stage]??'Ошибка снимка';
    $('feed-status').textContent=message+' ['+reason+']. Команды заблокированы.';
@@ -522,5 +562,6 @@
  // Reflow the SVG after drawer resizing and device rotation without affecting its data.
  if(typeof ResizeObserver!=='undefined')new ResizeObserver(()=>requestAnimationFrame(draw)).observe($('chart-workspace'));
  layout();window.addEventListener('blur',()=>{cancelSidePanelDrags();cancelGesture();draw();});window.addEventListener('resize',()=>{cancelSidePanelDrags();cancelGesture();requestAnimationFrame(draw);});
+ setInterval(()=>{if(!document.hidden)renderMt5TimeControls();},250);
  setInterval(poll,1000);poll();
 })();

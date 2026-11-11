@@ -68,6 +68,22 @@ async function main(){
  ctx.view.feed.timestamp_semantics='VERIFIED';vm.runInContext('v3Render()',ctx);
  assert($('v3-request-status').textContent.includes('UTC'));
  for(const timestamp of [null,undefined,'','not a timestamp',1e30])assert.equal(vm.runInContext('utcLabel('+JSON.stringify(timestamp)+')',ctx),'');
+
+ ctx.view.feed={timestamp_semantics:'BROKER_RAW',time_domain:'BROKER_RAW',status:'OBSERVED',connected:true,timestamp:null,age_seconds:null,broker_time:stamp,quote:{},candles:[{utc_time:null,broker_time:stamp,raw_time:stamp,time_domain:'BROKER_RAW',closed:false,open:1,close:2,low:1,high:2}]};
+ vm.runInContext('draw();v3Render();connectionLabel()',ctx);
+ assert($('chart').children.some(x=>x.textContent==='время MT5'));
+ assert(!$('chart').children.some(x=>x.textContent==='UTC'));
+ assert($('chart').children.some(x=>x.textContent===new Date(stamp*1000).toISOString().slice(11,16)));
+ assert($('v3-request-status').textContent.includes('время MT5'));
+ assert(!$('v3-request-status').textContent.includes('UTC'));
+ assert.equal($('chart').dataset.firstCandle,String(stamp));assert.equal($('chart').dataset.feedFresh,'true');
+ assert(!$('drawer-toggle').title.includes('возраст котировки'));
+ assert.equal(vm.runInContext('v3Blocked()',ctx),false,'old raw tick does not block commands');
+ for(const field of ['read_only','manual_reason','migration_block','time_block']){ctx.view[field]=true;assert.equal(vm.runInContext('v3Blocked()',ctx),true,field);delete ctx.view[field];}
+ ctx.pending='unknown';assert.equal(vm.runInContext('v3Blocked()',ctx),true);ctx.pending=null;
+ vm.runInContext('v3Fresh=false;connectionLabel()',ctx);assert.equal(vm.runInContext('v3Blocked()',ctx),true);assert.equal($('chart').dataset.feedFresh,'false');vm.runInContext('v3Fresh=true',ctx);
+ assert.equal(vm.runInContext('utcLabel(view.feed.broker_time)',ctx),'');
+ assert(!/[0-9]T|Z|UTC/.test(vm.runInContext('marketLabel(view.feed.broker_time)',ctx)));
  // Latest diagnostic is presentation-only; the original latch still blocks controls.
  ctx.view=structuredClone(base);ctx.view.time_block={reason:'MT5_UTC_WAIT_REFERENCE'};
  ctx.view.time_status={latched_reason:'MT5_UTC_WAIT_REFERENCE',current_reason:'MT5_UTC_CONTRACT_MISMATCH'};

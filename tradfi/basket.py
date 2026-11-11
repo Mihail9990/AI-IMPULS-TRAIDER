@@ -42,13 +42,20 @@ class BasketController(Controller):
         if entry and blocked:
             if self._time_waiting():raise TransientDataWait('Ожидаются свежие данные M1')
             raise ActionRejected('Время не подтверждено; новые входы запрещены')
-        snap=self.snapshot()
+        try:
+            snap=self.snapshot()
+        except (OSError,TimeoutError):
+            if getattr(self.broker,'raw_market',None) is not None:
+                from .raw_market_time import RAW_DATA_WAIT
+                self.broker.raw_market.invalidate();self._time_wait_reason=RAW_DATA_WAIT
+                raise TransientDataWait('Ожидается доступная котировка MT5') from None
+            raise
         if entry and self._time_guard():
             if self._time_waiting():raise TransientDataWait('Ожидаются свежие данные M1')
             raise ActionRejected('Время не подтверждено; команда требует свежих данных')
         if not snap.get('hedging'):raise ActionRejected('Нужен hedging-счёт с независимыми билетами')
         if any(not x.get('owned') for x in snap['positions']+snap['orders']):raise ActionRejected('Есть неизвестные позиции/ордера')
-        if entry and self.evidence_contract=='per_obligation_v1' and snap['quote'].get('utc_time') is None:raise ActionRejected('Нет свежей проверенной котировки')
+        if entry and self.evidence_contract=='per_obligation_v1' and snap['quote'].get('utc_time') is None and snap.get('market_time_mode')!='mt5_raw_v1':raise ActionRejected('Нет свежей проверенной котировки')
         return snap
 
     def _validate_cfg(self,cfg,spec):
@@ -56,6 +63,8 @@ class BasketController(Controller):
 
     def command(self,text,update_id=None):
         raw=text.strip().lower()
+        if raw=='/sync_mt5_time':return self._sync_mt5_time(update_id)
+        if raw=='/use_mt5_raw_time':return self._use_mt5_raw_time(update_id)
         if raw in {'/status','/settings'}:
             self.notify(str(self.state['basket_settings']) if raw=='/settings' else self.status());self.save('basket_status');return
         if self.state.get('migration_block'):raise ActionRejected(self.state['migration_block'])
@@ -78,7 +87,7 @@ class BasketController(Controller):
         else:
             if snap['positions'] or snap['orders'] or self._unresolved():raise ActionRejected('Старт требует подтверждённого отсутствия позиций и ордеров')
             self.state['phase']='WAIT_CANDLE'
-        self.state['account']=snap['account'];self.state['last_candle']=max(snap['candle']['id'],int(number(snap['now'])//60)*60-60)
+        self.state['account']=snap['account'];self.state['last_candle']=self._candle_boundary(snap)
         self.state['stop']=False;self.state['stop_mode']='';self.save('basket_start')
 
     def action(self,a):
@@ -106,7 +115,7 @@ class BasketController(Controller):
         if not isinstance(expected_orders,list) or not expected_orders or any(not isinstance(x,str) for x in expected_orders) or sorted(expected_orders)!=sorted(o['id'] for o in snap['orders']):raise ActionRejected('Начальные ордера изменились; обновите панель')
         ids=[cid for g in c['groups'] if g['role']=='initial' and not g.get('retired') for cid in g['commands']]
         if not ids or len(self._pending(snap,ids))!=len(snap['orders']):raise ActionRejected('Есть ордера другого назначения; отмена не принята')
-        boundary=max(self.state['last_candle'],snap['candle']['id'],int(number(snap['now'])//60)*60-60)
+        boundary=max(self.state['last_candle'],self._candle_boundary(snap))
         c['initial_cancel']={'ids':ids,'after_candle':boundary}
         self.save('basket_cancel_initial_requested')
 

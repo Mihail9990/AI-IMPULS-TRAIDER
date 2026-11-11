@@ -68,7 +68,7 @@ class ActionGateway:
     @staticmethod
     def _immediate(action):
         if action.get('type') == 'command' and set(action) == {'type', 'text'}:
-            return isinstance(action['text'], str) and action['text'].strip().lower() in {'/stop', '/status', '/settings', '/resume_time'}
+            return isinstance(action['text'], str) and action['text'].strip().lower() in {'/stop', '/status', '/settings', '/resume_time', '/sync_mt5_time', '/use_mt5_raw_time'}
         return action.get('type') in {'cancel_initial', 'v3_cancel_request', 'v3_cancel_entry', 'v3_cancel_link'}
 
     def _hard_guard(self):
@@ -78,6 +78,17 @@ class ActionGateway:
     def _context(self):
         s = self.controller.state
         return deepcopy({key: s.get(key) for key in ('account', 'backend', 'settings', 'basket_settings', 'v3_settings', 'recovery_profiles', 'tp_distances')} | {'cycle_id': (s.get('cycle') or {}).get('id')})
+
+    def _raw_clock(self):
+        return getattr(getattr(self.controller,'broker',None),'raw_market',None)
+
+    def _deferred(self,action,context,accepted_utc,accepted_market_time=None):
+        value=dict(action=deepcopy(action),context=deepcopy(context),accepted_utc=accepted_utc)
+        raw=self._raw_clock()
+        if raw is not None:
+            value.update(tick_instance=raw.instance,tick_sequence=raw.sequence,
+                         accepted_market_time=raw.broker_time if accepted_market_time is None else accepted_market_time)
+        return value
 
     def _cancel_waiting(self, action):
         kind = action.get('type')
@@ -131,14 +142,23 @@ class ActionGateway:
                 continue
             if blocked or self.controller._time_waiting():
                 continue
+            raw=self._raw_clock()
+            if raw is not None:
+                if deferred.get('tick_instance')!=raw.instance:
+                    self._reject_wait(receipt,'Наблюдение MT5 перезапущено; нужна новая команда.')
+                    self.controller.save('control_wait_instance_changed')
+                    continue
+                if not raw.available or raw.sequence<=deferred['tick_sequence']:
+                    continue
             action = deepcopy(deferred['action'])
             accepted_utc = deferred['accepted_utc']
             receipt.pop('deferred')
             receipt['status'] = 'UNKNOWN'
             self.controller.save('control_action_reserved')
-            self._run(action_id, action, accepted_utc=accepted_utc, accepted_context=deferred['context'])
+            self._run(action_id, action, accepted_utc=accepted_utc, accepted_context=deferred['context'],
+                      accepted_market_time=deferred.get('accepted_market_time'))
 
-    def _run(self, action_id, action, *, accepted_utc=None, accepted_context=None, cancelled_wait=False):
+    def _run(self, action_id, action, *, accepted_utc=None, accepted_context=None, cancelled_wait=False,accepted_market_time=None):
         # Capture before execution. A pre-effect boundary race must not shift
         # the candle or adopt configuration changed inside the attempted action.
         accepted_context = deepcopy(self._context() if accepted_context is None else accepted_context)
@@ -149,19 +169,21 @@ class ActionGateway:
         deferred = None
         self.controller._active_control_id = action_id
         self.controller._deferred_action_accepted_utc = frozen_utc
+        self.controller._deferred_action_accepted_market_time = accepted_market_time
         reason = None
         try:
             self.execute(deepcopy(action))
         except TransientDataWait:
             safe_time = (isinstance(accepted_utc, (int, float)) and not isinstance(accepted_utc, bool)
                          and math.isfinite(accepted_utc) and accepted_utc > 0)
+            safe_time = safe_time or self._raw_clock() is not None
             if (safe_time and not self._immediate(action) and not self._hard_guard()
                     and not self.controller.state.get('time_block')
                     and self.controller._time_waiting() and self._context() == accepted_context):
                 status = 'WAITING_DATA'
-                deferred = dict(action=deepcopy(action), context=accepted_context, accepted_utc=accepted_utc)
+                deferred = self._deferred(action,accepted_context,accepted_utc,accepted_market_time)
             else:
-                status = 'REJECTED'
+                status = 'APPLIED' if cancelled_wait else 'REJECTED'
                 reason = 'Контекст или защита изменились до исполнения; нужна новая команда.'
         except ActionRejected as exc:
             status = 'APPLIED' if cancelled_wait else 'REJECTED'
@@ -174,6 +196,7 @@ class ActionGateway:
         finally:
             self.controller._active_control_id = None
             self.controller._deferred_action_accepted_utc = None
+            self.controller._deferred_action_accepted_market_time = None
         receipt = self.controller.state['control_receipts'][action_id]
         receipt['status'] = status
         if deferred is not None:
@@ -210,13 +233,17 @@ class ActionGateway:
         if hasattr(self.controller, '_time_waiting'):
             self.controller._time_guard()
             waiting = self.controller._time_waiting() and not self._immediate(action) and not self._hard_guard()
+            if self._raw_clock() is not None:
+                # Price-dependent commands wait for the NEXT observed tick,
+                # including delayed/cached data after reconnect, as requested.
+                waiting = not self._immediate(action) and not self._hard_guard()
         receipt = dict(digest=digest, status='WAITING_DATA' if waiting else 'UNKNOWN', revision=revision+1)
         if waiting:
             safety = getattr(getattr(self.controller, 'broker', None), 'time_safety', None)
-            accepted = safety.trusted_utc() if safety is not None else self.controller.clock()
-            if accepted is None or not math.isfinite(float(accepted)):
+            accepted = None if self._raw_clock() is not None else (safety.trusted_utc() if safety is not None else self.controller.clock())
+            if self._raw_clock() is None and (accepted is None or not math.isfinite(float(accepted))):
                 raise ActionRejected('Нет подтверждённого времени для ожидания команды')
-            receipt['deferred'] = dict(action=deepcopy(action), context=self._context(), accepted_utc=accepted)
+            receipt['deferred'] = self._deferred(action,self._context(),accepted)
         state.setdefault('control_receipts', {})[request['id']] = receipt
         state['control_revision'] = revision + 1
         self.controller.save('control_action_waiting_data' if waiting else 'control_action_reserved')

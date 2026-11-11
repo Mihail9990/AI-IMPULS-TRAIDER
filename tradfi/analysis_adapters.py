@@ -39,6 +39,10 @@ def _time(value, integral=True):
     return int(value) if integral else value
 
 
+def _coordinate(row):
+    return row['broker_time'] if row.get('time_domain') == 'BROKER_RAW' else row['utc_time']
+
+
 def _prepare(bars, timeframe, as_of):
     seconds = TIMEFRAME_SECONDS[timeframe]
     now = _time(as_of, integral=False)
@@ -46,7 +50,7 @@ def _prepare(bars, timeframe, as_of):
         raise ValueError("invalid bars")
     clean, last = [], -1
     for bar in bars:
-        stamp = _time(bar['utc_time'])
+        stamp = _time(_coordinate(bar))
         if stamp <= last:
             raise ValueError("unordered bars")
         last = stamp
@@ -54,14 +58,14 @@ def _prepare(bars, timeframe, as_of):
         if (min(prices.values()) <= 0 or prices['high'] < max(prices.values())
                 or prices['low'] > min(prices.values())):
             raise ValueError("invalid OHLC")
-        row = dict(prices, utc_time=stamp)
+        row = dict(prices, **({'broker_time': stamp, 'time_domain': 'BROKER_RAW', 'closed': bar.get('closed')} if bar.get('time_domain') == 'BROKER_RAW' else {'utc_time': stamp}))
         for key in ('tick_volume', 'real_volume'):
             value = bar.get(key)
             row[key] = None if value is None else _number(value)
             if row[key] is not None and row[key] < 0:
                 raise ValueError("negative volume")
         # Open and future candles are excluded even if the upstream did not.
-        if stamp + seconds <= now:
+        if stamp + seconds <= now and (bar.get('time_domain') != 'BROKER_RAW' or bar.get('closed') is True):
             clean.append(row)
     return clean[-MAX_BARS:], now
 
@@ -80,7 +84,7 @@ def _version(module, distribution):
 
 
 def _mark(kind, label, direction, index, rows, now, **extra):
-    stamp = rows[index]['utc_time']
+    stamp = _coordinate(rows[index])
     return dict(id=f'{kind}:{stamp}:{label}', kind=kind, label=label,
                 direction=direction, start_time=stamp, end_time=stamp,
                 price=None, top=None, bottom=None, points=[], formed_at=stamp,
@@ -163,7 +167,7 @@ def _smc_fvg(engine, frame, rows, now, pd):
             continue
         top, bottom = expected_top, expected_bottom
         mark = _mark('fvg', 'FVG (snapshot)', 'bullish' if bullish else 'bearish', i, rows, now)
-        mark.update(top=top, bottom=bottom, end_time=rows[i+1]['utc_time'])
+        mark.update(top=top, bottom=bottom, end_time=_coordinate(rows[i+1]))
         marks.append(mark)
     return marks
 
@@ -199,9 +203,9 @@ def _smc_breaks(engine, frame, swings, rows, now, pd):
             if not (rows[end]['close'] > level if direction == 1 else rows[end]['close'] < level):
                 continue
             mark = _mark(kind.lower(), ('CHoCH' if kind == 'CHOCH' else kind) + ' (snapshot)', 'bullish' if direction == 1 else 'bearish', i, rows, now)
-            mark.update(price=level, end_time=rows[end]['utc_time'], points=[
-                {'time': rows[i]['utc_time'], 'price': level},
-                {'time': rows[end]['utc_time'], 'price': level}])
+            mark.update(price=level, end_time=_coordinate(rows[end]), points=[
+                {'time': _coordinate(rows[i]), 'price': level},
+                {'time': _coordinate(rows[end]), 'price': level}])
             marks.append(mark)
     return marks
 
@@ -262,16 +266,16 @@ def _smc_liquidity(engine, frame, swings, rows, now, pd):
         label = 'Ликвидность над максимумами' if direction == 1 else 'Ликвидность под минимумами'
         zone = _mark('liquidity_zone', label + ' (OHLC-оценка)', 'neutral', i, rows, now)
         zone.update(price=level, top=top, bottom=bottom,
-                    end_time=rows[swept or len(rows)-1]['utc_time'], side=side,
+                    end_time=_coordinate(rows[swept or len(rows)-1]), side=side,
                     estimate_basis='OHLC', threshold_range_percent=LIQUIDITY_RANGE_PERCENT,
                     threshold_price=width, zone_state='SWEPT' if swept else 'UNSWEPT',
-                    last_pivot_time=rows[end]['utc_time'],
-                    confirmation_bar_time=rows[end+SWING_LENGTH]['utc_time'],
+                    last_pivot_time=_coordinate(rows[end]),
+                    confirmation_bar_time=_coordinate(rows[end+SWING_LENGTH]),
                     pivot_count=len(candidates))
         marks.append(zone)
         if swept:
             sweep = _mark('liquidity_sweep', 'Пересечение зоны (OHLC-оценка)', 'neutral', swept, rows, now)
-            sweep.update(id=f'liquidity_sweep:{side}:{rows[i]["utc_time"]}:{rows[swept]["utc_time"]}',
+            sweep.update(id=f'liquidity_sweep:{side}:{_coordinate(rows[i])}:{_coordinate(rows[swept])}',
                          price=rows[swept][key], side=side, estimate_basis='OHLC',
                          zone_id=zone['id'])
             marks.append(sweep)
@@ -333,11 +337,11 @@ def _trendln(engine, rows, now):
                 continue
             start, end = int(min(indices)), int(max(indices))
             slope, intercept = _number(fit[0]), _number(fit[1])
-            points = [{'time': rows[i]['utc_time'], 'price': _number(slope*i + intercept)} for i in (start, end)]
+            points = [{'time': _coordinate(rows[i]), 'price': _number(slope*i + intercept)} for i in (start, end)]
             if any(p['price'] <= 0 for p in points):
                 continue
             mark = _mark('trendline', side.title() + ' (snapshot)', 'bullish' if side == 'support' else 'bearish', start, rows, now)
-            mark.update(id=f'trendline:{side}:{start}:{end}:{len(marks)}', end_time=rows[end]['utc_time'], points=points)
+            mark.update(id=f'trendline:{side}:{start}:{end}:{len(marks)}', end_time=_coordinate(rows[end]), points=points)
             marks.append(mark)
     return marks[:MAX_LINES]
 
