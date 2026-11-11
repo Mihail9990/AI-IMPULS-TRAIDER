@@ -2,7 +2,7 @@
 from copy import deepcopy
 from decimal import Decimal as D
 import uuid
-from .control import ActionRejected
+from .control import ActionRejected,TransientDataWait
 from .settings import number
 from .basket_math import BasketSettings,net_money
 from .broker import Spec
@@ -72,6 +72,7 @@ class RecoveryWriteoff:
             # A second read catches fills occurring during the first snapshot.
             snap=self._guard(entry=True)
             if check(snap)!=orders:raise ValueError()
+        except TransientDataWait:raise
         except (ActionRejected,ValueError,KeyError,TypeError,ArithmeticError,OSError,TimeoutError):_reject('Позиции, ордера или факты изменились; сброс не выполнен, обновите снимок')
         self._deadline_guard();self._time_guard()
         if s.get('time_block') or s.get('phase') in {'MANUAL','SAFE_PAUSE','MIGRATION_BLOCK'} or c.get('manual'):_reject('Активна защитная блокировка')
@@ -98,7 +99,8 @@ class RecoveryWriteoff:
         uncertain_actions=any(r.get('status')=='UNKNOWN' and rid!=getattr(self,'_active_control_id',None) for rid,r in s.get('control_receipts',{}).items())
         if (not s.get('stop') and (c or {}).get('recovery_mode')!='V3') or self._unresolved() or uncertain_actions:
             _reject('Остановите новые входы и дождитесь сверки всех обязательств')
-        if s.get('time_block') or (getattr(self.broker,'time_safety',None) and self.broker.time_safety.check()):
+        if self._time_guard():
+            if self._time_waiting():raise TransientDataWait('Ожидаются свежие данные M1')
             _reject('Сначала подтвердите время; новый цикл заблокирован')
         if c and any(c.get(k) for k in ('edit','manual_close','initial_cancel','v3_edit','v3_request','v3_link','v3_rearm','v3_relink')):
             _reject('Предыдущая операция ещё не завершена; дождитесь сверки или отмените запланированный вход')
@@ -110,6 +112,7 @@ class RecoveryWriteoff:
             snap=self._guard(entry=True)
             spec=Spec.load(snap['spec'])
             boundary=max(snap['candle']['id'],int(number(snap['now'])//60)*60-60)
+        except TransientDataWait:raise
         except ActionRejected:
             _reject('Списание недоступно: активна защитная блокировка; проверьте статус, время и завершите сверку')
         except (ValueError,TypeError,KeyError,ArithmeticError,OSError,TimeoutError):

@@ -5,7 +5,7 @@ const root=path.resolve(__dirname,'../web/basket-panel');
 const source=fs.readFileSync(path.join(root,'panel.js'),'utf8');
 const html=fs.readFileSync(path.join(root,'index.html'),'utf8');
 class Element{
- constructor(tag='div'){this.tag=tag;this.value='';this.open=false;this.children=[];this.attributes={};this.dataset={};this.clientWidth=390;this.clientHeight=520;}
+ constructor(tag='div'){this.tag=tag;this.value='';this.open=false;this.children=[];this.attributes={};this.dataset={};this.style={};this.clientWidth=390;this.clientHeight=520;}
  append(...children){this.children.push(...children);}
  replaceChildren(...children){this.children=children;}
  setAttribute(key,value){this.attributes[key]=value;}
@@ -72,6 +72,23 @@ for(const width of [220,320,390,680,1280])for(const height of [120,520])for(cons
  for(const quote of quotes){assert.equal(quote.attributes['pointer-events'],'none');assert(!quote.attributes['data-line'],'quotes never become draggable levels');}
  cases++;
 }
+// All cycle levels and the preview use the same thicker stroke at any viewport size.
+for(const width of [320,390,680,1280]){
+ ctx.svg.clientWidth=width;ctx.svg.clientHeight=520;ctx.zoom=1;ctx.pan=0;
+ ctx.prefs.mainCycle=true;ctx.prefs.colors={BUY:'green',SELL:'red',entry:'white',tp:'cyan',sl:'orange'};
+ ctx.view={levels:{BUY:4001,SELL:3999},orders:[{side:'BUY',price:4001},{side:'SELL',price:3999}],positions:[{id:'position',entry:4000,tp:4002,sl:3998}],feed:{quote:{bid:4000,ask:4000.02},candles:[]}};
+ ctx.preview={value:4000.5,dragging:true};vm.runInContext('draw()',ctx);
+ const levels=ctx.svg.children.filter(n=>n.attributes['data-line']);assert.equal(levels.length,5);
+ for(const level of levels){
+  const strokes=level.children.filter(n=>n.tag==='line');
+  assert.equal(strokes[0].attributes['stroke-width'],4,'cycle stroke doubled to 4 SVG units');
+  assert.equal(strokes[1].attributes['stroke-width'],18,'hit target stays broad');
+ }
+ const preview=ctx.svg.children.find(n=>n.tag==='line'&&n.attributes.stroke==='#fff');assert.equal(preview.attributes['stroke-width'],4);
+ for(const quote of ctx.svg.children.filter(n=>n.attributes['data-quote']))assert.equal(quote.children[0].attributes['stroke-width'],1.5,'Bid/Ask unchanged');
+}
+ctx.preview=null;
+assert(html.includes('Удерживайте линию 0,5 секунды'),'visible help matches the 500ms hold');
 // Short wide panes letterbox the SVG: screen x850 is the price gutter, not candle history.
 Object.assign(ctx,{hold:null,gesture:null,setTimeout:()=>123,clearTimeout:()=>{}});
 vm.runInContext(source.slice(source.indexOf(' const pointers=new Map()'),source.indexOf(" $('cancel-level').onclick")),ctx);
@@ -85,4 +102,4 @@ assert.equal(ctx.timeOffset,120,'price-gutter vertical drag must not scroll cand
 ctx.pan=0;vm.runInContext('draw()',ctx);const offset=ctx.timeOffset;
 handlers.pointerdown(event(600,60));handlers.pointermove(event(650,60));handlers.pointerup(event(650,60));
 assert(Math.abs(ctx.timeOffset-offset-100/ctx.plotRight*ctx.visibleCount)<1e-8,'horizontal delta uses SVG pixels after letterboxing');
-console.log(`PASS profile open/focus, repeated clicks, dirty-draft cancel/replace/refresh; ${cases} actual-source chart gutter cases and letterboxed pointer navigation. DOM doubles, not browser rendering.`);
+console.log(`PASS profile open/focus, repeated clicks, dirty-draft cancel/replace/refresh; ${cases} actual-source chart gutter cases, 4-unit cycle/preview SVG strokes and letterboxed pointer navigation. DOM doubles, not browser rendering.`);

@@ -12,6 +12,7 @@ from .settings import Settings, parse_settings, number
 from .storage import DurabilityError
 from .control import ActionRejected
 from .observation import Observation
+from .native_time import M1_TRANSITION_WAIT
 
 LOG = logging.getLogger(__name__)
 PROTECTIVE_MANUAL = {'CYCLE_24H_LIMIT', 'UTC_CLOCK_MOVED_BACKWARDS', 'INVALID_CYCLE_CLOCK'}
@@ -51,6 +52,7 @@ class Controller:
             self.state['scope_contract']='cycle_scope_v1'
             self.state['ledger_contract']='deal_ledger_v1'
             broker.before_mutation=self._mutation_allowed
+            broker.entry_waiting=self._entry_wait_allowed
             store.enable_deal_ledger()
             store.verify_deal_ledger(self.state)
 
@@ -58,15 +60,27 @@ class Controller:
         self._validate_currency()
         self._deadline_guard()
         self._time_guard()
+        proof=getattr(self.broker,'entry_deferred',None)
+        cancelled=False
+        for cmd in self.state['commands'].values():
+            if proof is not None and cmd['status'] in {'READY','UNKNOWN'} and proof(cmd['id']):
+                cmd.update(status='CANCELLED',never_sent=True);cancelled=True
+        if cancelled:
+            self.notify('Отложенный вход отменён после перезапуска; нужна новая команда.')
+            self.save('entry_wait_restart_cancelled')
 
     def _time_guard(self):
         safety = getattr(self.broker, 'time_safety', None)
         reason = safety.check() if safety is not None else None
-        if reason and not self.state.get('time_block'):
+        self._time_wait_reason = reason if reason == M1_TRANSITION_WAIT else None
+        if reason and reason != M1_TRANSITION_WAIT and not self.state.get('time_block'):
             self.state['time_block'] = {'reason': reason}
             self.notify('TIME_BLOCK: ' + reason + '; new entries blocked; /resume_time required.')
             self.save('time_block_latched')
         if self.state.get('time_block'):
+            verifier=getattr(safety,'semantics_verifier',None)
+            acknowledge=getattr(verifier,'acknowledge_transition_timeout',None)
+            if acknowledge is not None:acknowledge()
             changed = False
             for cmd in self.state['commands'].values():
                 if cmd['kind'] in {'STOP', 'MARKET'} and cmd['status'] == 'READY':
@@ -74,7 +88,13 @@ class Controller:
                     changed = True
             if changed:
                 self.save('time_block_unsent_entries_cancelled')
-        return bool(self.state.get('time_block'))
+        return bool(reason or self.state.get('time_block'))
+
+    def _time_waiting(self):
+        # Cache only. All decision points call _time_guard first; views never
+        # invoke MT5 or replace a durable latch.
+        return bool(getattr(self, '_time_wait_reason', None) == M1_TRANSITION_WAIT
+                    and not self.state.get('time_block'))
 
     def refresh_time(self):
         safety = getattr(self.broker, 'time_safety', None)
@@ -469,6 +489,27 @@ class Controller:
                     self.state['cycle'].get('manual_reason') in PROTECTIVE_MANUAL)
         return not (kind in {'STOP', 'MARKET'} and blocked)
 
+    def _entry_wait_allowed(self):
+        self._deadline_guard();self._time_guard()
+        return bool(self._time_waiting() and not self.state['stop']
+                    and not getattr(self.broker,'read_only',False)
+                    and not self.state.get('migration_block')
+                    and not (self.state.get('cycle') or {}).get('manual')
+                    and self.state['phase'] not in {'SAFE_PAUSE','MANUAL','MIGRATION_BLOCK'})
+
+    def _restore_deferred_entry(self, cmd):
+        proof=getattr(self.broker,'entry_deferred',None)
+        if (cmd['status']!='UNKNOWN' or cmd['kind'] not in {'STOP','MARKET'}
+                or proof is None or not proof(cmd['id'])):
+            return False
+        # Only an explicit durable no-send result can return to READY. UNKNOWN
+        # without this proof is never replayed, including after a restart.
+        if self.state.get('time_block') or self.state['stop'] or (self.state.get('cycle') or {}).get('manual'):
+            cmd.update(status='CANCELLED',never_sent=True)
+        else:
+            cmd['status']='READY'
+        return True
+
     def _manual_reconcile(self, snap):
         c=self.state['cycle']
         c['manual_observation']=dict(observed_at_utc=snap['now'],
@@ -508,7 +549,12 @@ class Controller:
         if getattr(self.broker,'read_only',False):
             raise ValueError('READ_ONLY service cannot create trading intents')
         if not self._mutation_allowed(kind):
-            raise ValueError('Time/manual guard forbids this intent')
+            waiting_entry = (kind in {'STOP', 'MARKET'} and self._time_waiting()
+                             and not (self.state.get('cycle') or {}).get('manual')
+                             and not self.state.get('migration_block')
+                             and self.state['phase'] not in {'SAFE_PAUSE', 'MANUAL', 'MIGRATION_BLOCK'})
+            if not waiting_entry:
+                raise ValueError('Time/manual guard forbids this intent')
         if self.state.get('cycle'):
             params['cycle_id']=self.state['cycle']['id']
         cid = uuid.uuid4().hex[:24]
@@ -533,6 +579,8 @@ class Controller:
             self.observation.fail('AWAITING_POST_MUTATION_READBACK')
             try:
                 self.broker.submit(deepcopy(cmd))
+                if self._restore_deferred_entry(cmd):
+                    self.save('entry_waiting_data_not_sent')
             except (OSError, TimeoutError) as exc:
                 LOG.warning('Unknown gateway outcome %s: %s', cmd['id'], exc)
             # Never call submit again for this intent, even if the file/reply was lost.
@@ -556,6 +604,8 @@ class Controller:
                 cmd['status']=order['status']
             elif status in {'NO_SEND_EVIDENCE','REJECTED_RESPONSE'}:
                 result=self.broker.result(cid)
+                if self._restore_deferred_entry(cmd):
+                    continue
                 if result.get('status')=='REJECTED':
                     cmd.update(status='REJECTED',result=result)
             if evidence.get('order_id'):
@@ -638,6 +688,9 @@ class Controller:
             return
         if any(not x.get('owned', True) for x in snap['orders'] + snap['positions']):
             self.pause('Foreign order/position on XAUUSD.s; ownership conflict')
+            return
+        if self._time_guard() and self._time_waiting():
+            self.dispatch({'CANCEL'})
             return
         phase = self.state['phase']
         c = self.state['cycle']

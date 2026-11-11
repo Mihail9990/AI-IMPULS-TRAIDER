@@ -52,7 +52,7 @@ class DisplayTimeJSON(unittest.TestCase):
         panel=NativePanel(self.bot,clock=lambda:f.api.now,monotonic=lambda:f.api.now);self.addCleanup(panel.close)
         with patch.object(f.broker,'time_safety',SimpleNamespace(semantics_verifier=Diagnostic(),result={'ok':True})):
             status=panel.time_status()
-        self.assertEqual(status,dict(latched_reason='MT5_UTC_WAIT_REFERENCE',current_reason='MT5_UTC_CONTRACT_MISMATCH'))
+        self.assertEqual(status,dict(latched_reason='MT5_UTC_WAIT_REFERENCE',current_reason='MT5_UTC_CONTRACT_MISMATCH',waiting_data=False))
         self.assertEqual(self.bot.state['time_block'],{'reason':'MT5_UTC_WAIT_REFERENCE'})
         self.assertFalse(f.api.sends);self.assertFalse(f.api.checks)
     def test_verified_fixture_retains_existing_timestamp_contract(self):

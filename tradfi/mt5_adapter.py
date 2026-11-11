@@ -35,6 +35,10 @@ class NotSent(ValueError):
     """Definitive local refusal before order_send, never a retry of an uncertain send."""
 
 
+class EntryDataWait(NotSent):
+    """Recognized M1 transition before order_send; the exact entry may wait."""
+
+
 def plain(value):
     if hasattr(value, '_asdict'):
         return {k: plain(v) for k, v in value._asdict().items()}
@@ -115,7 +119,7 @@ class MT5Broker:
                 self.facts[kind][ticket] = json.loads(payload)
             for cid,row in self.rows.items():
                 command=(saved or {}).get('commands',{}).get(cid)
-                if (not command or command.get('status')=='READY'
+                if (not command or (command.get('status')=='READY' and not self.entry_deferred(cid))
                         or row.get('account')!=(saved or {}).get('account')
                         or any(command.get(k)!=v for k,v in row['command'].items())):
                     raise DurabilityError('Controller snapshot and MT5 journal disagree; preserve and reconcile')
@@ -539,6 +543,21 @@ class MT5Broker:
             return False
         return True
 
+    def entry_deferred(self, cid):
+        """Positive durable no-send proof, never permission to replay UNKNOWN."""
+        row = self.rows.get(cid, {})
+        result = row.get('result', {})
+        return (row.get('command', {}).get('kind') in {'STOP', 'MARKET'}
+                and row.get('send_started') is False
+                and 'raw_result' not in row and 'last_error' not in row
+                and result.get('status') == 'WAITING_DATA'
+                and result.get('never_sent') is True)
+
+    def _save_entry_wait(self, cid, row):
+        row.update(send_started=False, result=dict(status='WAITING_DATA',
+                   reason='MT5_UTC_M1_TRANSITION_WAIT', never_sent=True))
+        self._save_row(cid, row, 'entry_waiting_data_not_sent')
+
     def submit(self,command):
         if not self.enable_trading or self.store is None:
             raise OSError('MT5 mutation disabled')
@@ -549,7 +568,8 @@ class MT5Broker:
         if cid in self.rows:
             if self.rows[cid]['command']!=cmd:
                 raise DurabilityError('Command id reused with different payload')
-            return
+            if not self.entry_deferred(cid):
+                return
         state=self.store.load()
         saved=(state or {}).get('commands',{}).get(cid)
         if not saved or saved.get('status')!='UNKNOWN' or state.get('backend')!=self.backend_id or state.get('account')!=self.account:
@@ -570,6 +590,13 @@ class MT5Broker:
             # Rebuild and compare immediately before send; never quietly reprice/reselect a ticket.
             if self._request(cmd)!=request:
                 raise NotSent('Request context changed before send')
+        except EntryDataWait as exc:
+            if cmd['kind'] in {'STOP', 'MARKET'}:
+                self._save_entry_wait(cid, row)
+            else:
+                row['result']=dict(status='REJECTED', reason=str(exc), never_sent=True)
+                self._save_row(cid,row,'not_sent')
+            return
         except (ValueError,OSError,TimeoutError) as exc:
             row['result']=dict(status='REJECTED',reason=str(exc),never_sent=True,
                                retryable_not_sent=isinstance(exc, (OSError, TimeoutError)))
@@ -580,6 +607,13 @@ class MT5Broker:
         try:
             if self._request(cmd)!=request:
                 raise NotSent('Request context changed after durable may-send')
+        except EntryDataWait as exc:
+            if cmd['kind'] in {'STOP', 'MARKET'}:
+                self._save_entry_wait(cid, row)
+            else:
+                row.update(send_started=False, result=dict(status='REJECTED', reason=str(exc), never_sent=True))
+                self._save_row(cid,row,'final_guard_not_sent')
+            return
         except (ValueError,OSError,TimeoutError) as exc:
             row.update(send_started=False,result=dict(
                 status='REJECTED',reason=str(exc),never_sent=True,

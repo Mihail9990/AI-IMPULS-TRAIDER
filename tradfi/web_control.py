@@ -138,7 +138,8 @@ class NativePanel:
         result=getattr(safety,'result',None)
         if current is None and isinstance(result,dict) and not result.get('ok'):
             current=result.get('reason')
-        return dict(latched_reason=(state.get('time_block') or {}).get('reason'),current_reason=current)
+        return dict(latched_reason=(state.get('time_block') or {}).get('reason'),current_reason=current,
+                    waiting_data=bool(not state.get('time_block') and current=='MT5_UTC_M1_TRANSITION_WAIT'))
 
     def view(self):
         s=self.controller.state;c=s.get('cycle') or {};snap=self.snapshot or {}
@@ -153,7 +154,7 @@ class NativePanel:
             time_block=deepcopy(s.get('time_block')),time_status=self.time_status(),feed=feed,quote=feed.get('quote'),timestamp=feed.get('timestamp'),
             orders=deepcopy(snap.get('orders',[])),positions=deepcopy(snap.get('positions',[])),
             journal=[n['text'] for n in s['notifications'][-30:]],
-            action_results={key:{'status':r['status'],'revision':r['revision'],'reason':r.get('reason')} for key,r in s.get('control_receipts',{}).items()})
+            action_results={key:{'status':r['status'],'revision':r['revision'],'reason':r.get('reason'),'waiting_action_type':r.get('deferred',{}).get('action',{}).get('type'),'waiting_cycle_id':r.get('deferred',{}).get('context',{}).get('cycle_id')} for key,r in s.get('control_receipts',{}).items()})
     def basket_view(self,s,c,snap,feed):
         from .panel_accounting import accounting_view
         from .position_history import native_history
@@ -179,7 +180,7 @@ class NativePanel:
             recovery_writeoffs=deepcopy(s.get('recovery_writeoffs',[])[-20:]),migration_block=s.get('migration_block'),manual_reason=c.get('manual_reason'),time_block=deepcopy(s.get('time_block')),time_status=self.time_status(),feed=feed,
             tickets=deepcopy(list(c.get('tickets',{}).values())),orders=deepcopy(snap.get('orders',[])),positions=deepcopy(snap.get('positions',[])),
             journal=[n['text'] for n in s['notifications'][-50:]],
-            action_results={key:{'status':r['status'],'revision':r['revision'],'reason':r.get('reason')} for key,r in s.get('control_receipts',{}).items()})
+            action_results={key:{'status':r['status'],'revision':r['revision'],'reason':r.get('reason'),'waiting_action_type':r.get('deferred',{}).get('action',{}).get('type'),'waiting_cycle_id':r.get('deferred',{}).get('context',{}).get('cycle_id')} for key,r in s.get('control_receipts',{}).items()})
 
     def start(self):
         from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer

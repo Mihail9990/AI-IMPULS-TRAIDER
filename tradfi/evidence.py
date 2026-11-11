@@ -68,9 +68,15 @@ def durable_rows(rows, state, account):
     for cid, row in result.items():
         command = row['command']
         saved = state.get('commands', {}).get(cid)
+        deferred = (command.get('kind') in {'STOP','MARKET'}
+                    and row.get('send_started') is False
+                    and row.get('result',{}).get('status') == 'WAITING_DATA'
+                    and row.get('result',{}).get('never_sent') is True
+                    and 'raw_result' not in row and 'last_error' not in row)
         if (not re.fullmatch('[0-9a-f]{24}', cid) or command.get('id') != cid
                 or row.get('account') != account or not saved
-                or saved.get('status') not in {'UNKNOWN','ACCEPTED','FILLED','PENDING','DONE','REJECTED','CANCELLED','OBSOLETE'}
+                or (saved.get('status') not in {'UNKNOWN','ACCEPTED','FILLED','PENDING','DONE','REJECTED','CANCELLED','OBSOLETE'}
+                    and not (saved.get('status')=='READY' and deferred))
                 or not isinstance(row.get('send_started'), bool)
                 or any(saved.get(k) != v for k, v in command.items())):
             raise EvidenceConflict('DURABLE_INTENT_MISMATCH')

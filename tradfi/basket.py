@@ -7,7 +7,7 @@ from copy import deepcopy
 from decimal import Decimal as D
 import uuid
 from .engine import Controller,TERMINAL
-from .control import ActionRejected
+from .control import ActionRejected,TransientDataWait
 from .settings import number
 from .broker import Spec
 from .basket_math import BasketSettings,ladder,expanded_levels,net_money
@@ -36,11 +36,16 @@ class BasketController(Controller):
 
     def _guard(self,entry=False):
         if self.state.get('migration_block'):raise ActionRejected(self.state['migration_block'])
-        self._deadline_guard();self._time_guard()
+        self._deadline_guard();blocked=self._time_guard()
         if getattr(self.broker,'read_only',False):raise ActionRejected('READ_ONLY: торговля отключена')
         if self.state['phase'] in {'SAFE_PAUSE','MANUAL'}:raise ActionRejected('Нужна ручная сверка; защита брокера сохранена')
-        if entry and self.state.get('time_block'):raise ActionRejected('Время не подтверждено; новые входы запрещены')
+        if entry and blocked:
+            if self._time_waiting():raise TransientDataWait('Ожидаются свежие данные M1')
+            raise ActionRejected('Время не подтверждено; новые входы запрещены')
         snap=self.snapshot()
+        if entry and self._time_guard():
+            if self._time_waiting():raise TransientDataWait('Ожидаются свежие данные M1')
+            raise ActionRejected('Время не подтверждено; команда требует свежих данных')
         if not snap.get('hedging'):raise ActionRejected('Нужен hedging-счёт с независимыми билетами')
         if any(not x.get('owned') for x in snap['positions']+snap['orders']):raise ActionRejected('Есть неизвестные позиции/ордера')
         if entry and self.evidence_contract=='per_obligation_v1' and snap['quote'].get('utc_time') is None:raise ActionRejected('Нет свежей проверенной котировки')
@@ -150,6 +155,7 @@ class BasketController(Controller):
         pass
 
     def _arm(self,snap,role,levels):
+        if self._time_guard():return False
         c=self.state['cycle']
         try:plans=self._plans(snap,role,levels)
         except (ValueError,ArithmeticError):
@@ -386,6 +392,16 @@ class BasketController(Controller):
         self._reconcile_commands(snap)
         if any(not x.get('owned') for x in snap['positions']+snap['orders']):self.pause('Неизвестные ордера/позиции');return
         c=self.state.get('cycle')
+        if self._time_guard() and self._time_waiting():
+            # Keep broker evidence and cancellation working without consuming a
+            # candle/request or preparing protection from an unverified quote.
+            # Existing broker-side SL/TP are never removed.
+            if c:
+                self._observe(snap)
+                if self.state['stop'] or c.get('manual'):
+                    self._cancel(snap,c['entries'])
+            self.dispatch({'CANCEL'})
+            return
         if c:
             try:self._step(snap)
             except (ValueError,ArithmeticError):self._halt(snap,'BASKET_VALIDATION_FAILED');return

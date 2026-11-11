@@ -147,8 +147,12 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
                 controller.refresh_time()
                 next_time_check = monotonic() + 30.
             try:
-                controller.tick()
+                # Owner commands, especially Stop/cancel, take precedence over
+                # releasing deferred entries and automatic candle processing.
                 if panel is not None:panel.step()
+                mailbox=getattr(panel,'mailbox',None)
+                if mailbox is None or mailbox.requests.empty():
+                    controller.tick()
             except (OSError, TimeoutError) as exc:
                 # Terminal exception payloads can contain private account/order data.
                 logging.warning('MT5 temporarily unavailable: %s', type(exc).__name__)

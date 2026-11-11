@@ -187,7 +187,9 @@ class ProfileWriteoff(unittest.TestCase):
             snap = snapshot(); reason[0] = 'UTC_TEST_DISCONTINUITY'
             return snap
         with patch.object(bot, 'snapshot', side_effect=crossing):
-            self.assert_refused(reason='подтвердите время')
+            # Gateway admission now also runs the clock guard, so a second check
+            # may refuse earlier while keeping the same durable safety guarantee.
+            self.assert_refused(reason='время')
         self.assertEqual(bot.state['time_block']['reason'], 'UTC_TEST_DISCONTINUITY')
         self.assertEqual(self.f.store.load()['time_block'], bot.state['time_block'])
 

@@ -9,7 +9,7 @@ import uuid
 from .basket_latest_close import LatestCloseBasketController
 from .basket_math import BasketSettings
 from .broker import Spec
-from .control import ActionRejected
+from .control import ActionRejected,TransientDataWait
 from .settings import number
 from .engine import TERMINAL
 from .recovery_profiles import defaults,validate_settings,selected_snapshot,validate_snapshot,exact_targets
@@ -208,7 +208,8 @@ class ControlledRecoveryController(LatestCloseBasketController):
             raise ActionRejected('Неверный тип или момент входа')
         request=dict(order_type=a['order_type'],timing=a['timing'],side=a['side'],count=count,distance=self.state['v3_settings']['entry_distance'],recovery_profile=profile)
         if a['timing']=='now':self._arm_v3(snap,request,a['side']);return
-        request['bar_id']=int(number(snap['now'])//60)*60+(60 if a['timing']=='next' else 0)
+        accepted=getattr(self,'_deferred_action_accepted_utc',None)
+        request['bar_id']=int(number(snap['now'] if accepted is None else accepted)//60)*60+(60 if a['timing']=='next' else 0)
         c['v3_request']=request;self.state['phase']='V3_WAIT_CANDLE';self.save('v3_schedule_created')
 
     def _recovery_tps(self,cfg,spec,side,entries,sizes,debt):
@@ -420,6 +421,7 @@ class ControlledRecoveryController(LatestCloseBasketController):
                         p=next(p for p in snap['positions'] if p['id']==t['id'])
                         spec.protection(t['side'],number(t['entry']),sl,number(p['tp']),snap['quote'],modify=True)
                         updates.append(dict(position_id=t['id'],sl=str(sl),tp=p['tp']))
+                except TransientDataWait:raise
                 except (KeyError,ValueError,TypeError,StopIteration,ArithmeticError):raise ActionRejected('Защита изменилась или уровень SL недопустим')
                 c['edit']=dict(stage='CANCEL',settings=deepcopy(c['cfg']),levels=None,updates=updates,cancel_ids=[],groups=[],fills=sorted(c['tickets']),closed=sorted(pid for pid,t in c['tickets'].items() if t['closed']),modify_ids=[],expected_protection={p['id']:{k:p[k] for k in ('sl','tp')} for p in snap['positions']})
                 self.save('v3_frozen_link_protection_edit');return
@@ -470,6 +472,7 @@ class ControlledRecoveryController(LatestCloseBasketController):
 
     def _step(self,snap):
         if not self._v3():return
+        if self._time_guard() and self._time_waiting():return
         c=self.state['cycle']
         if not self._observe(snap):return
         if c.get('manual'):
@@ -488,6 +491,8 @@ class ControlledRecoveryController(LatestCloseBasketController):
         if c.get('v3_relink') and not c.get('edit'):
             request=c.pop('v3_relink');self.save('v3_relink_consumed')
             try:self._request_link(dict(type='v3_link',cycle_id=c['id'],count=request['count'],expected_positions=sorted(p['id'] for p in snap['positions'])),recovery_profile=request.get('recovery_profile'),legacy=not bool(request.get('recovery_profile')))
+            except TransientDataWait:
+                c['v3_relink']=request;self.save('v3_relink_waiting_data')
             except ActionRejected:self._halt(snap,'V3_LINK_REPLACEMENT_REQUIRES_REVIEW')
             return
         for g in c['groups']:

@@ -2,8 +2,9 @@
 import json
 from types import ModuleType
 
-from .mt5_adapter import MT5Broker, QuoteFreshnessError, NotSent, dec
+from .mt5_adapter import MT5Broker, QuoteFreshnessError, NotSent, EntryDataWait, dec
 from .settings import number
+from .native_time import M1_TRANSITION_WAIT
 from .time_profile import TEST_PROFILE, BYBIT_PROFILE, HistoryTimeUnverified, TimeProfileError, market_timestamp_to_utc, validate_market_time_offset
 
 
@@ -52,6 +53,10 @@ class MT5EvidenceBroker(MT5Broker):
             if getattr(self, '_cancel_request', False) and stage != 'cancel_freeze_check':
                 return None  # ticket-only REMOVE; a nonzero freeze level is checked separately
             if getattr(self, '_strict_quote', False) or getattr(self, '_require_fresh', False):
+                verifier=getattr(getattr(self,'time_safety',None),'semantics_verifier',None)
+                if (getattr(self, '_entry_request', False)
+                        and getattr(verifier,'reason',None)==M1_TRANSITION_WAIT):
+                    self._raise_entry_wait()
                 raise NotSent('MT5_TIMESTAMP_SEMANTICS_UNVERIFIED')
             return None  # observation only: never interpret raw broker wall time as UTC
         try:
@@ -76,11 +81,20 @@ class MT5EvidenceBroker(MT5Broker):
         finally:
             self._manual_readonly=old
 
+    def _raise_entry_wait(self):
+        waiting = getattr(self, 'entry_waiting', None)
+        if waiting is not None and waiting() is True:
+            raise EntryDataWait('MT5_UTC_M1_TRANSITION_WAIT')
+
     def _request(self, command):
         guard=getattr(self,'before_mutation',None)
         if guard is None or not guard(command['kind']):
+            if command['kind'] in {'STOP', 'MARKET'}:
+                self._raise_entry_wait()
             raise OSError('Manual/deadline guard forbids automatic mutation')
         old = getattr(self, '_strict_quote', False)
+        old_entry = getattr(self, '_entry_request', False)
+        self._entry_request = command['kind'] in {'STOP', 'MARKET'}
         self._strict_quote = True
         self._protective_request = command['kind'] in {'CANCEL', 'MODIFY', 'CLOSE'}
         self._cancel_request = command['kind'] == 'CANCEL'
@@ -88,9 +102,12 @@ class MT5EvidenceBroker(MT5Broker):
             request=super()._request(command)
         finally:
             self._strict_quote = old
+            self._entry_request = old_entry
             self._protective_request = False
             self._cancel_request = False
         if not guard(command['kind']):
+            if command['kind'] in {'STOP', 'MARKET'}:
+                self._raise_entry_wait()
             raise OSError('Cycle deadline crossed during request preparation')
         return request
 
