@@ -465,7 +465,7 @@
   $('reverse-enable').disabled=!!pending||busy||view.reverse_controls?.can_enable!==true;
   $('reverse-disable').disabled=!!pending||busy||view.reverse_controls?.can_disable!==true;
   $('reverse-enable').title=view.reverse_controls?.reason??'';$('reverse-disable').title=view.reverse_controls?.reason??'';
-  diagnosticRenderComponent='FIELDS';if(loadedScope!==view.scope){fields();loadedScope=view.scope;}diagnosticRenderComponent='V3';v3Render();mainAnalysisUI?.updateFeed(view.feed,v3Fresh);diagnosticRenderComponent='CHART';draw();
+  diagnosticRenderComponent='FIELDS';if(loadedScope!==view.scope){fields();loadedScope=view.scope;}diagnosticRenderComponent='V3';v3Render();mainAnalysisUI?.updateFeed(view.feed,v3Fresh);analysisUI?.updateFeed(view.feed,v3Fresh);diagnosticRenderComponent='CHART';draw();
  }
  async function poll(){
   if(polling||busy)return;polling=true;diagnosticRenderComponent=null;
@@ -489,7 +489,7 @@
    const interrupted=['FETCH','PARSE'].includes(stage)?(e?.name==='TimeoutError'?'REQUEST_TIMEOUT':e?.name==='AbortError'?'REQUEST_ABORTED':null):null;
    const reason=interrupted??(stage==='FETCH'?(httpStatus>=400?'HTTP_ERROR':'NETWORK_ERROR'):({PARSE:'JSON_INVALID',VALIDATE:'CONTRACT_MISMATCH',RECONCILE:'RECONCILE_ERROR',RENDER:'RENDER_ERROR'}[stage]??'OTHER'));
    diagnosticRecord({source:'STATE',stage,outcome:'ERROR',reason,error_type:e?.name,http_status:httpStatus,request_ms:diagnosticNow()-started,...timings,...diagnosticFacts()});
-   try{renderMt5TimeControls();diagnosticRenderComponent='RECOVERY_ANALYSIS';mainAnalysisUI?.updateFeed(view?.feed,false);if(view){diagnosticRenderComponent='RECOVERY_V3';v3Render();diagnosticRenderComponent='RECOVERY_STATUS';connectionLabel();updateBotActivity();diagnosticRenderComponent='RECOVERY_CHART';draw();}}
+   try{renderMt5TimeControls();diagnosticRenderComponent='RECOVERY_ANALYSIS';mainAnalysisUI?.updateFeed(view?.feed,false);analysisUI?.updateFeed(view?.feed,false);if(view){diagnosticRenderComponent='RECOVERY_V3';v3Render();diagnosticRenderComponent='RECOVERY_STATUS';connectionLabel();updateBotActivity();diagnosticRenderComponent='RECOVERY_CHART';draw();}}
    catch(recoveryError){diagnosticRecord({source:'STATE',stage:'RECOVERY_RENDER',outcome:'ERROR',reason:'RECOVERY_RENDER_ERROR',error_type:recoveryError?.name,...diagnosticFacts()});}
    const message={FETCH:'Нет свежего снимка',PARSE:'Ответ сервера не прочитан',VALIDATE:'Несовместимый снимок контроллера',RECONCILE:'Ошибка обработки снимка',RENDER:'Ошибка отображения снимка'}[stage]??'Ошибка снимка';
    $('feed-status').textContent=message+' ['+reason+']. Команды заблокированы.';

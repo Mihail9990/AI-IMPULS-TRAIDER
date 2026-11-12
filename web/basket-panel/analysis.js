@@ -52,9 +52,9 @@ function analysisDiagnosticReport(diagnostics,value){try{diagnostics?.record(val
 function analysisDiagnosticNow(diagnostics){try{return diagnostics?.now()??0;}catch{return 0;}}
 function createAnalysisUI({document,fetch,getHeaders,diagnostics=null}){
  const $=id=>document.getElementById(id),ns='http://www.w3.org/2000/svg',periods=['M1','M15','M30','H1'];
- const cards=['patterns','structure'].map(id=>({id,seq:0,controller:null,data:null}));
+ const cards=['patterns','structure'].map(id=>({id,seq:0,controller:null,data:null,count:100,anchor:null,priceZoom:1,pricePan:0,pointers:new Map(),gesture:null}));
  const states={READY:'Готово',STALE:'Устаревшие данные',DISCONNECTED:'Нет связи с MT5',TIME_UNVERIFIED:'Время не подтверждено',WARMING_UP:'Недостаточно истории',UNAVAILABLE:'Недоступно',ERROR:'Ошибка',LICENSE_PENDING:'Лицензия не согласована'};
- let visible=false,timer=null;
+ let visible=false,timer=null,expanded='structure',liveFeed=null,feedAvailable=false;
  const number=v=>typeof v!=='boolean'&&v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v));
  const node=(tag,attrs={},text='')=>{const n=document.createElementNS(ns,tag);for(const [k,v]of Object.entries(attrs))n.setAttribute(k,String(v));n.textContent=String(text);return n;};
  const active=()=>visible&&!document.hidden&&!$('workspace').hidden;
@@ -72,12 +72,19 @@ function createAnalysisUI({document,fetch,getHeaders,diagnostics=null}){
   if(!['READY','STALE'].includes(data.status))return;
   const invalid=analysisSnapshotError(data);if(invalid){status(card,invalid);return;}
   const allBars=data.bars;
-  const bars=allBars.slice(-100),offset=allBars.length-bars.length;
+  let end=allBars.length;
+  if(card.anchor!==null){const found=allBars.findIndex(b=>Number(barTime(b))>card.anchor);end=found<0?allBars.length:found;}
+  end=Math.max(Math.min(allBars.length,Math.min(card.count,allBars.length)),end);
+  const offset=Math.max(0,end-card.count),bars=allBars.slice(offset,end);
+  const matchingFeed=feedAvailable&&liveFeed?.connected===true&&liveFeed.source==='MT5'&&liveFeed.status===(analysisRaw(liveFeed)?'OBSERVED':'FRESH')&&liveFeed.symbol===data.symbol&&liveFeed.instance===data.feed_instance&&analysisDomain(liveFeed)===analysisDomain(data);
+  const q=matchingFeed?liveFeed.quote:null,quote=q&&number(q.bid)&&number(q.ask)&&Number(q.bid)>0&&Number(q.ask)>=Number(q.bid)?q:null;
   if(!bars.length){status(card,'Нет подтверждённых закрытых свечей');return;}
   svg.replaceChildren();
-  const min=Math.min(...bars.map(b=>Number(b.low))),max=Math.max(...bars.map(b=>Number(b.high))),pad=Math.max((max-min)*.08,Math.abs(max)*.00005,.00001),lo=min-pad,hi=max+pad;
+  const prices=bars.flatMap(b=>[Number(b.low),Number(b.high)]);if(quote&&card.anchor===null)prices.push(Number(quote.bid),Number(quote.ask));
+  const min=Math.min(...prices),max=Math.max(...prices),pad=Math.max((max-min)*.08,Math.abs(max)*.00005,.00001),span=(max-min+2*pad)/card.priceZoom,mid=(min+max)/2+card.pricePan,lo=mid-span/2,hi=mid+span/2;
   const width=Math.max(240,svg.clientWidth||800),height=Math.max(80,svg.clientHeight||400);svg.setAttribute('viewBox','0 0 '+width+' '+height);
-  const left=8,right=width-78,top=16,bottom=height-25,step=(right-left)/bars.length,y=p=>bottom-(Number(p)-lo)/(hi-lo)*(bottom-top),x=i=>left+(i+.5)*step;
+  const left=8,right=width-104,top=16,bottom=height-25,step=(right-left)/(bars.length+5),y=p=>bottom-(Number(p)-lo)/(hi-lo)*(bottom-top),x=i=>left+(i+.5)*step;
+  card.layout={left,right,top,bottom,span,step,end,allBars,barTime};svg.dataset.firstCandle=String(barTime(bars[0]));svg.dataset.visibleCount=String(bars.length);
   // Overlay endpoints must refer to actual closed bars. Map full-history indices
   // into the visible window, then clip SVG geometry. Never invent bars in gaps.
   const barIndices=new Map(allBars.map((b,i)=>[Number(barTime(b)),i]));
@@ -87,27 +94,34 @@ function createAnalysisUI({document,fetch,getHeaders,diagnostics=null}){
   for(const index of [...new Set([0,Math.floor((bars.length-1)/2),bars.length-1])])svg.append(node('text',{x:x(index),y:height-6,fill:'#a4b9cc','font-size':11,'text-anchor':index===0?'start':index===bars.length-1?'end':'middle'},stamp(barTime(bars[index])).slice(5,16)));
   svg.append(node('text',{x:right+8,y:height-6,fill:'#a4b9cc','font-size':11},analysisTimeLabel(data)));
   const groups=id==='patterns'?[['candlestick','talib']]:[['figures','geometry']];
-  const count=drawAnalysisOverlays({document,svg,data,groups,tx,y,left,right,top,bottom,figureLabels:true,onEvent(o,key){
+  const count=drawAnalysisOverlays({document,svg,data,groups,tx,y,left,right,top,bottom,figureLabels:false,onEvent(o,key){
    const detail=(key==='figures'?'Геометрия · ':'')+String(o.label??o.kind)+' · '+String(o.status??'')+' · сформировано '+stamp(o.formed_at)+' · обнаружено в снимке '+stamp(o.known_at);
    const li=document.createElement('li');li.textContent=detail;$(id+'-events').append(li);
   }});
+  // Live Bid/Ask shares the existing feed, never creates candles or analysis evidence.
+  if(quote){const badges=[];for(const [key,color]of [['ask','#ff5b63'],['bid','#24d99a']]){const price=Number(quote[key]),yy=y(price);if(yy<top||yy>bottom)continue;svg.append(node('line',{x1:left,x2:right,y1:yy,y2:yy,stroke:color,'stroke-width':1,'data-analysis-quote':key}));let labelY=Math.max(top+12,Math.min(bottom-3,yy));if(badges.some(p=>Math.abs(p-labelY)<15))labelY=labelY+16<=bottom-3?labelY+16:Math.max(top+12,labelY-16);badges.push(labelY);svg.append(node('text',{x:right+5,y:labelY,fill:color,'font-size':12,'data-analysis-price':key},key.toUpperCase()+' '+price.toFixed(2)));}}
+  // The arrow shows direction only: its pixel length is NOT a price target.
+  const feedClosed=(liveFeed?.candles??[]).filter(b=>analysisRaw(liveFeed)?b.closed===true:b.closed!==false&&Number(b.utc_time)+60<=Number(liveFeed?.timestamp));
+  const newestFeed=feedClosed.at(-1),analysisCurrent=matchingFeed&&newestFeed&&Number(analysisBarTime(newestFeed,liveFeed))+60<Number(data.closed_through)+analysisPeriods[data.timeframe];
+  const scenario=analysisCurrent&&typeof selectAnalysisScenario==='function'?selectAnalysisScenario(data,{group:id==='patterns'?'candlestick':'figures'}):null;
+  if(scenario&&card.anchor===null){const xx=x(bars.length-1),yy=y(scenario.price),sign=scenario.direction==='bullish'?-1:1,ex=Math.min(right-3,xx+step*3),ey=Math.max(top+9,Math.min(bottom-9,yy+sign*32));if(yy>=top&&yy<=bottom&&ex>xx){const arrow=node('g',{'data-analysis-scenario':scenario.direction});arrow.append(node('title',{},'Возможное направление, не целевая цена и не гарантия'),node('line',{x1:xx,y1:yy,x2:ex,y2:ey,stroke:'#5ddc75','stroke-width':3,'stroke-dasharray':'5 4'}));const angle=Math.atan2(ey-yy,ex-xx);arrow.append(node('polyline',{points:[[ex-9*Math.cos(angle-.5),ey-9*Math.sin(angle-.5)],[ex,ey],[ex-9*Math.cos(angle+.5),ey-9*Math.sin(angle+.5)]].map(p=>p.join(',')).join(' '),stroke:'#5ddc75','stroke-width':3,fill:'none'}));svg.append(arrow);}}
   const ready=moduleKeys.every(k=>data.modules?.[k]?.status==='READY');
   if(data.status==='READY'&&!ready)status(card,moduleKeys.filter(k=>data.modules?.[k]?.status!=='READY').map(k=>k+': '+(states[data.modules?.[k]?.status]??'Недоступно')+(data.modules?.[k]?.reason?' · '+String(data.modules[k].reason):'')).join(' · '));
   $(id+'-empty').textContent=count?'Отображено событий: '+count:ready?'На показанных свечах подтверждённых признаков нет.':'Признаки недоступны или история ещё накапливается. Отсутствие меток не означает отсутствие паттернов.';
  }
  async function load(card){
   if(!active())return;
-  const timeframe=$(card.id+'-timeframe').value;if(!periods.includes(timeframe))return;
+  const timeframe=$(card.id+'-timeframe').value;if(!periods.includes(timeframe))return;const lookback=Number($(card.id+'-lookback').value)||500;if(![50,100,200,300,500].includes(lookback))return;
   const seq=++card.seq;card.controller?.abort();const controller=new AbortController();card.controller=controller;
   const timeout=setTimeout(()=>controller.abort(),8000),started=analysisDiagnosticNow(diagnostics),source=card.id==='patterns'?'ANALYSIS_PATTERNS':'ANALYSIS_STRUCTURE';
   let stage='FETCH',httpStatus,data,mark=started;const timings={};
   const finishStage=key=>{const end=analysisDiagnosticNow(diagnostics);timings[key]=Math.max(0,end-mark);mark=end;};
   const report=(outcome,reason,error)=>analysisDiagnosticReport(diagnostics,{source,stage,outcome,reason,error_type:error?.name,timeframe,http_status:httpStatus,request_ms:analysisDiagnosticNow(diagnostics)-started,...timings,...analysisDiagnosticFacts(data)});
   if(!card.data)status(card,'Загрузка '+timeframe+'…');
-  try{const r=await fetch('/api/analysis?timeframe='+timeframe,{method:'GET',headers:getHeaders(),signal:controller.signal,cache:'no-store'});httpStatus=r.status;finishStage('fetch_ms');if(!r.ok)throw Error('Анализ недоступен: HTTP '+r.status);
+  try{const r=await fetch('/api/analysis?timeframe='+timeframe+(lookback===500?'':'&bars='+lookback),{method:'GET',headers:getHeaders(),signal:controller.signal,cache:'no-store'});httpStatus=r.status;finishStage('fetch_ms');if(!r.ok)throw Error('Анализ недоступен: HTTP '+r.status);
    stage='PARSE';data=await r.json();finishStage('parse_ms');
-   if(seq!==card.seq||!active()||$(card.id+'-timeframe').value!==timeframe){report('CANCELLED','REQUEST_ABORTED');return;}
-   stage='VALIDATE';if(data.schema!=='analysis_v1'||data.timeframe!==timeframe||data.source!=='MT5')throw Error('Несовместимый снимок анализа');finishStage('validation_ms');
+   if(seq!==card.seq||!active()||$(card.id+'-timeframe').value!==timeframe||(Number($(card.id+'-lookback').value)||500)!==lookback){report('CANCELLED','REQUEST_ABORTED');return;}
+   stage='VALIDATE';if(data.schema!=='analysis_v1'||data.timeframe!==timeframe||data.source!=='MT5'||(data.requested_bars??500)!==lookback)throw Error('Несовместимый снимок анализа');finishStage('validation_ms');
    stage='RENDER';render(card,data);finishStage('render_ms');if(['READY','STALE'].includes(data.status)&&analysisSnapshotError(data)){stage='VALIDATE';report('ERROR','SNAPSHOT_INVALID');}else{stage='COMPLETE';report('OK');}
   }catch(e){
    const failedTiming={FETCH:'fetch_ms',PARSE:'parse_ms',VALIDATE:'validation_ms',RENDER:'render_ms'}[stage];if(failedTiming&&timings[failedTiming]===undefined)timings[failedTiming]=Math.max(0,analysisDiagnosticNow(diagnostics)-mark);
@@ -120,10 +134,29 @@ function createAnalysisUI({document,fetch,getHeaders,diagnostics=null}){
  }
  function stop(){clearInterval(timer);timer=null;for(const card of cards){card.seq++;card.controller?.abort();card.controller=null;}}
  function start(){stop();if(!active())return;for(const card of cards){card.data=null;clear(card);load(card);}timer=setInterval(()=>{if(!active())return;for(const card of cards)if(!card.controller)load(card);},15000);}
- for(const card of cards)$(card.id+'-timeframe').onchange=()=>{card.seq++;card.controller?.abort();card.data=null;clear(card);load(card);};
+ function repaint(card){if(active()&&card.data)render(card,card.data);}
+ function layout(){for(const c of cards){const open=expanded===c.id;$(c.id+'-card').dataset.collapsed=String(!open);$(c.id+'-expand').setAttribute('aria-expanded',String(open));$(c.id+'-expand').textContent=open?'⌃':'⌄';repaint(c);}}
+ function reset(card){card.count=100;card.anchor=null;card.priceZoom=1;card.pricePan=0;card.pointers.clear();card.gesture=null;repaint(card);}
+ function zoom(card,factor){card.count=Math.max(10,Math.min(500,Math.round(card.count*factor)));repaint(card);}
+ for(const card of cards){
+  const svg=$(card.id+'-chart');svg.setAttribute('tabindex','0');
+  $(card.id+'-expand').onclick=()=>{expanded=expanded===card.id?null:card.id;layout();};
+  $(card.id+'-zoom-in').onclick=()=>zoom(card,.75);$(card.id+'-zoom-out').onclick=()=>zoom(card,1.33);$(card.id+'-reset').onclick=()=>reset(card);
+  const reload=()=>{card.seq++;card.controller?.abort();reset(card);card.data=null;clear(card);load(card);};
+  $(card.id+'-timeframe').onchange=reload;$(card.id+'-lookback').onchange=reload;
+  const point=e=>({x:e.clientX,y:e.clientY});
+  function begin(){const pts=[...card.pointers.values()],l=card.layout;if(!l)return;card.gesture={points:pts,count:card.count,end:l.end,span:l.span,pan:card.pricePan,zoom:card.priceZoom,step:l.step,distance:pts.length===2?Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y):0};}
+  svg.addEventListener('pointerdown',e=>{if(!card.data||!card.layout||e.button>0||card.pointers.size>=2)return;e.preventDefault();card.pointers.set(e.pointerId,point(e));svg.setPointerCapture?.(e.pointerId);begin();});
+  svg.addEventListener('pointermove',e=>{if(!card.pointers.has(e.pointerId)||!card.gesture)return;e.preventDefault();card.pointers.set(e.pointerId,point(e));const pts=[...card.pointers.values()],g=card.gesture,l=card.layout;if(pts.length===2&&g.distance>0){const dist=Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y);if(dist>5){card.count=Math.max(10,Math.min(500,Math.round(g.count*g.distance/dist)));card.priceZoom=Math.max(.2,Math.min(20,g.zoom*dist/g.distance));}}else if(pts.length===1){const dx=pts[0].x-g.points[0].x,dy=pts[0].y-g.points[0].y,end=Math.max(Math.min(card.count,l.allBars.length),Math.min(l.allBars.length,Math.round(g.end-dx/g.step)));card.anchor=end===l.allBars.length?null:Number(l.barTime(l.allBars[end-1]));card.pricePan=g.pan+dy/Math.max(1,l.bottom-l.top)*g.span;}repaint(card);});
+  const end=e=>{card.pointers.delete(e.pointerId);if(card.pointers.size)begin();else card.gesture=null;};
+  svg.addEventListener('pointerup',end);svg.addEventListener('pointercancel',end);svg.addEventListener('lostpointercapture',end);
+  svg.addEventListener('wheel',e=>{e.preventDefault();if(e.shiftKey){card.priceZoom=Math.max(.2,Math.min(20,card.priceZoom*(e.deltaY<0?1.2:1/1.2)));repaint(card);}else zoom(card,e.deltaY<0?.85:1.18);},{passive:false});
+  svg.addEventListener('keydown',e=>{if(['+','=','-','Home'].includes(e.key)){e.preventDefault();if(e.key==='Home')reset(card);else zoom(card,e.key==='-'?1.33:.75);}});
+ }
+ layout();
  document.addEventListener('visibilitychange',()=>{if(document.hidden)stop();else if(visible)start();});
  if(typeof ResizeObserver!=='undefined'){const observer=new ResizeObserver(()=>{if(active())for(const card of cards)if(card.data)render(card,card.data);});for(const card of cards)observer.observe($(card.id+'-chart'));}
- return{setVisible(value){visible=value;if(visible)start();else stop();}};
+ return{setVisible(value){visible=value;if(visible)start();else{stop();for(const c of cards){c.pointers.clear();c.gesture=null;}}},updateFeed(value,isAvailable){liveFeed=value;feedAvailable=isAvailable;for(const c of cards)repaint(c);}};
 }
 
 // M1 overlays are display-only. They never replace the trading feed or enter its price domain.

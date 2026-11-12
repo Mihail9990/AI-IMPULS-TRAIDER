@@ -31,20 +31,18 @@ state.positions=[{id:'fixture-ticket',ticket:'123456',side:'BUY',entry:'4000.00'
 state.orders=[{id:'fixture-order',side:'BUY',price:'4000.40'}];state.levels={BUY:'4000.40'};
 async function ready(page,id){await page.waitForFunction(id=>document.getElementById(id+'-chart').querySelectorAll('rect').length>=100,id);}
 async function equalLayout(page){
- const boxes=await page.locator('.analysis-card').evaluateAll(ns=>ns.map(n=>{const c=n.querySelector('svg');return {height:n.getBoundingClientRect().height,chart:c.getBoundingClientRect().height,y:n.getBoundingClientRect().y};}));
- assert.equal(boxes.length,2);assert(boxes.every(b=>b.height>80&&b.chart>20),'charts remain usable');
- assert(Math.abs(boxes[0].height-boxes[1].height)<=1,'equal half-height cards');
- assert(Math.abs(boxes[0].chart-boxes[1].chart)<=1,'equal default chart heights');
- assert(Math.abs(boxes[0].y+boxes[0].height-boxes[1].y)<=1,'cards stacked without gaps');
- assert.equal(await page.locator('.analysis-info[open]').count(),0);
- for(const id of ['patterns','structure']){
-  const axis=await page.locator('#'+id+'-chart text:not([data-figure-label])').allTextContents();
-  assert.equal(axis.length,9,'five prices, three times and UTC retained');
-  assert(axis.every(t=>/^(?:\d+\.\d{2}|\d{2}-\d{2} \d{2}:\d{2}|UTC|время MT5)$/.test(t)),'only price/time axes, never explanatory chart text');
- }
- assert.equal(await page.locator('#patterns-chart [data-pattern-label="true"]').textContent(),'Candle fixture');
- assert.equal(await page.locator('#structure-chart [data-figure-label="true"]').textContent(),'Double top fixture');
- assert(!(await page.locator('#analysis-page').innerText()).includes('Offline explanatory fixture'),'details collapsed by default');
+ assert.equal(await page.locator('#structure-card').getAttribute('data-collapsed'),'false');
+ assert.equal(await page.locator('#patterns-card').getAttribute('data-collapsed'),'true');
+ const boxes=await page.locator('.analysis-card').evaluateAll(ns=>ns.map(n=>n.getBoundingClientRect().height));
+ assert(boxes[1]>boxes[0],'figures expanded by default');
+ assert.equal(await page.locator('[data-pattern-label], [data-figure-label]').count(),0,'labels removed');
+ assert.equal(await page.locator('#structure-chart [data-analysis-price]').count(),2,'live quotes');
+ await page.locator('#patterns-expand').click();
+ assert.equal(await page.locator('#structure-card').getAttribute('data-collapsed'),'true');
+ const before=Number(await page.locator('#patterns-chart').getAttribute('data-visible-count'));
+ await page.locator('#patterns-zoom-in').click();
+ assert(Number(await page.locator('#patterns-chart').getAttribute('data-visible-count'))<before);
+ await page.locator('#patterns-reset').click();
 }
 (async()=>{
  const browser=await chromium.launch({executablePath:process.env.CHROMIUM_PATH||'/usr/bin/chromium',headless:true,args:['--no-sandbox']});
@@ -62,10 +60,10 @@ async function equalLayout(page){
     assert.equal(req.headers()['x-local-control'],'1');assert.equal(req.headers()['x-controller-scope'],state.scope);
     if(tf===failTf)return route.fulfill({status:503,body:'offline fixture failure'});
     if(!seconds[tf]){unexpected.push(req.url());return route.abort();}
-    return route.fulfill({json:snapshot(tf)});
+    return route.fulfill({json:{...snapshot(tf),requested_bars:Number(u.searchParams.get('bars')||500)}});
    }
    const name=u.pathname==='/'?'index.html':u.pathname.slice(1);
-   if(['index.html','diagnostics.js','panel.js','analysis.js','panel.css'].includes(name))return route.fulfill({body:fs.readFileSync(path.join(root,name),'utf8'),contentType:name.endsWith('.js')?'application/javascript':name.endsWith('.css')?'text/css':'text/html'});
+   if(['index.html','diagnostics.js','panel.js','analysis.js','analysis-scenario.js','panel.css'].includes(name))return route.fulfill({body:fs.readFileSync(path.join(root,name),'utf8'),contentType:name.endsWith('.js')?'application/javascript':name.endsWith('.css')?'text/css':'text/html'});
    if(u.pathname!=='/favicon.ico')unexpected.push(req.url());return route.abort();
   });
   try{
@@ -87,8 +85,8 @@ async function equalLayout(page){
     await page.locator('#patterns-timeframe').selectOption(tf);await ready(page,'patterns');
     assert.equal(await page.locator('#structure-timeframe').inputValue(),'M1');assert((await page.locator('#patterns-source').textContent()).includes(tf));
    }
-   await page.locator('#structure-timeframe').selectOption('H1');await ready(page,'structure');assert.equal(await page.locator('#patterns-timeframe').inputValue(),'M1');
-   failTf='M30';await page.locator('#patterns-timeframe').selectOption('M30');await page.waitForFunction(()=>document.getElementById('patterns-status').textContent.includes('503'));
+   await page.locator('#structure-expand').click();await page.locator('#structure-timeframe').selectOption('H1');await ready(page,'structure');assert.equal(await page.locator('#patterns-timeframe').inputValue(),'M1');
+   await page.locator('#patterns-expand').click();failTf='M30';await page.locator('#patterns-timeframe').selectOption('M30');await page.waitForFunction(()=>document.getElementById('patterns-status').textContent.includes('503'));
    assert.equal(await page.locator('#patterns-chart > *').count(),0);assert.equal(await page.locator('#patterns-chart text').count(),0);assert(await page.locator('#patterns-status').isVisible());
    assert((await page.locator('#structure-source').textContent()).includes('H1'),'error isolated');
    await page.setViewportSize({width:viewport.width,height:viewport.height-20});await page.waitForTimeout(100);assert.equal(await page.locator('#patterns-chart > *').count(),0,'resize does not resurrect failed snapshot');

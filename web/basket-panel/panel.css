@@ -199,3 +199,17 @@ body{background:var(--bg)}main{padding:0;max-width:none}#login{max-width:480px;m
 #main-analysis-info[open]{flex-basis:100%;margin:0;max-height:24vh;overflow:auto}#main-analysis-info p{font-size:12px;margin:4px}
 #main-analysis-status{flex:0 0 auto;margin:0;padding:2px 8px;max-height:3em;overflow:auto;font-size:12px;color:#ffd18a}
 #bottom-tabs button{width:25%}#tab-analysis::before{content:'⌁'}
+
+/* One expanded analytical canvas; both headings remain available to switch. */
+.analysis-grid{display:flex;flex-direction:column}
+.analysis-card{flex:1;min-height:0}
+.analysis-card[data-collapsed="true"]{flex:0 0 44px}
+.analysis-card[data-collapsed="true"]>:not(.analysis-heading){display:none!important}
+.analysis-card[data-collapsed="true"] .analysis-heading select{display:none}
+.analysis-heading h2{margin-right:auto}.analysis-heading button{min-height:36px;min-width:40px;padding:3px 9px}
+.analysis-tools{display:flex;flex:0 0 auto;align-items:center;gap:5px;flex-wrap:wrap;padding:3px 0}
+.analysis-tools label{display:flex;align-items:center;gap:4px;font-size:12px;margin:0}
+.analysis-tools select{width:auto;min-height:32px;padding:3px;font-size:12px}
+.analysis-tools button{min-height:32px;padding:3px 9px;font-size:12px}
+.analysis-canvas>svg{touch-action:none;user-select:none;cursor:grab;outline-offset:-2px}
+.analysis-canvas>svg:active{cursor:grabbing}

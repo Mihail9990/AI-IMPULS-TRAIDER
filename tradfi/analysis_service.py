@@ -17,6 +17,15 @@ from .time_profile import market_timestamp_to_utc, TEST_PROFILE
 
 TIMEFRAMES = {'M1': 60, 'M15': 900, 'M30': 1800, 'H1': 3600}
 BAR_LIMIT = 500
+LOOKBACKS = (50, 100, 200, 300, 500)
+
+
+def validate_lookback(bars):
+    if type(bars) is not int or bars not in LOOKBACKS:
+        raise ValueError('INVALID_ANALYSIS_BARS')
+    return bars
+
+
 RESULT_LIMIT = 4 * 1024 * 1024
 
 
@@ -87,9 +96,10 @@ def read_bars(api, config, timeframe, now):
     if config['time_mode'] == 'mt5_raw_v1':
         return read_raw_bars(api, config, timeframe, now)
     duration = TIMEFRAMES[timeframe]
-    raw = api.copy_rates_from_pos(config['symbol'], getattr(api, 'TIMEFRAME_' + timeframe), 1, BAR_LIMIT)
+    limit = validate_lookback(config.get('analysis_bars', BAR_LIMIT))
+    raw = api.copy_rates_from_pos(config['symbol'], getattr(api, 'TIMEFRAME_' + timeframe), 1, limit)
     if raw is None or not len(raw): raise ValueError('HISTORY_UNAVAILABLE')
-    if len(raw) > BAR_LIMIT: raise ValueError('HISTORY_LIMIT')
+    if len(raw) > limit: raise ValueError('HISTORY_LIMIT')
     bars = []
     previous = 0
     for source in raw:
@@ -121,9 +131,10 @@ def read_bars(api, config, timeframe, now):
 def read_raw_bars(api, config, timeframe, source_tick):
     """MT5 native bar0 identifies the open candle; never use host time."""
     duration = TIMEFRAMES[timeframe]
-    raw = api.copy_rates_from_pos(config['symbol'], getattr(api, 'TIMEFRAME_' + timeframe), 0, BAR_LIMIT + 1)
+    limit = validate_lookback(config.get('analysis_bars', BAR_LIMIT))
+    raw = api.copy_rates_from_pos(config['symbol'], getattr(api, 'TIMEFRAME_' + timeframe), 0, limit + 1)
     if raw is None or len(raw) < 2: raise ValueError('HISTORY_NO_CLOSED_BARS')
-    if len(raw) > BAR_LIMIT + 1: raise ValueError('HISTORY_LIMIT')
+    if len(raw) > limit + 1: raise ValueError('HISTORY_LIMIT')
     bars, previous = [], 0
     for source in raw:
         stamp = float(source['time'])
@@ -293,12 +304,17 @@ def _worker(config, incoming, outgoing):
     try:
         import MetaTrader5 as api
         if not api.initialize(config['terminal_path'], timeout=10000): raise RuntimeError('MT5_INITIALIZE_FAILED')
-        cache = {}
-        retry_state = {}
+        caches = {}
+        retries = {}
         while True:
             proof = incoming.get()
             if proof is None: break
-            cache = calculate(api, config, proof, cache, retry_state=retry_state)
+            lookback = validate_lookback(proof.get('analysis_bars', BAR_LIMIT))
+            scoped_config = dict(config, analysis_bars=lookback)
+            cache = calculate(api, scoped_config, proof, caches.get(lookback, {}),
+                              retry_state=retries.setdefault(lookback, {}))
+            caches[lookback] = cache
+            for value in cache.values(): value['requested_bars'] = lookback
             final_status = proof_status(proof, analysis_clock())
             if final_status != 'READY':
                 for value in cache.values():
@@ -347,8 +363,11 @@ class DisabledAnalysisService:
     def __init__(self, symbol): self.symbol = symbol
     def observe(self, feed): pass
     def close(self): pass
-    def view(self, timeframe):
-        return empty_snapshot(self.symbol, timeframe, 'UNAVAILABLE', 'ANALYSIS_STARTUP_UNAVAILABLE')
+    def view(self, timeframe, bars=BAR_LIMIT):
+        validate_lookback(bars)
+        value = empty_snapshot(self.symbol, timeframe, 'UNAVAILABLE', 'ANALYSIS_STARTUP_UNAVAILABLE')
+        value['requested_bars'] = bars
+        return value
 
 
 class AnalysisService:
@@ -381,6 +400,9 @@ class AnalysisService:
         self.worker_target = _worker
         self.proof = None
         self.cache = {}
+        self.lookback_cache = {}
+        self.lookback_received = {}
+        self.lookback_access = {}
         self.stop = threading.Event()
         self.thread = None
         self.start_lock = threading.Lock()
@@ -409,9 +431,13 @@ class AnalysisService:
         except Exception:
             self.proof = None
 
-    def view(self, timeframe):
+    def view(self, timeframe, bars=BAR_LIMIT):
+        validate_lookback(bars)
         if timeframe not in TIMEFRAMES: raise ValueError('INVALID_TIMEFRAME')
         self.last_access = analysis_clock()
+        # At most five fixed keys. Copy-on-write lets the supervisor iterate
+        # a stable demand snapshot without locking the owner/trading thread.
+        self.lookback_access = dict(self.lookback_access, **{str(bars): self.last_access})
         if self.enabled and not self.stop.is_set() and self.thread is None and self.last_access >= self.retry_after:
             with self.start_lock:
                 if self.thread is None:
@@ -422,7 +448,8 @@ class AnalysisService:
                         self.failure = 'UNAVAILABLE'
                         self.retry_after = analysis_clock() + 60
                         self.supervisor = dict(supervisor_state='RETRY_WAIT', failures=1, error_code='SUPERVISOR_START_FAILED')
-        value = deepcopy(self.cache.get(timeframe) or empty_snapshot(self.config['symbol'], timeframe))
+        cache = self.cache if bars == BAR_LIMIT else self.lookback_cache.get(bars, {})
+        value = deepcopy(cache.get(timeframe) or empty_snapshot(self.config['symbol'], timeframe))
         # observe() replaces the whole proof. Never mix two observations or
         # compare a new proof against a clock sampled before that observation.
         proof = self.proof
@@ -447,8 +474,10 @@ class AnalysisService:
         diagnostic = dict(value.get('diagnostics', {}))
         diagnostic.update(self.supervisor)
         diagnostic.update(proof_diagnostics(proof, mono))
-        diagnostic.update(generated_at=value.get('generated_at'), received_at=self.received_at,
-                          cache_age_seconds=max(0, mono-self.received_mono) if self.received_mono is not None else None,
+        received_at, received_mono = self.lookback_received.get(bars,
+            (self.received_at, self.received_mono) if bars == BAR_LIMIT else (None, None))
+        diagnostic.update(generated_at=value.get('generated_at'), received_at=received_at,
+                          cache_age_seconds=max(0, mono-received_mono) if received_mono is not None else None,
                           supervisor_retry_in_seconds=max(0, self.retry_after-mono))
         if proof and self.config['time_mode'] != 'mt5_raw_v1':
             now = proof['utc'] + mono - proof['monotonic']
@@ -465,6 +494,7 @@ class AnalysisService:
             # A fresh owner proof cannot retroactively validate an expired
             # worker proof. Preserve that cached reason until worker refresh.
         value['diagnostics'] = diagnostic
+        value['requested_bars'] = bars
         return value
 
     def diagnostic_view(self):
@@ -512,6 +542,8 @@ class AnalysisService:
                                           name='analysis-result-reader', daemon=True)
                 reader.start()
                 pending = None
+                pending_lookback = BAR_LIMIT
+                last_dispatched = {}
                 launched = analysis_clock()
                 received = False
                 next_send = 0
@@ -524,10 +556,18 @@ class AnalysisService:
                         try:
                             ok, result = completed.get_nowait()
                             if not ok: raise RuntimeError(result)
-                            self.received_at = time.time()
-                            self.received_mono = now
+                            if any(v.get('requested_bars', BAR_LIMIT) != pending_lookback for v in result.values()):
+                                raise ValueError('INVALID_RESULT')
+                            received_at = time.time()
+                            self.lookback_received = {**self.lookback_received, pending_lookback: (received_at, now)}
+                            if pending_lookback == BAR_LIMIT:
+                                self.received_at = received_at
+                                self.received_mono = now
                             self.supervisor = dict(supervisor_state='READY', failures=failures, ipc_ms=round((now-pending)*1000, 3))
-                            self.cache = result
+                            # The outstanding command owns the result key. Never
+                            # let one selected depth overwrite another depth.
+                            self.lookback_cache = {**self.lookback_cache, pending_lookback: result}
+                            if pending_lookback == BAR_LIMIT: self.cache = result
                             received = True
                             self.failure = None
                             pending = None
@@ -539,7 +579,11 @@ class AnalysisService:
                         proof = self.proof
                         dispatched = analysis_clock()
                         if proof_status(proof, dispatched) == 'READY':
-                            incoming.put_nowait(proof)
+                            active = [int(k) for k, accessed in self.lookback_access.items() if now-accessed <= 60]
+                            if not active: active = [BAR_LIMIT]
+                            pending_lookback = min(active, key=lambda key: last_dispatched.get(key, 0))
+                            incoming.put_nowait(proof if pending_lookback == BAR_LIMIT else dict(proof, analysis_bars=pending_lookback))
+                            last_dispatched[pending_lookback] = now
                             pending = dispatched
                             self.supervisor = dict(supervisor_state='WAITING', failures=failures)
             except Exception as exc:

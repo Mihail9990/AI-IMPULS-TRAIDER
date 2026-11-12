@@ -73,13 +73,18 @@ class WebTransport:
             try:
                 if len(path)>128:raise ValueError()
                 query=parse_qs(urlsplit(path).query,strict_parsing=True,keep_blank_values=True,max_num_fields=2)
-                if set(query)!={'timeframe'} or len(query['timeframe'])!=1:raise ValueError()
-                from .analysis_service import TIMEFRAMES,empty_snapshot
+                if not {'timeframe'} <= set(query) <= {'timeframe','bars'} or any(len(v)!=1 for v in query.values()):raise ValueError()
+                from .analysis_service import TIMEFRAMES,LOOKBACKS,BAR_LIMIT,empty_snapshot
                 tf=query['timeframe'][0]
                 if tf not in TIMEFRAMES:raise ValueError()
+                raw_bars=query.get('bars',[str(BAR_LIMIT)])[0]
+                if raw_bars not in {str(n) for n in LOOKBACKS}:raise ValueError()
+                bars=int(raw_bars)
             except ValueError:return reply(400,{'error':'INVALID_ANALYSIS_REQUEST'})
-            if self.analysis is None:return reply(200,empty_snapshot('',tf,'UNAVAILABLE'))
-            return reply(200,self.analysis.view(tf))
+            if self.analysis is None:
+                value=empty_snapshot('',tf,'UNAVAILABLE');value['requested_bars']=bars
+                return reply(200,value)
+            return reply(200,self.analysis.view(tf,bars=bars) if 'bars' in query else self.analysis.view(tf))
         if method=='GET' and route in {'/api/logs','/api/logs/download'}:
             if self.logs is None:return reply(404,{'error':'LOGS_UNAVAILABLE'})
             try:
@@ -236,7 +241,7 @@ class NativePanel:
             def do_POST(self):self.handle_call()
             def handle_call(self):
                 route=urlsplit(self.path).path
-                static={'/':('index.html','text/html'),'/analysis.js':('analysis.js','text/javascript'),'/diagnostics.js':('diagnostics.js','text/javascript'),'/panel.js':('panel.js','text/javascript'),'/panel.css':('panel.css','text/css')}
+                static={'/':('index.html','text/html'),'/analysis.js':('analysis.js','text/javascript'),'/analysis-scenario.js':('analysis-scenario.js','text/javascript'),'/diagnostics.js':('diagnostics.js','text/javascript'),'/panel.js':('panel.js','text/javascript'),'/panel.css':('panel.css','text/css')}
                 if self.command=='GET' and route in static and self.headers.get('Host')==authority:
                     filename,mime=static[route];body=(ROOT/filename).read_bytes()
                     if filename=='index.html':body=panel_html(body,transport.role)
