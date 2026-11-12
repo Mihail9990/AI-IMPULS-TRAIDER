@@ -205,6 +205,9 @@ class Controller:
         self.state['notifications']=self.state['notifications'][-200:]
 
     def pause(self, reason):
+        from .reconciliation_diagnostics import reason_code
+        self.pause_diagnostics = dict(reason=reason_code(reason, 'OTHER_PAUSE_REASON'),
+                                      diagnostics=getattr(self, 'reconciliation_diagnostics', {}).copy())
         if (self.state.get('cycle') or {}).get('manual'):
             self.state['cycle']['reconciliation_error']=reason
             self.save('manual_reconciliation_error'); return
@@ -217,18 +220,28 @@ class Controller:
                    if self.evidence_contract=='per_obligation_v1' else str(exc))
 
     def snapshot(self, *, for_reset=False):
+        self.reconciliation_diagnostics = {'reason': 'SNAPSHOT_REQUESTED'}
         started = self.observation.begin()
         try:
             snap = self._validated_snapshot(for_reset=for_reset)
-        except (Exception, DurabilityError):
+        except (Exception, DurabilityError) as exc:
+            from .reconciliation_diagnostics import reason_code
+            detail = getattr(self, 'reconciliation_diagnostics', {}).copy()
+            detail['reason'] = reason_code(exc, 'OTHER_VALIDATION_FAILURE')
+            self.reconciliation_diagnostics = detail
             self.observation.fail()
             raise
+        self.reconciliation_diagnostics['reason'] = 'SNAPSHOT_VALIDATED'
         self.observation.record(snap, started)
         return snap
 
     def _validated_snapshot(self, *, for_reset=False):
+        self.reconciliation_diagnostics = {'reason': 'SNAPSHOT_REQUESTED'}
         self._validate_currency()
         snap = self.broker.manual_reset_snapshot() if for_reset else self.broker.snapshot()
+        from .reconciliation_diagnostics import evidence_codes
+        try:self.reconciliation_diagnostics['commands'] = evidence_codes(snap)
+        except Exception:pass  # Optional diagnostics never change validation outcome.
         identity = snap['account']
         if self.state['account'] is not None and self.state['account'] != identity:
             raise ValueError('Gateway account identity changed')

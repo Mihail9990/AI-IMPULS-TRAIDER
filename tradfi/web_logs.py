@@ -45,12 +45,19 @@ class DiagnosticLogs:
     def __init__(self,runtime_path=None):
         self.runtime_path=runtime_path;self.lock=threading.Lock();self.documents={};self.signatures={};self.handlers={};self.recent={};self.last_record={};self.failures=0;self.last_capture_ms=0;self.monotonic=time.monotonic
         self.pending=queue.Queue(maxsize=100);self.dropped=0;self.closed=False
-        self.worker=None
+        self.worker=None;self.telegram=None;self.telegram_status="DISABLED"
         if runtime_path:
             self.worker=threading.Thread(target=self._writer,daemon=True,name='diagnostic-writer');self.worker.start()
     def _write_failed(self):
         self.failures+=1
     def _writer(self):
+        try:
+            from .telegram_logs import from_environment
+            self.telegram=from_environment(self.runtime_path)
+            if self.telegram:
+                self.telegram.start();self.telegram_status="ENABLED"
+        except Exception:
+            self.telegram_status="CONFIGURATION_ERROR";self.failures+=1
         try:
             while True:
                 try:item=self.pending.get(timeout=0.1)
@@ -60,6 +67,9 @@ class DiagnosticLogs:
                 try:
                     if item is None:return
                     scope,record=item
+                    if self.telegram:
+                        try:self.telegram.append(record)
+                        except Exception:self.failures+=1
                     if scope not in self.handlers:
                         handler=SafeRotatingFileHandler(str(self.runtime_path)+'.'+scope+'.diagnostic.jsonl',maxBytes=5_000_000,backupCount=3,encoding='utf-8')
                         handler.setFormatter(logging.Formatter('%(message)s'));handler.on_failure=self._write_failed;self.handlers[scope]=handler
@@ -69,6 +79,7 @@ class DiagnosticLogs:
                 finally:self.pending.task_done()
         finally:
             for handler in self.handlers.values():handler.close()
+            if self.telegram:self.telegram.close()
 
     def capture(self,scope,store,state,now,view=None):
         start=self.monotonic()
@@ -134,6 +145,11 @@ class DiagnosticLogs:
             return build_document(self.runtime_path).decode('utf-8',errors='replace')
         if scope != 'live':raise ValueError('Invalid log scope')
         with self.lock:text=self.documents.get(scope,'Логи этого контура пока отсутствуют.\n')
+        transport={'status':self.telegram_status}
+        if self.telegram:
+            try:transport=self.telegram.status()
+            except Exception:transport={'status':'STATUS_UNAVAILABLE'}
+        text='Telegram diagnostics: '+json.dumps(transport,ensure_ascii=False)+'\n'+text
         archived=[]
         if self.runtime_path:
             for suffix in ('.3','.2','.1',''):

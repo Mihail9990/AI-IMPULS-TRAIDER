@@ -143,6 +143,9 @@ class NativePanel:
         self.mailbox.drain(self.gateway,self.view)
         try:
             diagnostic_view=self.mailbox.view()
+            diagnostic_view['diagnostics'] = {
+                'last_error': getattr(self.controller, 'pause_diagnostics', {}),
+                'result': getattr(self.controller, 'reconciliation_diagnostics', {})}
             if hasattr(self.analysis, 'diagnostic_view'):
                 diagnostic_view['analysis'] = self.analysis.diagnostic_view()
             elapsed=(time.perf_counter()-step_start)*1000

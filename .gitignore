@@ -28,3 +28,8 @@ tradfi_xauusdt_demo.sqlite3*
 analysis-wheelhouse/
 analysis-smoke*.json
 analysis-install*.log
+
+# Outbound diagnostics and local Telegram credentials
+*.telegram-outbox.sqlite3*
+.env.*
+telegram-secrets*
