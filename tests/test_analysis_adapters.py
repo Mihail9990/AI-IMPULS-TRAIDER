@@ -14,21 +14,6 @@ def bars(n=80):
                  open='100', high='102', low='98', close='101', tick_volume='10') for i in range(n)]
 
 
-class Talib:
-    __version__ = '0.6.0'
-    def __init__(self, signal=False):
-        self.calls = []
-        self.signal = signal
-    def __getattr__(self, name):
-        if name not in a.PATTERNS:
-            raise AttributeError(name)
-        def calculate(*args):
-            self.calls.append((name, args))
-            values = np.zeros(len(args[0]))
-            if self.signal:
-                values[:] = 100
-            return values
-        return calculate
 
 
 class Smc:
@@ -52,21 +37,13 @@ class Smc:
         return result
 
 
-class Trend:
-    METHOD_NSQUREDLOGN = 'bounded'
-    METHOD_NUMDIFF = 'finite-difference'
-    def calc_support_resistance(self, data, **kw):
-        self.data, self.kw = data, kw
-        line = ([4, 12, 25], (0.1, 99, 0, 0, 0, 0))
-        group = ([], [], [line]*20, [])
-        return group, group
 
 
 class AdapterTests(unittest.TestCase):
     def run_engines(self, rows, engines, as_of=None, tf='M1'):
         real_import = importlib.import_module
         def load(name):
-            if name in ('talib', 'smartmoneyconcepts', 'trendln'):
+            if name in ('smartmoneyconcepts',):
                 if name not in engines:
                     raise ImportError('private path/account secret must not appear')
                 return engines[name]
@@ -78,37 +55,8 @@ class AdapterTests(unittest.TestCase):
         json.dumps(result, allow_nan=False)
         return result
 
-    def test_missing_are_independent_and_gpl_never_loaded(self):
-        talib = Talib()
-        result = self.run_engines(bars(), {'talib': talib})
-        self.assertEqual(result['modules']['talib']['status'], 'READY')
-        self.assertEqual(result['overlays']['candlestick'], [])
-        self.assertEqual(result['modules']['smc']['status'], 'UNAVAILABLE')
-        self.assertEqual(result['modules']['trendln']['status'], 'UNAVAILABLE')
-        self.assertEqual(result['modules']['stock_pattern']['status'], 'LICENSE_PENDING')
-        self.assertNotIn('secret', json.dumps(result))
 
-    def test_talib_float_arrays_closed_only_and_known_at(self):
-        rows = bars(90)
-        now = rows[75]['utc_time']+30
-        talib = Talib(True)
-        result = self.run_engines(rows, {'talib': talib}, now)
-        self.assertEqual(len(talib.calls), len(a.PATTERNS))
-        for name, args in talib.calls:
-            self.assertEqual(len(args), 4)
-            self.assertEqual(len(args[0]), 75)
-            self.assertEqual(args[0].dtype.kind, 'f')
-        self.assertEqual(len(result['overlays']['candlestick']), a.MAX_MARKS)
-        for mark in result['overlays']['candlestick']:
-            self.assertEqual(mark['known_at'], now)
-            self.assertLess(mark['formed_at']+60, now)
-            self.assertNotIn('confidence', mark)
 
-    def test_bound_history(self):
-        talib = Talib(True)
-        result = self.run_engines(bars(500), {'talib': talib})
-        self.assertEqual(len(talib.calls[0][1][0]), a.MAX_BARS)
-        self.assertLessEqual(len(result['overlays']['candlestick']), a.MAX_MARKS)
 
     @unittest.skipUnless(importlib.util.find_spec("pandas"), "optional pandas not installed")
     def test_smc_edges_fvg_and_missing_volume(self):
@@ -143,25 +91,28 @@ class AdapterTests(unittest.TestCase):
                 if expected:
                     self.assertEqual(engine.frames[0]['volume'].iloc[0], rows[0][expected])
 
-    def test_trendln_calculation_shape_and_bounds(self):
-        engine = Trend()
-        rows = bars()
-        result = self.run_engines(rows, {'trendln': engine})
-        self.assertEqual(result['modules']['trendln']['status'], 'READY')
-        self.assertEqual(len(engine.data), 2)
-        self.assertEqual(engine.data[0].tolist(), [98]*len(rows))
-        self.assertEqual(engine.kw['method'], engine.METHOD_NSQUREDLOGN)
-        self.assertEqual(engine.kw['accuracy'], 2)
-        self.assertEqual(len(result['overlays']['trendlines']), a.MAX_LINES)
-        for line in result['overlays']['trendlines']:
-            self.assertEqual(len(line['points']), 2)
-            self.assertEqual(line['known_at'], rows[-1]['utc_time']+60)
-            self.assertLessEqual(line['end_time'], rows[-1]['utc_time'])
+
+    def test_only_smc_imported_and_emitted(self):
+        calls = []
+        def unavailable(name):
+            calls.append(name)
+            raise ImportError('private secret')
+        with patch.object(a, '_load', side_effect=unavailable):
+            result = a.analyze_bars(bars(), 'M1', bars()[-1]['utc_time']+60)
+        self.assertEqual(calls, ['smartmoneyconcepts'])
+        self.assertEqual(set(result['modules']), {'smc'})
+        self.assertEqual(result['overlays'], {'structure': []})
+        self.assertNotIn('secret', json.dumps(result))
+
+    def test_history_and_marks_remain_bounded(self):
+        rows, now = a._prepare(bars(500), 'M1', bars(500)[-1]['utc_time']+60)
+        self.assertEqual(len(rows), a.MAX_BARS)
+        self.assertEqual(rows[0]['utc_time'], bars(500)[-a.MAX_BARS]['utc_time'])
 
     def test_warming_up_distinct_from_missing(self):
-        result = self.run_engines(bars(2), {'talib': Talib()})
-        self.assertEqual(result['modules']['talib']['status'], 'WARMING_UP')
-        self.assertEqual(result['modules']['smc']['status'], 'UNAVAILABLE')
+        result = self.run_engines(bars(2), {'smartmoneyconcepts': SimpleNamespace(smc=Smc())})
+        self.assertEqual(result['modules']['smc']['status'], 'WARMING_UP')
+        self.assertEqual(self.run_engines(bars(2), {})['modules']['smc']['status'], 'UNAVAILABLE')
 
     def test_invalid_fails_closed_without_importing(self):
         variants = []
@@ -176,41 +127,23 @@ class AdapterTests(unittest.TestCase):
         with patch.object(a, '_load', side_effect=AssertionError('must not import')):
             for rows in variants:
                 result = a.analyze_bars(rows, 'M1', 1800000000)
-                self.assertEqual(result['modules']['talib']['error'], 'INVALID_INPUT')
+                self.assertEqual(result['modules']['smc']['error'], 'INVALID_INPUT')
                 self.assertFalse(any(result['overlays'].values()))
                 json.dumps(result, allow_nan=False)
 
-    def test_nonfinite_engine_failure_is_local(self):
-        bad = SimpleNamespace(**{n: lambda *args: np.full(len(args[0]), np.nan) for n in a.PATTERNS})
-        result = self.run_engines(bars(), {'talib': bad, 'trendln': Trend()})
-        self.assertEqual(result['modules']['talib']['status'], 'ERROR')
-        self.assertEqual(result['modules']['trendln']['status'], 'READY')
-        self.assertEqual(result['overlays']['candlestick'], [])
 
     def test_vendor_exceptions_do_not_leak_paths(self):
-        class BrokenTrend(Trend):
-            def calc_support_resistance(self, *args, **kwargs):
-                raise RuntimeError('/private/account/12345 secret')
-        result = self.run_engines(bars(), {'talib': Talib(), 'trendln': BrokenTrend()})
-        self.assertEqual(result['modules']['trendln']['error'], 'ANALYSIS_FAILED')
-        self.assertEqual(result['modules']['talib']['status'], 'READY')
+        with patch.object(a, '_load', side_effect=RuntimeError('/private/account/12345 secret')):
+            result = a.analyze_bars(bars(), 'M1', bars()[-1]['utc_time']+60)
+        self.assertEqual(result['modules']['smc']['error'], 'ANALYSIS_FAILED')
         self.assertNotIn('12345', json.dumps(result))
-
-    def test_bad_trend_floats_cannot_reach_json(self):
-        class BadTrend(Trend):
-            def calc_support_resistance(self, *args, **kwargs):
-                group = ([], [], [([1, 2], (float('inf'), 100))], [])
-                return group, group
-        result = self.run_engines(bars(), {'trendln': BadTrend()})
-        self.assertEqual(result['modules']['trendln']['status'], 'ERROR')
-        self.assertEqual(result['overlays']['trendlines'], [])
 
     def test_fractional_service_snapshot_time(self):
         rows = bars()
         now = rows[-1]['utc_time'] + 60.123456
-        result = self.run_engines(rows, {'talib': Talib(True)}, now)
-        self.assertEqual(result['modules']['talib']['status'], 'READY')
-        self.assertTrue(all(m['known_at'] == now for m in result['overlays']['candlestick']))
+        prepared, stamp = a._prepare(rows, 'M1', now)
+        self.assertEqual(stamp, now)
+        self.assertEqual(len(prepared), len(rows))
         self.assertEqual(a._time('2024-01-01T00:00:00.125Z', integral=False), 1704067200.125)
         with self.assertRaises(ValueError):
             a._time(rows[0]['utc_time'] + .1)
@@ -373,34 +306,11 @@ class AdapterTests(unittest.TestCase):
         self.assertIn(zone, marks)
         self.assertEqual(zone['end_time'], rows[-1]['utc_time'])
 
-    def test_geometry_independent_from_optional_packages(self):
-        real_import = importlib.import_module
-        def load(name):
-            if name == 'tradfi.analysis_patterns':
-                return SimpleNamespace(analyze_patterns=lambda rows, tf, now: {'status': 'READY', 'overlays': [], 'notes': ['geometry ok']})
-            if name in ('talib', 'smartmoneyconcepts', 'trendln'):
-                raise ImportError('absent')
-            return real_import(name)
-        rows = bars()
-        with patch.object(a, '_load', side_effect=load):
-            result = a.analyze_bars(rows, 'M1', rows[-1]['utc_time']+60)
-        self.assertEqual(result['modules']['geometry']['status'], 'READY')
-        self.assertEqual(result['modules']['talib']['status'], 'UNAVAILABLE')
-        self.assertIn('geometry ok', result['notes'])
-        self.assertEqual(result['overlays']['figures'], [])
 
-    @unittest.skipUnless(all(importlib.util.find_spec(name) for name in ('talib', 'smartmoneyconcepts', 'trendln')), 'real optional libraries not installed')
-    def test_real_vendors_detect_engulfing_and_confirmed_liquidity(self):
+    @unittest.skipUnless(all(importlib.util.find_spec(name) for name in ('smartmoneyconcepts',)), 'real optional libraries not installed')
+    def test_real_smc_confirmed_liquidity(self):
         # Real engines only. The test is optional in the baseline environment,
         # required in the dedicated analysis-dependency integration environment.
-        rows = bars()
-        rows[-2].update(open=101, close=99, high=102, low=98)
-        rows[-1].update(open=98.5, close=101.5, high=102, low=98)
-        result = a.analyze_bars(rows, 'M1', rows[-1]['utc_time']+60.25)
-        self.assertEqual(result['modules']['talib']['status'], 'READY')
-        self.assertTrue(any(m['label'] == 'ENGULFING' and m['direction'] == 'bullish'
-                            and m['formed_at'] == rows[-1]['utc_time']
-                            for m in result['overlays']['candlestick']))
         rows = bars()
         for i, high in ((10, 110), (30, 110.05), (50, 111), (70, 109)):
             rows[i]['high'] = high
@@ -468,9 +378,8 @@ class AdapterTests(unittest.TestCase):
             for i, row in enumerate(rows):
                 row['utc_time'] = 1700000000 + i*seconds
             now = rows[-1]['utc_time']+seconds-1
-            engine = Talib()
-            self.run_engines(rows, {'talib': engine}, now, tf)
-            self.assertEqual(len(engine.calls[0][1][0]), 79)
+            prepared, _ = a._prepare(rows, tf, now)
+            self.assertEqual(len(prepared), 79)
         self.assertEqual(a._time('2024-01-01T00:00:00Z'), 1704067200)
         with self.assertRaises(ValueError):
             a._time('2024-01-01T00:00:00')

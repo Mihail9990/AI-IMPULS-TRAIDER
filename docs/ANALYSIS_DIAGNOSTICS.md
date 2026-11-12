@@ -87,7 +87,6 @@ Offline frontend checks:
 
 ```
 node tools/test_ui_diagnostics.js
-node tools/test_analysis_ui.js
 node tools/test_main_analysis_unit.js
 ```
 

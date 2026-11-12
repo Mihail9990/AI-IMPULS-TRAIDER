@@ -19,24 +19,24 @@ const kinds=()=>draw().filter(n=>n.attributes['data-analysis-kind']).map(n=>n.at
 async function reload(data){ui.setVisible(false);ui.setVisible(true);await settle(requests.at(-1),data);}
 (async()=>{
  assert.equal(requests.length,0);ui.updateFeed(feed(),true);assert.equal(requests.length,1);assert.equal(timers.size,1);assert.equal(requests[0].url,'/api/analysis?timeframe=M1');assert.equal(requests[0].options.method,'GET');
- await settle(requests.at(-1),snapshot());assert.deepEqual(kinds(),['liquidity_zone','liquidity_sweep','trendline']);assert.equal(get('main-analysis-status').textContent,'');
+ await settle(requests.at(-1),snapshot());assert.deepEqual(kinds(),['liquidity_zone','liquidity_sweep']);assert.equal(get('main-analysis-status').textContent,'');
  const shapes=draw();assert(shapes.some(n=>n.attributes['pointer-events']==='none'));assert(!shapes.some(n=>n.tag==='text'),'main analytical overlays have no text labels');assert.equal(shapes.find(n=>n.attributes['data-analysis-kind']==='liquidity_zone').attributes['fill-opacity'],'0.25');
- assert(Number(shapes.find(n=>n.tag==='polyline').attributes.points.split(',')[0])<0,'line crossing viewport is retained and clipped');
+ assert(!shapes.some(n=>n.attributes['data-analysis-kind']==='trendline'),'legacy trend preference and response cannot restore trend lines');
  const initial=requests.length;for(let i=0;i<100;i++)ui.updateFeed(feed(),true);assert.equal(requests.length,initial,'trading poll does not re-fetch analysis');
- preferences.liquidity=false;ui.refresh();await settle(requests.at(-1),snapshot());assert.deepEqual(kinds(),['trendline']);preferences.mainTrend=false;ui.refresh();assert.equal(timers.size,0);assert.equal(kinds().length,0);assert.equal(get('main-analysis-source').textContent,'');
+ preferences.liquidity=false;const priorRequests=requests.length;ui.refresh();assert.equal(requests.length,priorRequests,'legacy mainTrend does not start analysis');assert.equal(timers.size,0);assert.equal(kinds().length,0);assert.equal(get('main-analysis-source').textContent,'');
  preferences.liquidity=true;preferences.mainTrend=true;ui.refresh();await settle(requests.at(-1),snapshot());
  for(const [patch,reason]of [[{status:'STALE'},'устарели'],[{status:'TIME_UNVERIFIED'},'время не подтверждено'],[{feed_instance:'other'},'источник изменился'],[{symbol:'OTHER'},'источник изменился'],[{timeframe:'H1'},'не закрыты']]){await reload(snapshot(patch));assert.equal(kinds().length,0);assert(get('main-analysis-status').textContent.includes(reason),get('main-analysis-status').textContent);}
  await reload(snapshot());const conflicting=feed().candles.slice(-80);conflicting[0]={...conflicting[0],close:101};draw(conflicting);assert(!walk(svg).some(n=>n.attributes['data-analysis-kind']));assert(get('main-analysis-status').textContent.includes('различаются'));
  for(const bad of [closed-60,1e20,Infinity,NaN,null,closed+.5]){await reload(snapshot({closed_through:bad}));assert.doesNotThrow(()=>kinds());assert.equal(kinds().length,0);assert(get('main-analysis-status').textContent.includes('некорректное время закрытых'));}
  await reload(snapshot());ui.updateFeed({...feed(),timestamp:closed+61},true);assert.equal(kinds().length,0);assert(get('main-analysis-status').textContent.includes('последней закрытой'));ui.updateFeed(feed(),true);
  await reload(snapshot());clock+=21000;assert.equal(kinds().length,0);assert(get('main-analysis-status').textContent.includes('устарел'));clock+=1;
- await reload(snapshot({modules:{smc:{status:'READY',components:{liquidity:{status:'ERROR',reason:'COMPONENT_FAILED'}}},trendln:{status:'UNAVAILABLE',reason:'missing'}}}));assert(!kinds().includes('trendline'));assert(get('main-analysis-status').textContent.includes('COMPONENT_FAILED'));assert(get('main-analysis-status').textContent.includes('trendln'));
+ await reload(snapshot({modules:{smc:{status:'READY',components:{liquidity:{status:'ERROR',reason:'COMPONENT_FAILED'}}},trendln:{status:'UNAVAILABLE',reason:'missing'}}}));assert(!kinds().includes('trendline'));assert(get('main-analysis-status').textContent.includes('COMPONENT_FAILED'));assert(!get('main-analysis-status').textContent.includes('trendln'));
  await reload(snapshot());ui.updateFeed({...feed(),timestamp_semantics:'UNVERIFIED'},true);assert.equal(kinds().length,0);assert(get('main-analysis-status').textContent.includes('время не подтверждено'));assert.equal(timers.size,0);
- for(const field of ['connected','source']){const invalid=field==='connected'?false:'OTHER';ui.updateFeed({...feed(),[field]:invalid},true);const old=requests.length;ui.updateFeed(feed(),true);assert.equal(requests.length,old+1,field+' recovery starts polling');await settle(requests.at(-1),snapshot());assert.equal(kinds().length,3);}
+ for(const field of ['connected','source']){const invalid=field==='connected'?false:'OTHER';ui.updateFeed({...feed(),[field]:invalid},true);const old=requests.length;ui.updateFeed(feed(),true);assert.equal(requests.length,old+1,field+' recovery starts polling');await settle(requests.at(-1),snapshot());assert.equal(kinds().length,2);}
  ui.updateFeed(feed(),false);assert.equal(kinds().length,0);assert.equal(timers.size,0);ui.updateFeed(feed(),true);const pending=requests.at(-1);ui.setVisible(false);assert(pending.options.signal.aborted);await settle(pending,snapshot());assert.equal(kinds().length,0);assert.equal(timers.size,0);
  ui.setVisible(true);requests.at(-1).reject(Error('offline'));await new Promise(r=>setImmediate(r));assert.equal(kinds().length,0);assert.equal(get('main-analysis-status').textContent,'offline');
- ui.setVisible(false);document.hidden=true;ui.setVisible(true);const before=requests.length;listeners.visibilitychange();assert.equal(requests.length,before);document.hidden=false;listeners.visibilitychange();assert.equal(requests.length,before+1);await settle(requests.at(-1),snapshot());assert.equal(kinds().length,3);
- await reload(snapshot({overlays:{trendlines:[{kind:'trendline',points:[{time:bars[40].utc_time-1800,price:100},{time:bars.at(-1).utc_time,price:102}]}]}}));assert.equal(kinds().length,0,'missing timestamp never fabricated');
+ ui.setVisible(false);document.hidden=true;ui.setVisible(true);const before=requests.length;listeners.visibilitychange();assert.equal(requests.length,before);document.hidden=false;listeners.visibilitychange();assert.equal(requests.length,before+1);await settle(requests.at(-1),snapshot());assert.equal(kinds().length,2);
+ await reload(snapshot({overlays:{structure:[{kind:'bos',points:[{time:bars[40].utc_time-1800,price:100},{time:bars.at(-1).utc_time,price:102}]}]}}));assert.equal(kinds().length,0,'missing timestamp never fabricated');
  await reload(snapshot());const create=document.createElementNS;document.createElementNS=()=>{throw Error('synthetic render fault');};assert.doesNotThrow(()=>kinds(),'overlay fault cannot escape into main chart rendering');document.createElementNS=create;assert(get('main-analysis-status').textContent.includes('ошибка отображения'));assert.equal(kinds().length,0);
 
  // Raw-mode closure is established by observed native bars, including session gaps.
@@ -44,14 +44,14 @@ async function reload(data){ui.setVisible(false);ui.setVisible(true);await settl
  const rawFeed={...feed(),timestamp_semantics:'BROKER_RAW',time_domain:'BROKER_RAW',status:'OBSERVED',timestamp:null,age_seconds:null,broker_time:closed+3*86400,candles:[...rawBars,{broker_time:closed+3*86400,raw_time:closed+3*86400,utc_time:null,closed:false,open:102,close:103,low:101,high:104}]};
  const rawSnapshot={...snapshot(),timestamp_semantics:'BROKER_RAW',time_domain:'BROKER_RAW',as_of:rawFeed.broker_time,bars:rawBars};
  const rawKinds=()=>draw(rawFeed.candles.slice(-80)).filter(n=>n.attributes['data-analysis-kind']);
- ui.updateFeed(rawFeed,true);await settle(requests.at(-1),rawSnapshot);assert.equal(rawKinds().length,3);
+ ui.updateFeed(rawFeed,true);await settle(requests.at(-1),rawSnapshot);assert.equal(rawKinds().length,2);
  assert(get('main-analysis-source').textContent.includes('время MT5'));assert(!get('main-analysis-source').textContent.includes('UTC'));
- clock+=4*86400000;assert.equal(rawKinds().length,3,'wall-clock delay does not expire raw analysis');
- ui.updateFeed({...rawFeed,broker_time:rawFeed.broker_time+60},true);assert.equal(rawKinds().length,3,'tick alone does not invent a closed native bar');
+ clock+=4*86400000;assert.equal(rawKinds().length,2,'wall-clock delay does not expire raw analysis');
+ ui.updateFeed({...rawFeed,broker_time:rawFeed.broker_time+60},true);assert.equal(rawKinds().length,2,'tick alone does not invent a closed native bar');
  ui.updateFeed({...rawFeed,candles:[...rawFeed.candles.slice(0,-1),{...rawFeed.candles.at(-1),closed:true}]},true);assert.equal(rawKinds().length,0,'newly observed closed candle hides old analysis');
- ui.updateFeed(rawFeed,false);assert.equal(rawKinds().length,0,'HTTP freshness gate still applies');ui.updateFeed(rawFeed,true);await settle(requests.at(-1),rawSnapshot);assert.equal(rawKinds().length,3);
+ ui.updateFeed(rawFeed,false);assert.equal(rawKinds().length,0,'HTTP freshness gate still applies');ui.updateFeed(rawFeed,true);await settle(requests.at(-1),rawSnapshot);assert.equal(rawKinds().length,2);
  await reload(snapshot());assert.equal(rawKinds().length,0,'UTC analysis cannot overlay a raw feed');
- ui.setVisible(false);ui.setVisible(true);const obsoleteRaw=requests.at(-1);ui.updateFeed(feed(),true);await settle(requests.at(-1),snapshot());await settle(obsoleteRaw,rawSnapshot);assert.equal(kinds().length,3,'old domain response cannot replace new domain');
+ ui.setVisible(false);ui.setVisible(true);const obsoleteRaw=requests.at(-1);ui.updateFeed(feed(),true);await settle(requests.at(-1),snapshot());await settle(obsoleteRaw,rawSnapshot);assert.equal(kinds().length,2,'old domain response cannot replace new domain');
  assert(requests.every(r=>r.options.method==='GET'&&r.url==='/api/analysis?timeframe=M1'));assert(redraws>0);ui.setVisible(false);
  console.log('PASS main M1 overlays: toggles, bounded polling, native source binding, OHLC alignment/gaps, clipping, freshness, partial errors, disconnect/recovery, abort races, hidden tabs and zero trade calls. Browser rendering NOT verified.');
 })().catch(e=>{console.error(e);process.exitCode=1;});

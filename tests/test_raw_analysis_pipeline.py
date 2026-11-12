@@ -5,7 +5,6 @@ from unittest.mock import patch
 from tradfi.chart_feed import ChartFeed
 from tradfi.analysis_service import AnalysisService, calculate, read_bars, proof_status, TIMEFRAMES
 from tradfi.analysis_adapters import _prepare, analyze_bars
-from tradfi.analysis_patterns import _prepare as prepare_patterns
 
 NOW = 1800000000
 CONFIG = dict(symbol='TEST', terminal_path='C:/mt5/terminal64.exe', expected_login=123,
@@ -42,7 +41,7 @@ class RawAnalysisTests(unittest.TestCase):
         self.assertEqual(api.calls,[(1,0,501)])
         self.assertEqual([b['broker_time'] for b in bars],[NOW-300,NOW-120,NOW-60])
         self.assertTrue(all(b['broker_time'] < NOW for b in bars))
-        for prepare in (_prepare,prepare_patterns):
+        for prepare in (_prepare,):
             rows,now=prepare(bars,'M1',NOW+1)
             self.assertEqual(len(rows),3)
             self.assertTrue(all('utc_time' not in row for row in rows))
@@ -78,7 +77,8 @@ class RawAnalysisTests(unittest.TestCase):
     def test_raw_analyzer_never_labels_utc(self):
         bars=read_bars(API(),CONFIG,'M1',NOW+1)
         result=analyze_bars(bars,'M1',NOW+1)
-        self.assertNotEqual(result['modules']['geometry']['status'],'ERROR')
+        self.assertEqual(set(result['modules']), {'smc'})
+        self.assertNotEqual(result['modules']['smc'].get('error'), 'INVALID_INPUT')
         for marks in result['overlays'].values():
             self.assertTrue(all('utc_time' not in mark for mark in marks))
 

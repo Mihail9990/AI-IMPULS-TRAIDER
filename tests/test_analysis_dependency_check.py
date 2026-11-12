@@ -29,19 +29,26 @@ class DependencyCheckTest(unittest.TestCase):
         report = json.loads(output.getvalue())
         self.assertEqual(code, 0)
         self.assertFalse(report['windows_release_verified'])
-        self.assertEqual(report['stock_pattern'], 'EXCLUDED_LICENSE_PENDING')
+        self.assertEqual(set(report['modules']), {'smc'})
 
-    def test_partial_smc_and_missing_geometry_fail_smoke(self):
+    def test_partial_smc_fails_smoke(self):
         modules={key:{'status':'READY'} for key in check.PACKAGES}
         modules['smc']['components']={key:{'status':'READY'} for key in ('swings','fvg','bos_choch','liquidity')}
-        modules['geometry']={'status':'READY'}
-        for broken in ('liquidity','geometry'):
+        for broken in ('swings','fvg','bos_choch','liquidity'):
             import copy
             value=copy.deepcopy(modules)
-            if broken=='geometry':value['geometry']['status']='ERROR'
-            else:value['smc']['components'][broken]['status']='ERROR'
+            value['smc']['components'][broken]['status']='ERROR'
             with patch.object(check,'inspect_packages',return_value={k:{'status':'PRESENT'} for k in check.PACKAGES}),patch.object(check,'smoke_check',return_value={'modules':value}):
                 with contextlib.redirect_stdout(io.StringIO()):self.assertEqual(check.main(['--smoke']),2)
+
+    def test_smc_only_smoke_passes_without_removed_modules(self):
+        modules = {'smc': {'status': 'READY', 'components': {
+            key: {'status': 'READY'} for key in ('swings','fvg','bos_choch','liquidity')}}}
+        with patch.object(check, 'inspect_packages', return_value={'smc': {'status': 'PRESENT'}}), \
+                patch.object(check, 'smoke_check', return_value={'modules': modules}):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(check.main(['--smoke']), 0)
+        self.assertEqual(check.PACKAGES, {'smc': 'smartmoneyconcepts'})
 
     def test_smoke_error_is_bounded_public_message(self):
         with patch.object(check, 'inspect_packages', return_value={k: {'status': 'PRESENT'} for k in check.PACKAGES}), \

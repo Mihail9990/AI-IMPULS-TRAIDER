@@ -241,7 +241,7 @@ class NativePanel:
             def do_POST(self):self.handle_call()
             def handle_call(self):
                 route=urlsplit(self.path).path
-                static={'/':('index.html','text/html'),'/analysis.js':('analysis.js','text/javascript'),'/analysis-scenario.js':('analysis-scenario.js','text/javascript'),'/diagnostics.js':('diagnostics.js','text/javascript'),'/panel.js':('panel.js','text/javascript'),'/panel.css':('panel.css','text/css')}
+                static={'/':('index.html','text/html'),'/analysis.js':('analysis.js','text/javascript'),'/diagnostics.js':('diagnostics.js','text/javascript'),'/panel.js':('panel.js','text/javascript'),'/panel.css':('panel.css','text/css')}
                 if self.command=='GET' and route in static and self.headers.get('Host')==authority:
                     filename,mime=static[route];body=(ROOT/filename).read_bytes()
                     if filename=='index.html':body=panel_html(body,transport.role)

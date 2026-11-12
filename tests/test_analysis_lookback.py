@@ -105,7 +105,7 @@ class LookbackTests(unittest.TestCase):
 
 
 class AnalysisResourceTests(unittest.TestCase):
-    def test_scenario_resource_is_served_from_loopback_allowlist(self):
+    def test_smc_resource_is_served_from_loopback_allowlist(self):
         from io import BytesIO
         from pathlib import Path
         from tradfi.web_control import NativePanel
@@ -127,7 +127,7 @@ class AnalysisResourceTests(unittest.TestCase):
             panel.start()
         handler = panel.server.handler.__new__(panel.server.handler)
         handler.command = 'GET'
-        handler.path = '/analysis-scenario.js'
+        handler.path = '/analysis.js'
         handler.headers = {'Host': panel.authority}
         handler.rfile = BytesIO()
         replies = []
@@ -137,7 +137,7 @@ class AnalysisResourceTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(mime, 'text/javascript')
         self.assertEqual(body, (Path(__file__).resolve().parents[1] /
-            'web/basket-panel/analysis-scenario.js').read_bytes())
+            'web/basket-panel/analysis.js').read_bytes())
         handler.headers = {'Host': 'evil.invalid'}
         handler.handle_call()
         self.assertNotEqual(replies.pop()[0], 200)

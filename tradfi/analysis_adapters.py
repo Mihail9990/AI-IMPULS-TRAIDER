@@ -6,16 +6,13 @@ snapshot timestamp, not the original pivot/candle. No installation or plotting.
 from datetime import datetime
 import importlib
 import importlib.metadata
-import json
 import math
 import re
 
 TIMEFRAME_SECONDS = {"M1": 60, "M15": 900, "M30": 1800, "H1": 3600}
 MAX_BARS = 300
 MAX_MARKS = 80
-MAX_LINES = 6
 SWING_LENGTH = 5
-PATTERNS = ("CDLENGULFING", "CDLHAMMER", "CDLSHOOTINGSTAR", "CDLDOJI", "CDLMORNINGSTAR", "CDLEVENINGSTAR")
 
 
 def _number(value):
@@ -89,23 +86,6 @@ def _mark(kind, label, direction, index, rows, now, **extra):
                 direction=direction, start_time=stamp, end_time=stamp,
                 price=None, top=None, bottom=None, points=[], formed_at=stamp,
                 known_at=now, status='SNAPSHOT', **extra)
-
-
-def _talib(engine, rows, now):
-    np = _load('numpy')
-    args = [np.asarray([r[k] for r in rows], dtype=float) for k in ('open', 'high', 'low', 'close')]
-    marks = []
-    for name in PATTERNS:
-        values = getattr(engine, name)(*args)
-        if len(values) != len(rows):
-            raise ValueError('unexpected pattern length')
-        for i, value in enumerate(values):
-            value = _number(value)
-            if value:
-                mark = _mark('candle_pattern', name[3:], 'neutral' if name == 'CDLDOJI' else ('bullish' if value > 0 else 'bearish'), i, rows, now)
-                mark['price'] = rows[i]['close']
-                marks.append(mark)
-    return sorted(marks, key=lambda m: (m['formed_at'], m['id']))[-MAX_MARKS:]
 
 
 def _volume_source(rows):
@@ -321,31 +301,6 @@ def _smc(package, rows, now):
     return sorted(other + zones + sweeps, key=lambda m: (m['formed_at'], m['id'])), source, components
 
 
-def _trendln(engine, rows, now):
-    np = _load('numpy')
-    # Calculation only; never call trendln plot_* / matplotlib. Fixed n/window
-    # plus the O(n^2 log n) method keep cost bounded in the isolated worker.
-    result = engine.calc_support_resistance(
-        (np.asarray([r['low'] for r in rows]), np.asarray([r['high'] for r in rows])),
-        method=engine.METHOD_NSQUREDLOGN, extmethod=engine.METHOD_NUMDIFF,
-        window=min(125, len(rows)), accuracy=2, sortError=True)
-    marks = []
-    for side, group in zip(('support', 'resistance'), result):
-        lines = group[2]
-        for indices, fit in lines[:MAX_LINES // 2]:
-            if len(indices) < 2 or any(isinstance(i, bool) or int(i) != i or i < 0 or i >= len(rows) for i in indices):
-                continue
-            start, end = int(min(indices)), int(max(indices))
-            slope, intercept = _number(fit[0]), _number(fit[1])
-            points = [{'time': _coordinate(rows[i]), 'price': _number(slope*i + intercept)} for i in (start, end)]
-            if any(p['price'] <= 0 for p in points):
-                continue
-            mark = _mark('trendline', side.title() + ' (snapshot)', 'bullish' if side == 'support' else 'bearish', start, rows, now)
-            mark.update(id=f'trendline:{side}:{start}:{end}:{len(marks)}', end_time=_coordinate(rows[end]), points=points)
-            marks.append(mark)
-    return marks[:MAX_LINES]
-
-
 def analyze_bars(bars, timeframe, as_of):
     """Return JSON-safe analytics; optional dependencies fail independently.
 
@@ -353,37 +308,19 @@ def analyze_bars(bars, timeframe, as_of):
     closed; valid incomplete/future bars are discarded. No order book inference,
     volume-dependent indicators, trade signals, or claimed confidence scores.
     """
-    result = {'modules': {}, 'overlays': {'candlestick': [], 'structure': [], 'trendlines': [], 'figures': []},
+    result = {'modules': {}, 'overlays': {'structure': []},
               'notes': ['Аналитика текущего снимка, не торговые рекомендации. Историческая координата не означает, что результат был известен тогда.',
                         'SMC: FVG, проверенные локальные экстремумы и BOS/CHoCH по закрытым свечам. Зоны ликвидности и их пересечения — только OHLC-оценки, не реальные заявки или стопы.',
                         'Индикаторы, зависящие от объёма, отключены. Структурные отметки могут изменяться при обновлении снимка.']}
-    result['modules']['stock_pattern'] = {'status': 'LICENSE_PENDING', 'version': None, 'reason': 'GPL licensing decision required; not imported.'}
     try:
         rows, now = _prepare(bars, timeframe, as_of)
     except (ValueError, TypeError, KeyError, OverflowError):
-        for name in ('talib', 'smc', 'trendln', 'geometry'):
+        for name in ('smc',):
             result['modules'][name] = {'status': 'ERROR', 'version': None, 'error': 'INVALID_INPUT', 'reason': 'Некорректные входные данные'}
         return result
     result['notes'].append(f'Analyzing {len(rows)} closed bars (maximum {MAX_BARS}).')
-    # Original geometric detection is independent of all optional packages.
-    try:
-        geometry = _load('tradfi.analysis_patterns').analyze_patterns(rows, timeframe, now)
-        if geometry['status'] not in ('READY', 'WARMING_UP') or not isinstance(geometry['overlays'], list):
-            raise ValueError('invalid geometry contract')
-        json.dumps(geometry, allow_nan=False)
-        result['modules']['geometry'] = {k: v for k, v in geometry.items() if k not in ('overlays', 'notes')}
-        result['modules']['geometry'].update(version=None, count=len(geometry['overlays']))
-        result['overlays']['figures'] = geometry['overlays'][-MAX_MARKS:]
-        result['notes'].extend(geometry.get('notes', []))
-    except ImportError:
-        result['modules']['geometry'] = {'status': 'UNAVAILABLE', 'version': None, 'reason': 'Модуль геометрических фигур недоступен'}
-    except Exception:
-        result['modules']['geometry'] = {'status': 'ERROR', 'version': None, 'reason': 'Ошибка расчёта геометрических фигур'}
-
     for name, module_name, distribution, bucket, minimum in (
-        ('talib', 'talib', 'TA-Lib', 'candlestick', 35),
-        ('smc', 'smartmoneyconcepts', 'smartmoneyconcepts', 'structure', 2*SWING_LENGTH+1),
-        ('trendln', 'trendln', 'trendln', 'trendlines', 20)):
+        ('smc', 'smartmoneyconcepts', 'smartmoneyconcepts', 'structure', 2*SWING_LENGTH+1),):
         info = {'status': 'UNAVAILABLE', 'version': None}
         result['modules'][name] = info
         try:
@@ -392,13 +329,8 @@ def analyze_bars(bars, timeframe, as_of):
             if len(rows) < minimum:
                 info.update(status='WARMING_UP', required_bars=minimum, available_bars=len(rows))
                 continue
-            if name == 'talib':
-                marks = _talib(engine, rows, now)
-            elif name == 'smc':
-                marks, source, components = _smc(engine, rows, now)
-                info.update(volume_source=source, volume_dependent_enabled=False, components=components)
-            else:
-                marks = _trendln(engine, rows, now)
+            marks, source, components = _smc(engine, rows, now)
+            info.update(volume_source=source, volume_dependent_enabled=False, components=components)
             result['overlays'][bucket] = marks
             info.update(status='READY', count=len(marks))
             if name == 'smc' and any(c['status'] != 'READY' for c in info['components'].values()):

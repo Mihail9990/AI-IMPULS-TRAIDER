@@ -20,7 +20,7 @@ assert.equal($('activity-totals-note').hidden,false);assert($('activity-totals-n
 ctx.view={debt:'999',realized:'999',position_history:[{side:'BUY',status:'open',net:null}]};run();assert.equal($('activity-recovery').textContent,'—','no invented fallback');assert.equal($('position-history-list').children[0].children.at(-1).textContent,'Итог после закрытия · —');
 assert(!$('position-history-list').children[0].children.some(x=>x.textContent.includes('RECOVERY')||x.textContent.includes('переносом')));
 vm.runInContext(src.slice(src.indexOf(" let activeTab='chart';"),src.indexOf(' function setDrawer(')),ctx);
-$('tab-chart').events.keydown({key:'ArrowRight',preventDefault(){}});assert.equal($('analysis-page').hidden,false);assert.equal($('tab-analysis').attributes['aria-selected'],'true');
+$('tab-chart').events.keydown({key:'ArrowRight',preventDefault(){}});assert.equal($('history-page').hidden,false);assert.equal($('tab-history').attributes['aria-selected'],'true');
 $('tab-history').onclick();assert.equal($('history-page').hidden,false);assert.equal($('chart-page').hidden,true);assert.equal($('settings-page').hidden,true);assert.equal($('tab-history').attributes['aria-selected'],'true');
 $('tab-history').events.keydown({key:'ArrowRight',preventDefault(){}});assert.equal($('settings-page').hidden,false);
 $('tab-settings').events.keydown({key:'ArrowRight',preventDefault(){}});assert.equal($('chart-page').hidden,false);
@@ -31,4 +31,4 @@ assert(css.includes('--activity-height:clamp(123.2px,17.6dvh,171.6px)'));
 assert(css.includes('#activity-totals strong{font-size:15.2px}'));
 const nav=html.slice(html.indexOf('<nav id="bottom-tabs"'));assert(nav.indexOf('id="tab-chart"')<nav.indexOf('id="tab-history"'));assert(nav.indexOf('id="tab-history"')<nav.indexOf('id="tab-settings"'));
 assert(css.includes('#activity-totals #activity-recovery,#debt{color:#b8f36a}'));
-console.log('PASS negative RECOVERY, all-closed net, incomplete evidence, exact position prices/times/reasons, no cycle/carry history, four-tab navigation and lime styling');
+console.log('PASS negative RECOVERY, all-closed net, incomplete evidence, exact position prices/times/reasons, no cycle/carry history, three-tab navigation and lime styling');

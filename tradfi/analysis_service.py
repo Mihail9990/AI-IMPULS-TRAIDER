@@ -45,10 +45,8 @@ def empty_snapshot(symbol, timeframe, status='WARMING_UP', reason=None):
                  timeframe=timeframe, source='MT5', generated_at=None, as_of=None,
                  closed_through=None, timestamp_semantics='UNVERIFIED',
                  feed_instance=None, bars=[],
-                 modules={name: {'status': 'UNAVAILABLE'} for name in ('talib', 'smc', 'trendln')},
-                 overlays=dict(candlestick=[], structure=[], trendlines=[], figures=[]), notes=[])
-    value['modules']['stock_pattern'] = {'status': 'LICENSE_PENDING'}
-    value['modules']['geometry'] = {'status': 'UNAVAILABLE'}
+                 modules={name: {'status': 'UNAVAILABLE'} for name in ('smc',)},
+                 overlays=dict(structure=[]), notes=[])
     if reason:
         value['reason'] = reason
         value['diagnostics'] = dict(reason=reason)

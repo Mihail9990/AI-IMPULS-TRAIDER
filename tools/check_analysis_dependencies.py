@@ -21,7 +21,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tradfi.analysis_runtime import supported_runtime
 
-PACKAGES = {'talib': 'TA-Lib', 'smc': 'smartmoneyconcepts', 'trendln': 'trendln'}
+PACKAGES = {'smc': 'smartmoneyconcepts'}
 
 
 def inspect_packages():
@@ -91,7 +91,6 @@ def main(argv=None):
     args = parser.parse_args(argv)
     report = {'python': platform.python_version(), 'bits': struct.calcsize('P') * 8,
               'platform': sys.platform, 'modules': inspect_packages(),
-              'stock_pattern': 'EXCLUDED_LICENSE_PENDING',
               'installed_or_changed': False, 'terminal_connected': False}
     passed = all(value['status'] == 'PRESENT' for value in report['modules'].values())
     if args.require_lock:
@@ -106,7 +105,6 @@ def main(argv=None):
             passed = passed and report['smoke'].get('native_binding_import', {}).get('status') != 'ERROR'
             components = report['smoke']['modules'].get('smc', {}).get('components', {})
             passed = passed and all(components.get(key, {}).get('status') == 'READY' for key in ('swings', 'fvg', 'bos_choch', 'liquidity'))
-            passed = passed and report['smoke']['modules'].get('geometry', {}).get('status') == 'READY'
         except Exception:
             report['smoke'] = {'status': 'ERROR', 'reason': 'OFFLINE_ADAPTER_SMOKE_FAILED'}
             passed = False
