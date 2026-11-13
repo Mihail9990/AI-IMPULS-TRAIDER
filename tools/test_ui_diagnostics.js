@@ -16,21 +16,32 @@ diagnostics.record({source:'STATE',stage:'COMPLETE',outcome:'OK',feed_sequence:I
 
 diagnostics.record({source:'STATE',stage:'COMPLETE',outcome:'OK',feed_status:'OBSERVED',timestamp_semantics:'BROKER_RAW',time_domain:'BROKER_RAW'});assert.equal(records().at(-1).feed_status,'OBSERVED');assert.equal(records().at(-1).timestamp_semantics,'BROKER_RAW');assert.equal(records().at(-1).time_domain,'BROKER_RAW');
 let testMode='ok',fetches=0;const nodes={};const $=id=>nodes[id]??={hidden:false,textContent:'',value:'live'};
-Object.assign(ctx,{$,document:{hidden:false},polling:false,busy:false,view:null,v3Fresh:false,diagnosticRenderComponent:null,pending:null,pendingScope:null,headers:()=>({}),apiPath:()=>'/api/state',AbortSignal,diagnostics,
+Object.assign(ctx,{$,document:{hidden:false},polling:false,busy:false,view:null,v3Fresh:false,v3ContextInvalid:false,diagnosticRenderComponent:null,pending:null,pendingScope:null,headers:()=>({}),apiPath:()=>'/api/state',AbortSignal,diagnostics,
  diagnosticNow:clock,diagnosticRecord:v=>diagnostics.record(v),diagnosticFacts:()=>({feed_status:ctx.view?.feed?.status,timestamp_semantics:ctx.view?.feed?.timestamp_semantics,quote_age_seconds:ctx.view?.feed?.age_seconds,read_only:ctx.view?.read_only,fresh_gate:ctx.v3Fresh}),
  mt5DisplayAnchor:null,observeMt5DisplayClock(){},renderMt5TimeControls(){},rememberWaiting(){},clearPending(){},reconcileWaiting(){if(testMode==='reconcile')throw new DOMException(secrets,'SecurityError');},
  v3Render(){if(testMode==='recovery')throw new RangeError(secrets);},connectionLabel(){},updateBotActivity(){},draw(){},
- fetch:async()=>{fetches++;if(testMode==='timeout')throw new DOMException(secrets,'TimeoutError');if(testMode==='network')throw new TypeError(secrets);return {ok:testMode!=='http',status:testMode==='http'?401:200,json:async()=>{if(testMode==='parse-timeout')throw new DOMException(secrets,'TimeoutError');if(testMode==='parse')throw new SyntaxError(secrets);return {contract:testMode==='validate'?'wrong':'ticket_basket_v1',mode:'auto',read_only:true,feed:{status:'FRESH',age_seconds:.5,quote:{bid:'4000.12',ask:'4000.34'},timestamp_semantics:'VERIFIED'}};}};},
+ fetch:async()=>{fetches++;if(testMode==='timeout')throw new DOMException(secrets,'TimeoutError');if(testMode==='network')throw new TypeError(secrets);return {ok:testMode!=='http',status:testMode==='http'?401:200,json:async()=>{if(testMode==='parse-network')throw new TypeError(secrets);if(testMode==='parse-timeout')throw new DOMException(secrets,'TimeoutError');if(testMode==='parse')throw new SyntaxError(secrets);return {contract:testMode==='validate'?'wrong':'ticket_basket_v1',mode:'auto',read_only:true,feed:{status:'FRESH',age_seconds:.5,quote:{bid:'4000.12',ask:'4000.34'},timestamp_semantics:'VERIFIED'}};}};},
  render(){nodes.quote={textContent:`Bid ${ctx.view.feed.quote.bid} / Ask ${ctx.view.feed.quote.ask}`};if(['render','recovery'].includes(testMode))throw new TypeError(secrets);}});
 vm.runInContext(source.slice(source.indexOf(' async function poll(){'),source.indexOf(' const defaultPrefs=')),ctx);
 const poll=()=>vm.runInContext('poll()',ctx);
 (async()=>{
- await poll();assert.equal(ctx.v3Fresh,true);assert.equal(records().at(-1).stage,'COMPLETE');
+ // No first snapshot: transport failure cannot invent command context.
+ testMode='timeout';await poll();assert.equal(ctx.view,null);
+ testMode='ok';await poll();assert.equal(ctx.v3Fresh,true);assert.equal(records().at(-1).stage,'COMPLETE');
+ for(const mode of ['timeout','network','parse-timeout','parse-network']){
+  const previous=ctx.view;testMode=mode;await poll();assert.strictEqual(ctx.view,previous);assert.equal(ctx.v3ContextInvalid,false,mode+' preserves validated context');assert.equal(ctx.v3Fresh,false);assert(!nodes['feed-status'].textContent.includes('Команды заблокированы'));
+ }
+ for(const mode of ['http','parse','validate','reconcile','render']){
+  testMode=mode;await poll();assert.equal(ctx.v3ContextInvalid,true,mode+' requires valid recovery');if(mode==='http'){assert.equal(nodes.login.hidden,false);assert.equal(nodes.workspace.hidden,true);}
+  testMode='timeout';await poll();assert.equal(ctx.v3ContextInvalid,true,'timeout cannot undo hard invalidation');
+  testMode='ok';await poll();assert.equal(ctx.v3ContextInvalid,false);
+ }
+
  for(const [mode,stage,reason]of [['http','FETCH','HTTP_ERROR'],['timeout','FETCH','REQUEST_TIMEOUT'],['network','FETCH','NETWORK_ERROR'],['parse','PARSE','JSON_INVALID'],['parse-timeout','PARSE','REQUEST_TIMEOUT'],['validate','VALIDATE','CONTRACT_MISMATCH'],['reconcile','RECONCILE','RECONCILE_ERROR'],['render','RENDER','RENDER_ERROR']]){
   testMode=mode;await poll();assert.equal(ctx.v3Fresh,false,mode);assert.equal(ctx.polling,false);assert.equal(records().at(-1).stage,stage);assert.equal(records().at(-1).reason,reason);assert(!diagnostics.text().includes(secrets));
  }
  assert.equal(nodes.quote.textContent,'Bid 4000.12 / Ask 4000.34');assert.equal(ctx.view.feed.status,'FRESH');assert(nodes['feed-status'].textContent.includes('Ошибка отображения'));assert.equal(records().at(-1).http_status,200);
- testMode='recovery';await poll();assert.equal(ctx.v3Fresh,false);assert.equal(records().at(-1).stage,'RECOVERY_RENDER');assert(nodes['feed-status'].textContent.includes('Команды заблокированы'));
+ testMode='recovery';await poll();assert.equal(ctx.v3Fresh,false);assert.equal(records().at(-1).stage,'RECOVERY_RENDER');assert(nodes['feed-status'].textContent.includes('Ожидаю корректный снимок'));
  testMode='ok';await poll();assert.equal(ctx.v3Fresh,true);ctx.busy=true;const count=fetches;await poll();assert.equal(fetches,count);ctx.busy=false;
  ctx.diagnosticRecord=()=>{};await poll();assert.equal(ctx.v3Fresh,true,'diagnostic absence does not change gate');
  // Browser-only export works without a server request; ordinary exports retain

@@ -81,7 +81,7 @@ async function main(){
  assert.equal(vm.runInContext('v3Blocked()',ctx),false,'old raw tick does not block commands');
  for(const field of ['read_only','manual_reason','migration_block','time_block']){ctx.view[field]=true;assert.equal(vm.runInContext('v3Blocked()',ctx),true,field);delete ctx.view[field];}
  ctx.pending='unknown';assert.equal(vm.runInContext('v3Blocked()',ctx),true);ctx.pending=null;
- vm.runInContext('v3Fresh=false;connectionLabel()',ctx);assert.equal(vm.runInContext('v3Blocked()',ctx),true);assert.equal($('chart').dataset.feedFresh,'false');vm.runInContext('v3Fresh=true',ctx);
+ vm.runInContext('v3Fresh=false;connectionLabel()',ctx);assert.equal(vm.runInContext('v3Blocked()',ctx),false);assert.equal($('chart').dataset.feedFresh,'false');vm.runInContext('v3Fresh=true',ctx);
  assert.equal(vm.runInContext('utcLabel(view.feed.broker_time)',ctx),'');
  assert(!/[0-9]T|Z|UTC/.test(vm.runInContext('marketLabel(view.feed.broker_time)',ctx)));
  // Latest diagnostic is presentation-only; the original latch still blocks controls.
@@ -161,7 +161,14 @@ async function main(){
  $('recovery-profile-new').onclick();$('recovery-profile-name').value='<img src=x onerror=alert(1)>';await $('recovery-profile-save').onclick();assert.equal(actions.at(-1).a.profiles.at(-1).name,'<img src=x onerror=alert(1)>');
  $('recovery-sl-distance').value='2.25';await $('recovery-save-sl').onclick();assert.equal(actions.at(-1).a.recovery_sl_distance,'2.25');
  ctx.view=structuredClone(base);vm.runInContext('v3Render()',ctx);assert($('recovery-current-summary').textContent.includes('g1'));assert($('recovery-current-summary').textContent.includes('0.06'));
- for(const block of ['busy','pending','read_only','stale']){
+ // A delayed state poll must not block valid contextual actions.
+ vm.runInContext('v3Fresh=false;v3Render()',ctx);before=actions.length;
+ assert.equal($('v3-link-toggle').disabled,false);await $('v3-link-toggle').onclick();
+ assert.equal(actions.length,before+1);assert.equal(actions.at(-1).r,base.revision);assert.equal(actions.at(-1).s,base.scope);
+ vm.runInContext('v3ContextInvalid=true;v3Render()',ctx);before=actions.length;
+ await $('v3-link-toggle').onclick();assert.equal(actions.length,before);assert.equal($('v3-link-toggle').disabled,true);
+ vm.runInContext('v3ContextInvalid=false',ctx);
+ for(const block of ['busy','pending','read_only']){
   ctx.busy=block==='busy';ctx.pending=block==='pending'?'req':null;ctx.view.read_only=block==='read_only';vm.runInContext('v3Fresh='+String(block!=='stale')+';v3Render()',ctx);
   before=actions.length;await $('v3-link-toggle').onclick();await $('v3-submit-entry').onclick();await $('v3-sl-plus').onclick();await $('v3-sl-confirm').onclick();await $('recovery-profile-apply').onclick();await $('recovery-profile-save').onclick();await $('recovery-save-sl').onclick();assert.equal(actions.length,before,block);assert.equal($('v3-link-toggle').disabled,true);
  }
@@ -217,6 +224,6 @@ async function main(){
  ctx.preview={value:1.5};vm.runInContext('draw()',ctx);assert.equal($('preview-backdrop').hidden,false);assert.equal($('command-drawer').inert,true);assert.equal($('v3-panels').inert,true);assert.equal($('bottom-tabs').inert,true);
  ctx.preview=null;vm.runInContext('draw()',ctx);assert.equal($('preview-backdrop').hidden,true);assert.equal($('command-drawer').inert,false);assert.equal($('v3-panels').inert,false);
  assert.equal(actions.length,before,'all gestures and navigation are display-only');
- console.log('PASS Node V3 handler tests: actual source, DOM doubles, inputs/actions/revisions, V3-only controls, legacy migration guard, confirmation/cancel, controls, stale/read-only/UNKNOWN guards. Browser layout NOT verified.');
+ console.log('PASS Node V3 handler tests: actual source, DOM doubles, inputs/actions/revisions, V3-only controls, legacy migration guard, confirmation/cancel, controls, stale transport availability and invalid/read-only/UNKNOWN guards. Browser layout NOT verified.');
 }
 main().catch(e=>{console.error(e);process.exit(1);});

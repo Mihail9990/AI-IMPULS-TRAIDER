@@ -44,10 +44,10 @@
  function clearPending(){pending=null;pendingScope=null;localStorage.removeItem(storageKey('request'));localStorage.removeItem(storageKey('scope'));}
  async function send(action,revision=view?.revision,scope=view?.scope){
   if(busy||pending)throw Error('Предыдущий исход не сверён. Повтор запрещён.');
-  if(!view||scope!==view.scope)throw Error('Контекст изменился; обновите данные.');
+  if(!view||v3ContextInvalid||scope!==view.scope)throw Error('Контекст изменился; обновите данные.');
   const request={id:crypto.randomUUID(),revision,action};pending=request.id;pendingScope=scope;localStorage.setItem(storageKey('request'),pending);localStorage.setItem(storageKey('scope'),scope);busy=true;lastActionReceipt=null;notice('action-error','');updateBotActivity();
   try{const r=await fetch(apiPath('action'),{method:'POST',headers:{...headers(),'Content-Type':'application/json'},body:JSON.stringify(request),signal:AbortSignal.timeout(4000)});
-   if(!r.ok){if([400,401,403,409,413,429].includes(r.status))clearPending();throw Error(r.status===409?'Снимок устарел; обновите данные.':'Команда отклонена сервером.');}
+   if(!r.ok){if([401,403].includes(r.status))v3ContextInvalid=true;if([400,401,403,409,413,429].includes(r.status))clearPending();throw Error(r.status===409?'Снимок устарел; обновите данные.':'Команда отклонена сервером.');}
    const receipt=await r.json();lastActionReceipt={status:receipt.status,reason:receipt.reason};if(receipt.status==='WAITING_DATA')rememberWaiting();if(['APPLIED','REJECTED','CONFLICT','WAITING_DATA'].includes(receipt.status))clearPending();if(preview&&receipt.status!=='APPLIED')$('preview-error').textContent=actionReceiptText(receipt.status,receipt.reason);
   }finally{busy=false;await poll();updateBotActivity();}
  }
@@ -72,7 +72,7 @@
  $('logout').onclick=async()=>{await fetch('/api/logout',{method:'POST',headers:{...headers(),'Content-Type':'application/json'},body:'{}'});location.reload();};
  // MT5 clock controls are separate from manual reconciliation and trade readiness.
  let mt5DisplayAnchor=null;
- const mt5TimeActionBlocked=()=>!view||!v3Fresh||busy||!!pending;
+ const mt5TimeActionBlocked=()=>!view||v3ContextInvalid||busy||!!pending;
  const mt5RawSwitchBlocked=()=>mt5TimeActionBlocked()||view.time_status?.can_switch_raw!==true||view.time_status?.market_time_mode==='mt5_raw_v1';
  const mt5DisplayNumber=value=>typeof value==='number'&&Number.isFinite(value)&&value>0&&value<8640000000000;
  function mt5DisplayNow(){try{const value=performance.now();return typeof value==='number'&&Number.isFinite(value)&&value>=0?value:null;}catch{return null;}}
@@ -114,16 +114,16 @@
   const write=(id,text)=>{if($(id).textContent!==text)$(id).textContent=text;};
   if(!view){write('bot-activity-state','Ожидание снимка контроллера.');return;}
   const phases={WAIT_START:'Ожидание запуска',WAIT_CANDLE:'Ожидаю закрытие свечи',INITIAL_WAIT:'Ожидаю закрытие свечи',INITIAL_PENDING:'Ожидаю сверку состояния ордеров',INITIAL_POSITION:'Ожидаю сверку состояния позиции',RECOVERY_POSITION:'Ожидаю сверку состояния позиций',RECOVERY_PENDING:'Ожидание ордеров RECOVERY / сверки',RECOVERY_CLEANUP:'Очистка ордеров RECOVERY / сверка',V3_WAIT_ENTRY:'Ожидаю ручной ордер',V3_WAIT_CANDLE:'Ожидаю закрытие свечи',COOLDOWN:'Пауза перед новым циклом',PAUSED:'Новые входы остановлены',PAUSED_CYCLE:'Цикл приостановлен',MANUAL:'Требуется ручная сверка',SAFE_PAUSE:'Защитная пауза',MIGRATION_BLOCK:'Блокировка переноса состояния'};
-  const warnings=[];if(!v3Fresh)warnings.push('Нет свежего снимка: команды заблокированы.');
+  const warnings=[];if(v3ContextInvalid)warnings.push('Состояние панели не подтверждено. Ожидаю корректный снимок.');
   if(view.read_only)warnings.push('Только просмотр: торговые команды отключены');
   if(view.migration_block)warnings.push(friendlyReason(view.migration_block));if(view.manual_reason)warnings.push(friendlyReason(view.manual_reason));
   if(view.time_block)warnings.push(timeSafetyText());
   if(feedBrokerRaw()){if(view.feed?.connected!==true||view.feed?.status!=='OBSERVED')warnings.push('Нет наблюдаемого снимка MT5.');}else if(view.feed?.status!=='FRESH'||!feedUtcVerified())warnings.push('Котировки или время не подтверждены как свежие.');
   write('bot-activity-warning',warnings.join(' · '));$('bot-activity-warning').dataset.tone='warning';$('bot-activity-state').dataset.tone='info';
   let detail=phases[view.phase]??('Состояние контроллера: '+(view.phase??'не указано'));
-  const safetyBlocked=!v3Fresh||view.manual_reason||view.migration_block||view.time_block||['MANUAL','SAFE_PAUSE','MIGRATION_BLOCK'].includes(view.phase);
+  const safetyBlocked=v3ContextInvalid||view.manual_reason||view.migration_block||view.time_block||['MANUAL','SAFE_PAUSE','MIGRATION_BLOCK'].includes(view.phase);
   if(!safetyBlocked){if(view.positions?.length)detail='Ожидаю исполнения TP или SL';else if(view.orders?.length)detail='Ожидаю исполнения триггер ордера';}
-  else if(!v3Fresh)detail='';else detail='Действия приостановлены: требуется проверка';
+  else detail='Действия приостановлены: требуется проверка';
   if(view.time_status?.waiting_data)detail=feedBrokerRaw()?'Ожидаю следующее изменение данных MT5. Команды принимаются, новые входы ждут.':'Переход M1: ожидаю свежие данные до 3 секунд. Команды принимаются, новые входы ждут.';
   if(busy||pending)detail='Ожидаю подтверждения команды; повтор недоступен';
   if(view.v3_request)detail+=' · Запланирован '+view.v3_request.order_type+' по закрытию выбранной свечи';
@@ -163,9 +163,11 @@
   return 'Время: '+message+(reason?' ['+reason+']':'')+' Блокировка сохранена; нажмите «Проверить время» для повторной проверки.';
  }
  let v3Fresh=false;
+ // Poll freshness is display metadata, not permission to submit a command.
+ let v3ContextInvalid=false;
  const waitingAction=type=>Object.values(view?.action_results??{}).some(r=>r.status==='WAITING_DATA'&&r.waiting_action_type===type&&r.waiting_cycle_id===view?.cycle_id);
  const v3Enabled=()=>view?.recovery_mode==='V3';
- const v3Blocked=()=>!view||!v3Fresh||busy||!!pending||view.read_only||!!view.manual_reason||!!view.migration_block||!!view.time_block;
+ const v3Blocked=()=>!view||v3ContextInvalid||busy||!!pending||view.read_only||!!view.manual_reason||!!view.migration_block||!!view.time_block;
  function connectionLabel(){
   const status=view?.feed?.status,verified=feedUtcVerified(),raw=feedBrokerRaw(),fresh=v3Fresh&&(raw?status==='OBSERVED'&&view.feed.connected===true:status==='FRESH'&&verified);
   const role=view?.read_only?'LIVE · READ ONLY':'LIVE';
@@ -262,7 +264,7 @@
   const link=view?.v3_link;
   $('v3-link-status').textContent=queuedLink?(feedBrokerRaw()?'Команда принята; ожидается следующее изменение данных MT5.':'Команда принята; ожидаются свежие данные M1.'):linked?(link.cancel?'Отмена запрошена; ожидается сверка MT5.':link.replace?'Перенос SL и связанных триггеров; ожидается сверка.':profileSummary(link.recovery_profile)+' · '+link.side+' STOP на '+link.price+'.'):'';
   $('v3-link-status').hidden=!linked;
-  $('v3-control-reason').textContent=!v3Fresh?'Нет свежего снимка. Действия заблокированы.':friendlyReason(controls.reason);
+  $('v3-control-reason').textContent=v3ContextInvalid?'Состояние панели не подтверждено.':friendlyReason(controls.reason);
   $('v3-cancel-entry').hidden=controls.can_cancel_entry!==true;
   $('v3-cancel-entry').disabled=blocked||!enabled||controls.can_cancel_entry!==true;
   $('v3-entry-distance').textContent='STOP: от Close выбранной свечи на '+(view?.v3_settings?.entry_distance??'—')+'. Объём и TP — по выбранному профилю.';
@@ -475,7 +477,7 @@
    if(!r.ok){if([401,403].includes(r.status)){$('login').hidden=false;$('workspace').hidden=true;}throw Error('Нет авторизованного снимка');}
    stage='PARSE';const v=await r.json();finishStage('parse_ms');
    stage='VALIDATE';if(v.contract!=='ticket_basket_v1'||v.mode==='PAPER')throw Error('Несовместимая версия контроллера');finishStage('validation_ms');
-   view=v;v3Fresh=true;observeMt5DisplayClock();stage='RECONCILE';
+   view=v;v3Fresh=true;v3ContextInvalid=false;observeMt5DisplayClock();stage='RECONCILE';
    const status=pending&&pendingScope===v.scope?v.action_results[pending]?.status:null;if(status==='WAITING_DATA')rememberWaiting();
    if(['APPLIED','REJECTED','CONFLICT','WAITING_DATA'].includes(status)){lastActionReceipt={status,reason:v.action_results[pending]?.reason};clearPending();}
    reconcileWaiting();finishStage('reconcile_ms');$('login').hidden=true;$('workspace').hidden=false;
@@ -483,15 +485,17 @@
    diagnosticRecord({source:'STATE',stage:'COMPLETE',outcome:'OK',http_status:httpStatus,request_ms:diagnosticNow()-started,...timings,...diagnosticFacts()});
   }catch(e){
    const failedTiming={FETCH:'fetch_ms',PARSE:'parse_ms',VALIDATE:'validation_ms',RECONCILE:'reconcile_ms',RENDER:'render_ms'}[stage];if(failedTiming&&timings[failedTiming]===undefined)timings[failedTiming]=Math.max(0,diagnosticNow()-mark);
-   // Preserve the original fail-closed gate even for a display exception.
+   // Transport delays must not revoke an already validated command context.
+   // Auth, malformed/foreign state and processing errors still require recovery.
    v3Fresh=false;mt5DisplayAnchor=null;
-   const interrupted=['FETCH','PARSE'].includes(stage)?(e?.name==='TimeoutError'?'REQUEST_TIMEOUT':e?.name==='AbortError'?'REQUEST_ABORTED':null):null;
+   const interrupted=['FETCH','PARSE'].includes(stage)?(e?.name==='TimeoutError'?'REQUEST_TIMEOUT':e?.name==='AbortError'?'REQUEST_ABORTED':e?.name==='TypeError'?'NETWORK_ERROR':null):null;
+   if(!(['FETCH','PARSE'].includes(stage)&&(interrupted||stage==='FETCH'&&!(httpStatus>=400))))v3ContextInvalid=true;
    const reason=interrupted??(stage==='FETCH'?(httpStatus>=400?'HTTP_ERROR':'NETWORK_ERROR'):({PARSE:'JSON_INVALID',VALIDATE:'CONTRACT_MISMATCH',RECONCILE:'RECONCILE_ERROR',RENDER:'RENDER_ERROR'}[stage]??'OTHER'));
    diagnosticRecord({source:'STATE',stage,outcome:'ERROR',reason,error_type:e?.name,http_status:httpStatus,request_ms:diagnosticNow()-started,...timings,...diagnosticFacts()});
    try{renderMt5TimeControls();if(view){diagnosticRenderComponent='RECOVERY_V3';v3Render();diagnosticRenderComponent='RECOVERY_STATUS';connectionLabel();updateBotActivity();diagnosticRenderComponent='RECOVERY_CHART';draw();}}
    catch(recoveryError){diagnosticRecord({source:'STATE',stage:'RECOVERY_RENDER',outcome:'ERROR',reason:'RECOVERY_RENDER_ERROR',error_type:recoveryError?.name,...diagnosticFacts()});}
    const message={FETCH:'Нет свежего снимка',PARSE:'Ответ сервера не прочитан',VALIDATE:'Несовместимый снимок контроллера',RECONCILE:'Ошибка обработки снимка',RENDER:'Ошибка отображения снимка'}[stage]??'Ошибка снимка';
-   $('feed-status').textContent=message+' ['+reason+']. Команды заблокированы.';
+   $('feed-status').textContent=message+' ['+reason+'].'+(v3ContextInvalid||!view?' Ожидаю корректный снимок.':' Показаны последние полученные данные; команда будет проверена сервером.');
   }finally{polling=false;}
  }
  const defaultPrefs={mainCycle:true,colors:{BUY:'#26a69a',SELL:'#ef5350',sl:'#ef5350',tp:'#26a69a',entry:'#e0b565',up:'#26a69a',down:'#ef5350',grid:'#25282e'}};
