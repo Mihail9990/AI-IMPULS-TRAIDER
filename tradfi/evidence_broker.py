@@ -285,11 +285,13 @@ class MT5EvidenceBroker(MT5Broker):
         owners={r['order_id']:cid for cid,r in obligations.items() if r.get('order_id') and self.rows.get(cid,{}).get('command',{}).get('kind') in {'STOP','MARKET'}}
         position_cycles={r['position_id']:r['cycle_id'] for r in obligations.values() if r.get('position_id')}
         owned_positions=set(position_cycles)
+        from .reconciliation_diagnostics import obligation_descriptor
         def order_json(r):
             key=str(r['ticket']); cid=owners.get(key,'')
             status={self.api.ORDER_STATE_FILLED:'FILLED',self.api.ORDER_STATE_CANCELED:'CANCELLED',
                     self.api.ORDER_STATE_EXPIRED:'CANCELLED',self.api.ORDER_STATE_REJECTED:'REJECTED'}.get(r['state'],'PENDING')
             return dict(id=key,command_id=cid,owned=bool(cid),status=status,
+                        obligation_diagnostic=obligation_descriptor('ORDER',r,owned_positions),
                         side='BUY' if r['type'] in (self.api.ORDER_TYPE_BUY,self.api.ORDER_TYPE_BUY_STOP) else 'SELL',
                         price=dec(r['price_open']),size=dec(r['volume_current']),sl=dec(r['sl']),tp=dec(r['tp']))
         deals=[]
@@ -350,5 +352,6 @@ class MT5EvidenceBroker(MT5Broker):
                         **(dict(current_id=current_candle,closed=True,time_domain='BROKER_RAW') if raw_mode else {})),
                     orders=[order_json(plain(o)) for o in orders],order_history=[order_json(r) for r in facts['order'].values()],
                     positions=[dict(id=str(p.identifier),ticket=str(p.ticket),owned=str(p.identifier) in owned_positions,
+                                    obligation_diagnostic=obligation_descriptor('POSITION',plain(p),owned_positions),
                                     side='BUY' if p.type==self.api.POSITION_TYPE_BUY else 'SELL',entry=dec(p.price_open),
                                     size=dec(p.volume),sl=dec(p.sl),tp=dec(p.tp)) for p in positions],deals=deals)

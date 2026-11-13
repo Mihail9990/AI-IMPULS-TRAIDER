@@ -48,3 +48,35 @@ def evidence_codes(snap):
         status = proof.get('status')
         result.append({'id': cid, 'status': status if isinstance(status, str) and status in EVIDENCE_STATUSES else 'OTHER_EVIDENCE_STATUS'})
     return result
+
+# Fixed MT5 enum labels only; never serialize arbitrary broker values.
+BROKER_ORDER_TYPES = {0:'BUY',1:'SELL',2:'BUY_LIMIT',3:'SELL_LIMIT',
+                      4:'BUY_STOP',5:'SELL_STOP',6:'BUY_STOP_LIMIT',
+                      7:'SELL_STOP_LIMIT',8:'CLOSE_BY'}
+OBLIGATION_WORDS = set(BROKER_ORDER_TYPES.values()) | {'ORDER','POSITION','UNKNOWN'}
+
+def obligation_descriptor(kind, raw, known_positions):
+    """Diagnostic relationship only, NOT an ownership or execution decision."""
+    value = raw.get('type')
+    order_type = BROKER_ORDER_TYPES.get(value, 'UNKNOWN') if type(value) is int else 'UNKNOWN'
+    if kind == 'POSITION' and order_type not in {'BUY','SELL'}:
+        order_type = 'UNKNOWN'
+    link = raw.get('position_id') if kind == 'ORDER' else raw.get('identifier')
+    linked = str(link) in known_positions if isinstance(link,(int,str)) and not isinstance(link,bool) and str(link) not in {'','0'} else False
+    return {'record_kind':kind if kind in {'ORDER','POSITION'} else 'UNKNOWN',
+            'broker_order_type':order_type,'linked_to_known_position':linked}
+
+def unowned_diagnostics(snap):
+    """Bounded cause captured from the exact snapshot that triggers a pause."""
+    entries=[]; count=0
+    for key,kind in (('orders','ORDER'),('positions','POSITION')):
+        for row in snap.get(key,[]):
+            if row.get('owned'):continue
+            count+=1
+            if len(entries)>=20:continue
+            meta=row.get('obligation_diagnostic',{})
+            value=meta.get('broker_order_type') if isinstance(meta,dict) else None
+            entries.append({'record_kind':kind,
+                'broker_order_type':value if isinstance(value,str) and value in set(BROKER_ORDER_TYPES.values()) else 'UNKNOWN',
+                'linked_to_known_position':isinstance(meta,dict) and meta.get('linked_to_known_position') is True})
+    return {'unowned_count':count,'truncated':count>len(entries),'unowned_obligations':entries}

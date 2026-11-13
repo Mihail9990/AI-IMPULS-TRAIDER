@@ -6,6 +6,7 @@ Broker SL and opposite STOP are not atomic: every overlap is reconciled or halte
 from copy import deepcopy
 from decimal import Decimal as D
 import uuid
+import json
 from .engine import Controller,TERMINAL
 from .control import ActionRejected,TransientDataWait
 from .settings import number
@@ -70,6 +71,7 @@ class BasketController(Controller):
         if self.state.get('migration_block'):raise ActionRejected(self.state['migration_block'])
         if raw=='/resume_time':return self._resume_time(update_id)
         if raw=='/reset_manual':return self._reset_manual(update_id)
+        if raw=='/reset_pause':return self._reset_pause(update_id)
         if raw=='/stop':
             self.state['stop']=True;self.state['stop_mode']='FINISH' if (self.state.get('cycle') or {}).get('tickets') else 'CANCEL'
             self._cancel_ready();self.save('basket_stop');return
@@ -216,17 +218,56 @@ class BasketController(Controller):
                 if self.evidence_contract=='per_obligation_v1' and snap['obligations'].get(t['command_id'],{}).get('status')!='CLOSED_EVIDENCE':return False
                 try:net=net_money(exits)
                 except ValueError:self._halt(snap,'CLOSING_COSTS_UNKNOWN');return False
-                expected=deepcopy(self._durable_state)
-                t.update(closed=True,reason=next(iter(reasons)),exit_net=str(net),exit_facts=[{k:d.get(k) for k in ('id','price','volume','time','reason')} for d in exits]);c['realized']=str(number(c['realized'])+net);c['recovery']=str(max(D(0),-number(c['realized'])-number(c.get('recovery_waived','0'))))
-                self.state['seen_deals'].extend(d['id'] for d in exits)
-                for cmd in self.state['commands'].values():
-                    if cmd['kind']=='MODIFY' and cmd.get('position_id')==pid and cmd['status'] not in TERMINAL:cmd.update(status='OBSOLETE',closed_by_deals=[d['id'] for d in exits])
-                if self.evidence_contract=='per_obligation_v1':
-                    records=[dict(backend=self.state['backend'],account=self.state['account'],currency=self.state['currency'],ticket=d['id'],position_id=pid,cycle_id=c['id'],raw=snap['ledger_facts'][d['id']],net_accounting={'opening_net':t['opening_net'],'closing_net':str(net_money([d]))}) for d in exits]
-                    try:self.store.commit_deals(expected,self.state,records,'basket_ticket_closed');self._durable_state=deepcopy(self.state)
-                    except BaseException:self.state=self.store.load() or expected;self._durable_state=deepcopy(self.state);raise
-                else:self.save('basket_ticket_closed')
+                self._book_ticket_close(snap,c,pid,t,exits,reasons,net)
         return True
+
+    def _book_ticket_close(self,snap,c,pid,t,exits,reasons,net):
+        """Atomic accounting only; no broker or strategy actions."""
+        expected=deepcopy(self._durable_state)
+        t.update(closed=True,reason=next(iter(reasons)),exit_net=str(net),exit_facts=[{k:d.get(k) for k in ('id','price','volume','time','reason')} for d in exits]);c['realized']=str(number(c['realized'])+net);c['recovery']=str(max(D(0),-number(c['realized'])-number(c.get('recovery_waived','0'))))
+        self.state['seen_deals'].extend(d['id'] for d in exits)
+        for cmd in self.state['commands'].values():
+            if cmd['kind']=='MODIFY' and cmd.get('position_id')==pid and cmd['status'] not in TERMINAL:cmd.update(status='OBSOLETE',closed_by_deals=[d['id'] for d in exits])
+        if self.evidence_contract=='per_obligation_v1':
+            records=[dict(backend=self.state['backend'],account=self.state['account'],currency=self.state['currency'],ticket=d['id'],position_id=pid,cycle_id=c['id'],raw=snap['ledger_facts'][d['id']],net_accounting={'opening_net':t['opening_net'],'closing_net':str(net_money([d]))}) for d in exits]
+            try:self.store.commit_deals(expected,self.state,records,'basket_ticket_closed');self._durable_state=deepcopy(self.state)
+            except BaseException:self.state=self.store.load() or expected;self._durable_state=deepcopy(self.state);raise
+        else:self.save('basket_ticket_closed')
+
+    def _observe_paused_closures(self):
+        """Read and settle proven existing LIVE tickets without leaving SAFE_PAUSE.
+
+        Never adopt fills, reconcile pending commands, cancel, dispatch, or advance
+        the strategy here. Incomplete evidence leaves the durable state untouched.
+        """
+        c=self.state.get('cycle')
+        if not c or self.evidence_contract!='per_obligation_v1':return
+        try:snap=self.snapshot()
+        except (OSError,TimeoutError,ValueError):return
+        for pid,t in c['tickets'].items():
+            if t.get('closed'):continue
+            cid=t.get('command_id');cmd=self.state['commands'].get(cid,{})
+            proof=snap.get('obligations',{}).get(cid,{})
+            if (cid not in c['entries'] or cmd.get('cycle_id')!=c['id']
+                    or cmd.get('kind') not in {'STOP','MARKET'}
+                    or proof.get('status')!='CLOSED_EVIDENCE'
+                    or str(proof.get('position_id'))!=str(pid)):continue
+            if any(str(p['id'])==str(pid) for p in snap['positions']):continue
+            ins=[d for d in snap['deals'] if d['entry']=='IN' and d.get('command_id')==cid]
+            exits=[d for d in snap['deals'] if d['entry']=='OUT' and str(d['position_id'])==str(pid)]
+            try:
+                size=number(t['size'])
+                if (size<=0 or size!=number(cmd['size']) or t['side']!=cmd['side']
+                        or {str(d['position_id']) for d in ins}!={str(pid)}
+                        or sum((number(d['volume']) for d in ins),D(0))!=size
+                        or sum((number(d['volume']) for d in exits),D(0))!=size
+                        or net_money(ins)!=number(t['opening_net'])):continue
+                reasons={d['reason'] for d in exits}
+                if len(reasons)!=1 or not reasons<={'TP','SL'}:continue
+                if any(d['id'] in self.state['seen_deals'] or d['id'] not in snap['ledger_facts'] for d in exits):continue
+                net=net_money(exits)
+            except (KeyError,TypeError,ValueError,ArithmeticError):continue
+            self._book_ticket_close(snap,c,pid,t,exits,reasons,net)
 
     def _reconcile_commands(self,snap):
         super()._reconcile_commands(snap)
@@ -392,6 +433,8 @@ class BasketController(Controller):
 
     def tick(self):
         if self.state.get('migration_block'):return
+        if self.state['phase']=='SAFE_PAUSE':
+            self._observe_paused_closures();return
         self.poll_time();self._time_guard();self._deadline_guard()
         if self.state['phase']=='SAFE_PAUSE':return
         try:snap=self.snapshot()
@@ -399,7 +442,10 @@ class BasketController(Controller):
         except ValueError:self.pause('Не удалось подтвердить брокерские факты');return
         if getattr(self.broker,'read_only',False):return
         self._reconcile_commands(snap)
-        if any(not x.get('owned') for x in snap['positions']+snap['orders']):self.pause('Неизвестные ордера/позиции');return
+        if any(not x.get('owned') for x in snap['positions']+snap['orders']):
+            from .reconciliation_diagnostics import unowned_diagnostics
+            self.reconciliation_diagnostics.update(unowned_diagnostics(snap))
+            self.pause('Неизвестные ордера/позиции');return
         c=self.state.get('cycle')
         if self._time_guard() and self._time_waiting():
             # Keep broker evidence and cancellation working without consuming a
@@ -564,6 +610,80 @@ class BasketController(Controller):
         for g in reversed(c.get('groups',[])):
             if not g.get('retired'):return deepcopy(g['levels'])
         return deepcopy(c.get('signal_override') or {})
+
+    def _reset_pause(self,update_id=None):
+        """Explicit flat-only acknowledgement; never resume or send broker actions."""
+        c=self.state.get('cycle')
+        if (self.state.get('migration_block') or self.state['phase'] not in {'SAFE_PAUSE','MANUAL'}
+                or not c or c.get('contract')!=CONTRACT):
+            raise ActionRejected('Сброс доступен только для приостановленного цикла корзины')
+        if self.evidence_contract!='per_obligation_v1':
+            raise ActionRejected('Нужны подтверждённые данные MT5 для сверки')
+        if self._unresolved():
+            raise ActionRejected('Есть незавершённые команды. Пауза сохранена; требуется сверка')
+        if any(r.get('status')=='WAITING_DATA' or r.get('deferred')
+                or (r.get('status')=='UNKNOWN' and rid!=getattr(self,'_active_control_id',None))
+                for rid,r in self.state.get('control_receipts',{}).items()):
+            raise ActionRejected('Есть ожидающие или неподтверждённые команды панели. Пауза сохранена')
+        if any(not t.get('closed') for t in c['tickets'].values()):
+            raise ActionRejected('Закрытие и результат всех билетов ещё не подтверждены. Пауза сохранена')
+        before=deepcopy(self.state)
+        try:
+            snap=self.snapshot()
+            if snap['positions'] or snap['orders']:
+                raise ActionRejected('Есть позиции или ордера. Пауза сохранена')
+            positions=set();closing=set()
+            for cid,cmd in self.state['commands'].items():
+                if cmd.get('cycle_id')!=c['id']:continue
+                proof=snap['obligations'].get(cid,{})
+                if proof.get('cycle_id')!=c['id']:
+                    raise ActionRejected('Нет доказательства принадлежности команды циклу')
+                status=proof.get('status')
+                if cmd['kind'] in {'STOP','MARKET'} and status=='CLOSED_EVIDENCE':
+                    pid=str(proof['position_id']);positions.add(pid)
+                    ticket=c['tickets'].get(pid)
+                    if not ticket or ticket.get('command_id')!=cid:
+                        raise ActionRejected('Исполнение не сопоставлено с учтённым билетом')
+                    exits=[d for d in snap['deals'] if d['entry']=='OUT' and str(d['position_id'])==pid]
+                    if (not exits or sum((number(d['volume']) for d in exits),D(0))!=number(ticket['size'])):
+                        raise ActionRejected('Неполные данные закрытия билета')
+                    for d in exits:
+                        if d.get('cycle_id')!=c['id'] or d['id'] in closing:
+                            raise ActionRejected('Неоднозначные данные закрытия')
+                        closing.add(d['id'])
+                        row=self.store.db.execute('SELECT payload FROM consumed_deals WHERE backend=? AND account=? AND ticket=?',
+                            (self.state['backend'],self.state['account'],d['id'])).fetchone()
+                        expected_record=dict(backend=self.state['backend'],account=self.state['account'],currency=self.state['currency'],
+                            ticket=d['id'],position_id=d['position_id'],cycle_id=c['id'],raw=snap['ledger_facts'].get(d['id']))
+                        if (d['id'] not in self.state['seen_deals'] or not row or expected_record['raw'] is None
+                                or any(json.loads(row[0]).get(k)!=v for k,v in expected_record.items())):
+                            raise ActionRejected('Результат закрытия ещё не учтён или данные изменились')
+                elif cmd['kind'] in {'STOP','MARKET'}:
+                    if status not in {'TERMINAL_UNFILLED_EVIDENCE','REJECTED_RESPONSE','NO_SEND_EVIDENCE'}:
+                        raise ActionRejected('Есть неподтверждённое исполнение')
+                elif cmd['kind']=='CANCEL':
+                    if status not in {'CANCEL_TERMINAL_READBACK','REJECTED_RESPONSE','NO_SEND_EVIDENCE'}:
+                        raise ActionRejected('Отмена не подтверждена')
+                elif cmd['kind'] in {'MODIFY','CLOSE'}:
+                    if (str(cmd.get('position_id')) not in set(map(str,c['tickets']))
+                            or not any(str(p.get('position_id'))==str(cmd.get('position_id')) and p.get('status')=='CLOSED_EVIDENCE'
+                                and p.get('cycle_id')==c['id'] for p in snap['obligations'].values())):
+                        raise ActionRejected('Завершение защиты не подтверждено')
+                else:raise ActionRejected('Неизвестный тип обязательства')
+            if positions!=set(map(str,c['tickets'])):
+                raise ActionRejected('Не все исполнения подтверждены. Пауза сохранена')
+            debt=max(D(0),-number(c['realized'])-number(c.get('recovery_waived','0')))
+            self.state['basket_carry']=str(debt)
+            self.state['completed'].append(dict(id=c['id'],contract=CONTRACT,
+                realized=c['realized'],currency=c['currency'],recovery_retained=str(debt),
+                written_off_recovery='0',completion='PAUSE_RESET_RETAINED'))
+            self.state.update(cycle=None,phase='WAIT_START',stop=True,stop_mode='',last_manual_reset=c['id'])
+            self.notify('Сверка завершена. Пауза снята, бот остановлен. RECOVERY сохранён; для торговли нужен отдельный Старт.')
+            # No deal mutations: normal CAS snapshot/audit preserves the ledger.
+            self.save('basket_pause_reset')
+        except BaseException:
+            self.state=self.store.load() or before;self._durable_state=deepcopy(self.state)
+            raise
 
     def _reset_manual(self,update_id=None):
         if self.state.get('migration_block'):raise ActionRejected('Старый цикл сохраняется. Сверка выполняется прежней версией; новая логика его не меняет.')

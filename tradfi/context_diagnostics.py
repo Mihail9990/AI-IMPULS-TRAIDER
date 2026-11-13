@@ -24,6 +24,12 @@ CONTAINERS |= {'diagnostics'}
 
 from .reconciliation_diagnostics import SAFE_CODES, EVIDENCE_STATUSES
 ALLOWED_WORDS |= SAFE_CODES | EVIDENCE_STATUSES
+from .reconciliation_diagnostics import OBLIGATION_WORDS
+ALLOWED_WORDS |= OBLIGATION_WORDS
+NUMERIC |= {'unowned_count'}
+CONTAINERS |= {'unowned_obligations'}
+TEXT |= {'broker_order_type'}
+BOOLS |= {'linked_to_known_position'}
 
 def ident(value):
     value=str(value)
