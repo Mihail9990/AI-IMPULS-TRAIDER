@@ -68,3 +68,39 @@ class LogsTest(unittest.TestCase):
         self.logs.capture('live',self.fixture.store,state,1800000001,view);self.assertEqual(len(self.logs.recent['live']),1)
         self.logs.documents['live']='Я'*40000
         page=self.logs.response('live',1);self.assertEqual(len(page['text']),16000);self.assertTrue(page['has_more'])
+
+class TelegramRouteTest(unittest.TestCase):
+    def setUp(self):
+        from tradfi.telegram_logs import TelegramLogs
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+        self.sent=[]
+        self.outbox=TelegramLogs(Path(self.tmp.name)/'outbox','123456:'+'x'*30,'123',sender=lambda *a:self.sent.append(a) or 1)
+        self.addCleanup(self.outbox.close)
+        self.logs=DiagnosticLogs();self.logs.telegram=self.outbox
+        self.box=OwnerMailbox();self.box._view={'scope':'live','phase':'SAFE_PAUSE','read_only':True}
+        self.web=WebTransport(self.box,password='x'*32,logs=self.logs)
+        self.headers={'Host':'127.0.0.1:8765','X-Local-Control':'1','Content-Type':'application/json'}
+        self.request_id='11111111-1111-4111-8111-111111111111'
+    def login(self):
+        _,_,h=self.web.request('POST','/api/login',self.headers,json.dumps({'password':'x'*32}).encode())
+        self.headers['Cookie']=h['Set-Cookie'].split(';')[0]
+    def send(self,payload=None):
+        return self.web.request('POST','/api/logs/telegram/send',self.headers,json.dumps(payload if payload is not None else {'request_id':self.request_id}).encode())
+    def test_send_requires_auth_origin_and_exact_body(self):
+        self.assertEqual(self.send()[0],401);self.login()
+        for payload in ({'request_id':self.request_id,'chat_id':'999'}, {'request_id':12}, [],{}, {'request_id':'x'}):
+            self.assertEqual(self.send(payload)[0],400)
+        self.headers['Origin']='https://evil.invalid';self.assertEqual(self.send()[0],403)
+        self.assertFalse(self.sent)
+    def test_safe_pause_read_only_no_trading_and_query_receipt(self):
+        self.login();self.outbox.append(json.dumps({'scope':'live','context':{'phase':'SAFE_PAUSE'}}))
+        self.assertEqual(self.send()[1]['last_result'],'QUEUED');self.assertFalse(self.sent)
+        self.assertTrue(self.box.requests.empty());self.assertEqual(self.box._view['phase'],'SAFE_PAUSE')
+        self.outbox.tick()
+        code,result,_=self.web.request('GET','/api/logs/telegram?request_id='+self.request_id,self.headers)
+        self.assertEqual(code,200);self.assertEqual(result['last_result'],'SENT')
+        self.send();self.outbox.tick();self.assertEqual(len(self.sent),1)
+        self.assertEqual(self.web.request('GET','/api/logs/telegram?request_id=x',self.headers)[0],400)
+    def test_disabled_reports_without_send(self):
+        self.login();self.logs.telegram=None
+        self.assertEqual(self.send()[1]['status'],'DISABLED');self.assertFalse(self.sent)

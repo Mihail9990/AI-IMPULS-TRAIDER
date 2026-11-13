@@ -57,4 +57,62 @@ class TelegramLogsTests(unittest.TestCase):
         self.assertEqual(q.status()['queued_records'],0);q.close()
         with self.assertRaises(ValueError):TelegramLogs(self.path,TOKEN,'-123')
 
+class ManualTelegramTests(unittest.TestCase):
+    setUp=TelegramLogsTests.setUp
+    tearDown=TelegramLogsTests.tearDown
+    queue=TelegramLogsTests.queue
+    ID='11111111-1111-4111-8111-111111111111'
+    ID2='22222222-2222-4222-8222-222222222222'
+    def test_manual_queues_without_io_and_deduplicates_after_restart(self):
+        calls=[];q=self.queue(lambda *a:calls.append(a) or 9);q.append(RECORD)
+        self.assertEqual(q.request_send(self.ID)['last_result'],'QUEUED')
+        self.assertFalse(calls)
+        self.assertEqual(q.request_send(self.ID2)['request_id'],self.ID)
+        q.tick();self.assertEqual(q.status(self.ID)['last_result'],'SENT')
+        self.assertEqual(len(calls),1);q.close()
+        q=self.queue(lambda *a:self.fail('Duplicate send'));q.append(RECORD)
+        self.assertEqual(q.request_send(self.ID)['last_result'],'SENT');q.tick()
+        self.assertEqual(q.status()['queued_records'],1);q.close()
+    def test_coalesced_lost_response_alias_survives_restart(self):
+        calls=[];q=self.queue(lambda *a:calls.append(a) or 1);q.append(RECORD)
+        q.request_send(self.ID);q.request_send(self.ID2);q.tick();q.close()
+        q=self.queue(lambda *a:self.fail('Alias must not schedule again'));q.append(RECORD)
+        self.assertEqual(q.status(self.ID2)['request_id'],self.ID2)
+        self.assertEqual(q.status(self.ID2)['last_result'],'SENT')
+        self.assertEqual(q.request_send(self.ID2)['last_result'],'SENT');q.tick();q.close()
+        self.assertEqual(len(calls),1)
+    def test_manual_empty_and_invalid(self):
+        q=self.queue(lambda *a:self.fail('Empty send'))
+        for value in (None,12,'bad','../x'):
+            with self.assertRaises(ValueError):q.request_send(value)
+        q.request_send(self.ID);q.tick()
+        self.assertEqual(q.status(self.ID)['last_result'],'EMPTY');q.close()
+    def test_manual_unknown_blocks_new_and_survives_restart(self):
+        def fail(*a):raise DeliveryUnknown()
+        q=self.queue(fail);q.append(RECORD);q.request_send(self.ID);q.tick()
+        self.assertEqual(q.request_send(self.ID2)['status'],'UNKNOWN');q.close()
+        q=self.queue(lambda *a:self.fail('Unknown must not resend'))
+        self.assertEqual(q.status(self.ID)['last_result'],'UNKNOWN');self.now+=600;q.tick();q.close()
+    def test_manual_queued_survives_restart(self):
+        q=self.queue(lambda *a:1);q.append(RECORD);q.request_send(self.ID);q.close()
+        calls=[];q=self.queue(lambda *a:calls.append(a) or 3);q.tick()
+        self.assertEqual(q.status(self.ID)['last_result'],'SENT');self.assertEqual(len(calls),1);q.close()
+    def test_manual_failure_retries_at_interval_then_reports_sent(self):
+        calls=[];q=self.queue(lambda *a:calls.append(a) or None);q.append(RECORD);q.request_send(self.ID);q.tick()
+        self.assertEqual(q.status(self.ID)['last_result'],'RETRY');q.tick();self.assertEqual(len(calls),1)
+        q.sender=lambda *a:4;self.now+=600;q.tick()
+        self.assertEqual(q.status(self.ID)['last_result'],'SENT');q.close()
+    def test_manual_inflight_coalesces_and_preserves_newer_records(self):
+        def send(*args):
+            q.append(RECORD)
+            self.assertEqual(q.request_send(self.ID2)['request_id'],self.ID)
+            q.tick()  # Simulated concurrent worker must not send twice.
+            return 3
+        q=self.queue(send);q.append(RECORD);q.request_send(self.ID);q.tick()
+        self.assertEqual(q.status()['queued_records'],1);q.close()
+    def test_manual_does_not_send_to_request_destination_or_expose_credentials(self):
+        calls=[];q=self.queue(lambda *a:calls.append(a) or 3);q.append(RECORD);q.request_send(self.ID);q.tick()
+        self.assertEqual(calls[0][1],'123');self.assertNotIn('SECRET',calls[0][2].decode())
+        self.assertNotIn(TOKEN,json.dumps(q.status()));q.close()
+
 if __name__=='__main__':unittest.main()

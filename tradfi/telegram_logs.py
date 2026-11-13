@@ -82,13 +82,16 @@ class TelegramLogs:
         self.db.executescript('''CREATE TABLE IF NOT EXISTS records(id INTEGER PRIMARY KEY, body TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS delivery(id INTEGER PRIMARY KEY CHECK(id=1), batch TEXT, through_id INTEGER,
         status TEXT NOT NULL, next_at REAL NOT NULL, message_id INTEGER, dropped INTEGER NOT NULL DEFAULT 0,
-        destination TEXT NOT NULL);''')
+        destination TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS manual_requests(request_id TEXT PRIMARY KEY, result TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS manual_aliases(request_id TEXT PRIMARY KEY, target TEXT NOT NULL);''')
         self.db.execute('INSERT OR IGNORE INTO delivery(id,status,next_at,destination) VALUES(1,?,?,?)', ('READY', clock()+INTERVAL, chat_id))
         if self.db.execute('SELECT destination FROM delivery').fetchone()[0] != chat_id:
             self.db.close();self.owner_lock.close()
             raise ValueError('Outbox destination changed')
         # A crash after send cannot prove non-delivery. Retain and require review.
         self.db.execute("UPDATE delivery SET status='UNKNOWN' WHERE status='SENDING'")
+        self.db.execute("UPDATE manual_requests SET result='UNKNOWN' WHERE result='SENDING'")
         self.db.commit()
 
     def append(self, record):
@@ -109,11 +112,41 @@ class TelegramLogs:
                 return  # Existing undelivered data never evicted; loss is counted.
             self.db.execute('INSERT INTO records(body) VALUES(?)', (body,))
 
+    def request_send(self, request_id):
+        """Persist intent only. The sole sender worker performs outbound I/O."""
+        if not isinstance(request_id, str) or not re.fullmatch(r'[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}', request_id):
+            raise ValueError('Invalid request ID')
+        with self.lock, self.db:
+            alias = self.db.execute('SELECT target FROM manual_aliases WHERE request_id=?', (request_id,)).fetchone()
+            if alias:
+                request_id = alias[0]
+            existing = self.db.execute('SELECT result FROM manual_requests WHERE request_id=?', (request_id,)).fetchone()
+            if existing is None:
+                status = self.db.execute('SELECT status FROM delivery').fetchone()[0]
+                active = self.db.execute("SELECT request_id FROM manual_requests WHERE result IN ('QUEUED','SENDING','RETRY') LIMIT 1").fetchone()
+                if active or status not in ('UNKNOWN', 'SENDING'):
+                    count = self.db.execute('SELECT (SELECT COUNT(*) FROM manual_requests)+(SELECT COUNT(*) FROM manual_aliases)').fetchone()[0]
+                    if count >= 10000:
+                        raise ValueError('Manual request history full')
+                if active:
+                    self.db.execute('INSERT INTO manual_aliases VALUES(?,?)', (request_id, active[0]))
+                    request_id = active[0]  # Coalesce simultaneous tabs/clicks.
+                    if status == 'RETRY':
+                        self.db.execute("UPDATE manual_requests SET result='QUEUED' WHERE request_id=?", (request_id,))
+                        self.db.execute("UPDATE delivery SET status='QUEUED',next_at=?", (self.clock(),))
+                elif status not in ('UNKNOWN', 'SENDING'):
+                    # Keep deduplication IDs, never silently forget a prior send.
+                    self.db.execute('INSERT INTO manual_requests VALUES(?,?)', (request_id, 'QUEUED'))
+                    self.db.execute("UPDATE delivery SET status='QUEUED',next_at=?", (self.clock(),))
+        return self.status(request_id)
+
     def tick(self):
         with self.lock, self.db:
             batch, through, status, due, dropped = self.db.execute('SELECT batch,through_id,status,next_at,dropped FROM delivery').fetchone()
             if status in ('UNKNOWN', 'SENDING') or self.clock() < due:
                 return
+            manual = self.db.execute("SELECT request_id FROM manual_requests WHERE result IN ('QUEUED','RETRY') LIMIT 1").fetchone()
+            manual_id = manual[0] if manual else None
             rows = self.db.execute('SELECT id,body FROM records ORDER BY id LIMIT 1000').fetchall()
             selected, size = [], 0
             for row in rows:
@@ -122,30 +155,43 @@ class TelegramLogs:
                     break
                 selected.append(row)
             if not selected:
-                self.db.execute('UPDATE delivery SET next_at=?', (self.clock()+INTERVAL,))
+                self.db.execute("UPDATE delivery SET status='READY',next_at=?", (self.clock()+INTERVAL,))
+                self.db.execute("UPDATE manual_requests SET result='EMPTY' WHERE request_id=?", (manual_id,))
                 return
             batch, through = uuid.uuid4().hex, selected[-1][0]
             payload = (f'LIVE diagnostics; batch={batch}; dropped_at_capacity={dropped}; sanitized=true\n' + '\n'.join(r[1] for r in selected)).encode()
             self.db.execute("UPDATE delivery SET batch=?,through_id=?,status='SENDING'", (batch, through))
+            self.db.execute("UPDATE manual_requests SET result='SENDING' WHERE request_id=?", (manual_id,))
         try:
             message_id = self.sender(self.token, self.chat_id, payload, batch)
         except Exception:
             with self.lock, self.db:
                 self.db.execute("UPDATE delivery SET status='UNKNOWN'")
+                self.db.execute("UPDATE manual_requests SET result='UNKNOWN' WHERE request_id=?", (manual_id,))
             return
         with self.lock, self.db:
             if message_id is not None:
+                self.db.execute("UPDATE manual_requests SET result='SENT' WHERE request_id=?", (manual_id,))
                 # Only exact delivered range; concurrent newer rows survive.
                 self.db.execute('DELETE FROM records WHERE id<=?', (through,))
                 self.db.execute("UPDATE delivery SET status='READY',message_id=?,next_at=?", (message_id, self.clock()+INTERVAL))
             else:
+                self.db.execute("UPDATE manual_requests SET result='RETRY' WHERE request_id=?", (manual_id,))
                 self.db.execute("UPDATE delivery SET status='RETRY',next_at=?", (self.clock()+INTERVAL,))
 
-    def status(self):
+    def status(self, request_id=None):
         with self.lock:
             status, dropped, batch, message_id = self.db.execute('SELECT status,dropped,batch,message_id FROM delivery').fetchone()
             count = self.db.execute('SELECT COUNT(*) FROM records').fetchone()[0]
-        return {'status': status, 'queued_records': count, 'dropped_at_capacity': dropped, 'batch': batch, 'message_id': message_id}
+            alias = self.db.execute('SELECT target FROM manual_aliases WHERE request_id=?', (request_id,)).fetchone()
+            original_id = request_id
+            if alias:
+                request_id = alias[0]
+            if request_id is None:
+                request = self.db.execute('SELECT request_id,result FROM manual_requests ORDER BY rowid DESC LIMIT 1').fetchone()
+            else:
+                request = self.db.execute('SELECT request_id,result FROM manual_requests WHERE request_id=?', (request_id,)).fetchone()
+        return {'request_id': (original_id or request[0]) if request else None, 'last_result': request[1] if request else None, 'status': status, 'queued_records': count, 'dropped_at_capacity': dropped, 'batch': batch, 'message_id': message_id}
 
     def resolve_unknown(self, batch, *, received):
         """Local operator only: confirm exact .txt batch received or authorize retry."""
@@ -155,6 +201,7 @@ class TelegramLogs:
                 raise ValueError('Unknown batch does not match')
             if received:
                 self.db.execute('DELETE FROM records WHERE id<=?', (through,))
+            self.db.execute("UPDATE manual_requests SET result=? WHERE result='UNKNOWN'", ('SENT' if received else 'RETRY',))
             self.db.execute("UPDATE delivery SET status='READY',next_at=?", (self.clock()+INTERVAL,))
 
     def start(self):

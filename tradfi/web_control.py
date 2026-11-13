@@ -85,6 +85,25 @@ class WebTransport:
                 value=empty_snapshot('',tf,'UNAVAILABLE');value['requested_bars']=bars
                 return reply(200,value)
             return reply(200,self.analysis.view(tf,bars=bars) if 'bars' in query else self.analysis.view(tf))
+        if route in {'/api/logs/telegram', '/api/logs/telegram/send'}:
+            if self.logs is None:return reply(404,{'error':'LOGS_UNAVAILABLE'})
+            try:
+                if method == 'GET' and route == '/api/logs/telegram':
+                    query=parse_qs(urlsplit(path).query,strict_parsing=True,keep_blank_values=True,max_num_fields=1)
+                    if set(query)-{'request_id'} or any(len(v)!=1 for v in query.values()):raise ValueError()
+                    request_id=query.get('request_id',[None])[0]
+                    if request_id is not None and str(uuid.UUID(request_id)) != request_id:raise ValueError()
+                    return reply(200,self.logs.telegram_view(request_id))
+                if method == 'POST' and route == '/api/logs/telegram/send':
+                    payload=json.loads(body)
+                    if not isinstance(payload,dict) or set(payload)!={'request_id'}:raise ValueError()
+                    request_id=payload['request_id']
+                    if not isinstance(request_id,str) or str(uuid.UUID(request_id)) != request_id:raise ValueError()
+                    # Non-trading diagnostic queue. No mailbox/controller/quote gate.
+                    return reply(202,self.logs.telegram_send(request_id))
+            except (ValueError,TypeError,AttributeError):return reply(400,{'error':'INVALID_TELEGRAM_LOG_REQUEST'})
+            except Exception:return reply(503,{'error':'TELEGRAM_LOGS_UNAVAILABLE'})
+            return reply(405,{'error':'METHOD_NOT_ALLOWED'})
         if method=='GET' and route in {'/api/logs','/api/logs/download'}:
             if self.logs is None:return reply(404,{'error':'LOGS_UNAVAILABLE'})
             try:

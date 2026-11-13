@@ -98,7 +98,7 @@
 <p>Сначала остановите новые входы. Списание возможно только без позиций, ордеров и неизвестных исходов. Уже учтённый убыток не вычитается повторно. После подтверждения — новый цикл с новой закрытой M1.</p>
 <button id="writeoff-recovery">Сбросить остаток RECOVERY…</button></details><details id="logs-section"><summary>Логи</summary><label>Контур<select id="log-scope"><option value="live">Торговля · audit</option>
 
-<option value="runtime">Файл этого сервиса · очищенный</option><option value="browser">Диагностика браузера · эта вкладка</option></select></label><button id="logs-refresh">Показать</button><button id="logs-prev">Предыдущая страница</button><button id="logs-next">Следующая страница</button><button id="logs-download">Скачать .txt</button><p id="logs-status"></p>
+<option value="runtime">Файл этого сервиса · очищенный</option><option value="browser">Диагностика браузера · эта вкладка</option></select></label><button id="logs-refresh">Показать</button><button id="logs-prev">Предыдущая страница</button><button id="logs-next">Следующая страница</button><button id="logs-download">Скачать .txt</button><p id="logs-status"></p><button id="logs-telegram-send" disabled>Отправить логи в Telegram .txt</button><button id="logs-telegram-refresh">Проверить статус Telegram</button><p id="logs-telegram-status" role="status" aria-live="polite">Отправка очищенных логов основного бота в настроенный личный чат.</p>
 <pre id="logs-view"></pre>
 <p>UTC — исходное время; UTC+2 — отдельно подписанное отображение. Выгрузка ограничена последними записями и удаляет чувствительные поля. Исходные логи не очищаются.</p></details></details>
 <details class="card"><summary>События и ошибки</summary>

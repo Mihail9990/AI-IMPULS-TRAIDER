@@ -81,6 +81,16 @@ class DiagnosticLogs:
             for handler in self.handlers.values():handler.close()
             if self.telegram:self.telegram.close()
 
+    def telegram_view(self, request_id=None):
+        if self.telegram:
+            return self.telegram.status(request_id)
+        return {'status': self.telegram_status, 'request_id': None, 'last_result': None}
+
+    def telegram_send(self, request_id):
+        if self.telegram:
+            return self.telegram.request_send(request_id)
+        return self.telegram_view()
+
     def capture(self,scope,store,state,now,view=None):
         start=self.monotonic()
         try:

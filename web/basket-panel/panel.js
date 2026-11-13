@@ -521,6 +521,77 @@
    const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='tradfi-'+scope+'-logs.txt';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);$('logs-status').textContent='Подготовлен файл UTF-8: '+a.download+' · включает диагностику этой вкладки';
   }catch(e){$('logs-status').textContent=e.message+'. Можно отдельно скачать «Диагностику браузера».';}
  };
+ // Telegram diagnostics are independent of trading controls and SAFE_PAUSE.
+ const telegramRequestKey=storageKey('telegram-log-request');
+ let telegramRequest=null,telegramBusy=false,telegramChecking=false,telegramState=null,telegramTimer=null;
+ try{telegramRequest=localStorage.getItem(telegramRequestKey);}catch{}
+ function telegramRemember(id){telegramRequest=id;try{if(id)localStorage.setItem(telegramRequestKey,id);else localStorage.removeItem(telegramRequestKey);}catch{}}
+ function telegramMessage(text,tone='info'){notice('logs-telegram-status',text,tone);}
+ function telegramRetryAllowed(){return !!telegramRequest&&telegramState?.status==='READY'&&telegramState.request_id===null&&telegramState.last_result===null;}
+ function telegramControls(){
+  $('logs-telegram-send').textContent=telegramRetryAllowed()?'Повторить запрос отправки':'Отправить логи в Telegram .txt';
+  $('logs-telegram-send').disabled=telegramBusy||telegramChecking||(!!telegramRequest&&!telegramRetryAllowed())||!telegramState||['DISABLED','CONFIGURATION_ERROR','UNKNOWN','QUEUED','SENDING'].includes(telegramState.status);
+  $('logs-telegram-refresh').disabled=telegramChecking||telegramBusy;
+ }
+ function telegramSchedule(){clearTimeout(telegramTimer);telegramTimer=setTimeout(()=>telegramRefresh(),1500);}
+ function telegramRender(value){
+  telegramState=value;
+  const status=value.status,result=value.last_result,matches=telegramRequest&&value.request_id===telegramRequest;
+  if(status==='DISABLED'||status==='CONFIGURATION_ERROR'){
+   telegramMessage(status==='DISABLED'?'Telegram не настроен на сервере.':'Ошибка настройки Telegram на сервере.','warning');
+  }else if(status==='UNKNOWN'||(matches&&result==='UNKNOWN')){
+   telegramMessage('Доставка .txt не подтверждена. Файл мог уже прийти в Telegram. Повторная отправка остановлена до сверки.','warning');
+  }else if(matches&&result==='SENT'){
+   telegramRemember(null);telegramMessage('Telegram подтвердил получение файла .txt.','success');
+  }else if(matches&&result==='EMPTY'){
+   telegramRemember(null);telegramMessage('Новых логов для отправки нет.');
+  }else if(status==='RETRY'||(matches&&result==='RETRY')){
+   if(matches)telegramRemember(null);
+   telegramMessage('Telegram отклонил отправку. Логи сохранены; автоматическая повторная попытка через 10 минут.','warning');
+  }else if(status==='SENDING'||status==='QUEUED'||(matches&&result==='QUEUED')){
+   telegramMessage('Логи .txt ожидают отправки или отправляются…');telegramSchedule();
+  }else if(telegramRequest){
+   telegramMessage(telegramRetryAllowed()?'Сервер пока не подтвердил запрос. Можно повторить тот же запрос кнопкой; повторного файла это не создаст.':'Результат запроса не подтверждён. Проверьте статус; повторно файл автоматически не отправляется.','warning');
+  }else{
+   telegramMessage('Telegram готов. Новых записей: '+(Number(value.queued_records)||0)+'. Автоматическая отправка каждые 10 минут.');
+  }
+  telegramControls();
+ }
+ async function telegramRefresh(){
+  if(telegramChecking||telegramBusy)return;
+  telegramChecking=true;telegramControls();
+  try{
+   const r=await fetch('/api/logs/telegram'+(telegramRequest?'?request_id='+encodeURIComponent(telegramRequest):''),{headers:{'X-Local-Control':'1'},signal:AbortSignal.timeout(5000)});
+   if(!r.ok)throw Error('STATUS_UNAVAILABLE');
+   telegramRender(await r.json());
+  }catch{
+   telegramState=null;telegramMessage('Не удалось проверить статус Telegram. Нажмите «Проверить статус Telegram». Повторной отправки нет.','warning');
+  }finally{telegramChecking=false;telegramControls();}
+ }
+ $('logs-telegram-send').onclick=async()=>{
+  if($('logs-telegram-send').disabled||telegramBusy||(telegramRequest&&!telegramRetryAllowed()))return;
+  telegramBusy=true;if(!telegramRequest)telegramRemember(crypto.randomUUID());telegramControls();clearTimeout(telegramTimer);
+  telegramMessage('Запрос отправки .txt…');
+  try{
+   const r=await fetch('/api/logs/telegram/send',{method:'POST',headers:{'X-Local-Control':'1','Content-Type':'application/json'},body:JSON.stringify({request_id:telegramRequest}),signal:AbortSignal.timeout(5000)});
+   if(!r.ok){
+    if([400,401,403,404,405,429].includes(r.status)){
+     telegramRemember(null);telegramState=null;
+     telegramMessage([401,403].includes(r.status)?'Сервер не принял запрос. Войдите в панель заново, затем проверьте статус Telegram.':'Сервер отклонил запрос отправки (HTTP '+r.status+'). Логи не удалены. Проверьте статус и настройки Telegram.','warning');
+     return;
+    }
+    throw Error('SEND_UNCONFIRMED');
+   }
+   const value=await r.json();
+   // The server coalesces simultaneous clicks/tabs into one durable request.
+   telegramRemember(value.request_id||null);telegramRender(value);
+  }catch{
+   telegramMessage('Ответ сервера не получен. Проверяю статус без повторной отправки…','warning');telegramSchedule();
+  }finally{telegramBusy=false;telegramControls();}
+ };
+ $('logs-telegram-refresh').onclick=telegramRefresh;
+ $('logs-section').addEventListener('toggle',()=>{if($('logs-section').open)telegramRefresh();});
+ // End Telegram diagnostics controls.
  // Local display preference only; each controller role has its own storage key.
  const chartHeightKey=storageKey('chart-height-v1');
  function normalizeChartHeight(value){
