@@ -1,5 +1,14 @@
 """In-memory diagnostic codes only. Never copy broker exception text."""
 CODES = {
+    'Raw tick and M1 observation disagree': 'RAW_TICK_M1_ROLLOVER_UNRESOLVED',
+    'Raw M1 pair unavailable': 'RAW_M1_PAIR_UNAVAILABLE',
+    'Invalid raw M1 timestamp': 'RAW_M1_TIMESTAMP_INVALID',
+    'Invalid raw M1 OHLC': 'RAW_M1_OHLC_INVALID',
+    'Raw M1 order or duplicate invalid': 'RAW_M1_ORDER_INVALID',
+    'Orders changed during evidence collection': 'CURRENT_ORDER_SET_CHANGED',
+    'Positions changed during evidence collection': 'CURRENT_POSITION_SET_CHANGED',
+    'Position evidence changed during collection': 'POSITION_EXECUTION_EVIDENCE_CHANGED',
+    'Order evidence changed during collection': 'ORDER_EXECUTION_EVIDENCE_CHANGED',
     'Terminal obligation evidence changed; reconcile before execution': 'TERMINAL_OBLIGATION_EVIDENCE_CHANGED',
     'Terminal obligation evidence is delayed': 'TERMINAL_OBLIGATION_EVIDENCE_DELAYED',
     'Required evidence API is unavailable': 'EVIDENCE_API_UNAVAILABLE',
