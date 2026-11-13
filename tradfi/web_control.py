@@ -25,9 +25,9 @@ def panel_html(body,role):
 
 
 class WebTransport:
-    def __init__(self,mailbox,*,authority='127.0.0.1:8765',password=None,clock=time.monotonic,public_origin=None,role='live',logs=None,analysis=None):
+    def __init__(self,mailbox,*,authority='127.0.0.1:8765',password=None,clock=time.monotonic,public_origin=None,role='live',logs=None):
         if urlsplit('http://'+authority).hostname not in {'127.0.0.1','::1'}:raise ValueError('Web server must bind loopback')
-        self.logs=logs;self.analysis=analysis
+        self.logs=logs
         if role != 'live':raise ValueError('Invalid panel role')
         self._role=role;self.cookie_name='tradfi_'+role+'_session'
         self.mailbox=mailbox;self.authority=authority;self.password=password;self.clock=clock
@@ -69,22 +69,6 @@ class WebTransport:
         except (KeyError,ValueError,CookieError):return reply(401,{'error':'AUTH_REQUIRED'})
         with self.lock:
             if self.sessions.get(sid,0)<=self.clock():return reply(401,{'error':'SESSION_EXPIRED'})
-        if method=='GET' and route=='/api/analysis':
-            try:
-                if len(path)>128:raise ValueError()
-                query=parse_qs(urlsplit(path).query,strict_parsing=True,keep_blank_values=True,max_num_fields=2)
-                if not {'timeframe'} <= set(query) <= {'timeframe','bars'} or any(len(v)!=1 for v in query.values()):raise ValueError()
-                from .analysis_service import TIMEFRAMES,LOOKBACKS,BAR_LIMIT,empty_snapshot
-                tf=query['timeframe'][0]
-                if tf not in TIMEFRAMES:raise ValueError()
-                raw_bars=query.get('bars',[str(BAR_LIMIT)])[0]
-                if raw_bars not in {str(n) for n in LOOKBACKS}:raise ValueError()
-                bars=int(raw_bars)
-            except ValueError:return reply(400,{'error':'INVALID_ANALYSIS_REQUEST'})
-            if self.analysis is None:
-                value=empty_snapshot('',tf,'UNAVAILABLE');value['requested_bars']=bars
-                return reply(200,value)
-            return reply(200,self.analysis.view(tf,bars=bars) if 'bars' in query else self.analysis.view(tf))
         if route in {'/api/logs/telegram', '/api/logs/telegram/send'}:
             if self.logs is None:return reply(404,{'error':'LOGS_UNAVAILABLE'})
             try:
@@ -135,12 +119,9 @@ class NativePanel:
         self.controller=controller;self.clock=clock;self.monotonic=monotonic
         self.mailbox=OwnerMailbox();self.gateway=ActionGateway(controller,execute=controller.action)
         self.feed=ChartFeed(controller.broker,clock=clock,monotonic=monotonic)
-        from .analysis_service import AnalysisService,DisabledAnalysisService
-        try:self.analysis=AnalysisService(controller.broker)
-        except Exception:self.analysis=DisabledAnalysisService(controller.broker.symbol)
         from .web_logs import DiagnosticLogs
         self.logs=DiagnosticLogs(controller.broker.config.get('log_file','tradfi_mt5.log') if hasattr(controller.broker,'config') else None)
-        self.transport=WebTransport(self.mailbox,authority=authority,password=password,clock=monotonic,public_origin=public_origin,logs=self.logs,analysis=self.analysis)
+        self.transport=WebTransport(self.mailbox,authority=authority,password=password,clock=monotonic,public_origin=public_origin,logs=self.logs)
         self.authority=authority;self.next_feed=0;self.snapshot=None;self.server=None
         self.market_time_mode=getattr(controller.broker,'market_time_mode','fixed_utc_v1')
         if 'web_store_id' not in controller.state:
@@ -157,16 +138,12 @@ class NativePanel:
             except (ValueError,OSError,TimeoutError):self.feed.disconnected()
             snapshot_ms=(time.perf_counter()-snapshot_start)*1000
             self.next_feed=self.monotonic()+1
-        try:self.analysis.observe(self.feed.view())
-        except Exception:pass  # Optional analysis must never interrupt control.
         self.mailbox.drain(self.gateway,self.view)
         try:
             diagnostic_view=self.mailbox.view()
             diagnostic_view['diagnostics'] = {
                 'last_error': getattr(self.controller, 'pause_diagnostics', {}),
                 'result': getattr(self.controller, 'reconciliation_diagnostics', {})}
-            if hasattr(self.analysis, 'diagnostic_view'):
-                diagnostic_view['analysis'] = self.analysis.diagnostic_view()
             elapsed=(time.perf_counter()-step_start)*1000
             diagnostic_view['timings']={'snapshot_ms':snapshot_ms,'publish_ms':elapsed,'capture_ms':self.logs.last_capture_ms}
             diagnostic_view['latency_band']='SLOW_2000MS' if elapsed>=2000 else 'SLOW_500MS' if elapsed>=500 else 'NORMAL'
@@ -202,11 +179,6 @@ class NativePanel:
         mode=getattr(self.controller.broker,'market_time_mode','fixed_utc_v1')
         if mode==getattr(self,'market_time_mode',mode):return
         # Time domains cannot share candle/cache identities after migration.
-        self.analysis.close()
-        from .analysis_service import AnalysisService,DisabledAnalysisService
-        try:self.analysis=AnalysisService(self.controller.broker)
-        except Exception:self.analysis=DisabledAnalysisService(self.controller.broker.symbol)
-        self.transport.analysis=self.analysis
         self.feed=ChartFeed(self.controller.broker,clock=self.clock,monotonic=self.monotonic)
         self.snapshot=None;self.next_feed=0;self.market_time_mode=mode
 
@@ -263,7 +235,7 @@ class NativePanel:
             def do_POST(self):self.handle_call()
             def handle_call(self):
                 route=urlsplit(self.path).path
-                static={'/':('index.html','text/html'),'/analysis.js':('analysis.js','text/javascript'),'/diagnostics.js':('diagnostics.js','text/javascript'),'/panel.js':('panel.js','text/javascript'),'/panel.css':('panel.css','text/css')}
+                static={'/':('index.html','text/html'),'/diagnostics.js':('diagnostics.js','text/javascript'),'/panel.js':('panel.js','text/javascript'),'/panel.css':('panel.css','text/css')}
                 if self.command=='GET' and route in static and self.headers.get('Host')==authority:
                     filename,mime=static[route];body=(ROOT/filename).read_bytes()
                     if filename=='index.html':body=panel_html(body,transport.role)
@@ -294,6 +266,5 @@ class NativePanel:
         self.server=BoundedServer((host,int(port)),Handler)
         threading.Thread(target=self.server.serve_forever,daemon=True).start()
     def close(self):
-        self.analysis.close()
         self.logs.close()
         if self.server:self.server.shutdown();self.server.server_close()

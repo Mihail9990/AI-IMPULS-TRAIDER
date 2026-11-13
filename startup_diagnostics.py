@@ -13,7 +13,7 @@ from pathlib import Path
 import socket
 import time
 
-from tradfi.startup_errors import REASONS, reason
+from tradfi.startup_errors import REASONS, STAGES, reason, failure_stage
 
 EXTRA = {
  'BEGIN':'Проверка запуска. Это не торговый сервис.',
@@ -27,10 +27,15 @@ EXTRA = {
  'MT5_CONNECTED':'Соединение и каталог терминала подтверждены.',
  'ACCOUNT_OK':'Счёт/сервер совпадают с настройками; значения не записаны. Валюта UST подтверждена.',
  'NON_HEDGING':'Режим счёта не hedging. READ_ONLY допустим, реальное исполнение требует отдельной проверки.',
+ 'SYMBOL_SPEC_CHECK':'Проверка полной спецификации инструмента; значения не записываются.',
+ 'SYMBOL_SPEC_OK':'Обязательные contract/tick/volume/point и stops/freeze допустимы.',
+ 'QUOTE_CHECK':'Проверка котировки и времени тика.',
  'SYMBOL_OK':'XAUUSD.s найден и виден в Обзоре рынка.',
  'TICK_STALE':'Последняя котировка устарела относительно часов Windows. Рынок может быть закрыт; это не доказанная причина exit 2.',
  'TICK_FUTURE':'Время котировки впереди часов Windows. Не сдвигайте timestamp вручную.',
- 'TICK_INVALID':'Нет корректного UTC времени котировки или time/time_msc расходятся.',
+ 'TICK_INVALID':'Некорректное время котировки или time/time_msc расходятся.',
+ 'TICK_TIME_UNRESOLVED':'Котировка прочитана. Режим времени восстанавливается сервисом из базы; диагностика базу не открывает и время с Windows не сравнивает.',
+ 'TICK_OBSERVED':'Котировка MT5 прочитана. В raw-режиме её время не сравнивается с часами Windows.',
  'TICK_OK':'Котировка свежая относительно часов Windows. Независимый источник UTC здесь не проверялся.',
  'BARS_WAIT':'Две актуальные M1 свечи недоступны или их время не совпадает с котировкой. Подождите свежие данные.',
  'BARS_OK':'Последние M1 времена согласованы с котировкой.',
@@ -39,6 +44,8 @@ EXTRA = {
  'PROBE_FAILED':'Диагностический процесс не завершил отчёт. Его сырой вывод не сохраняется, чтобы не раскрыть секреты.',
  'RELEASE_CHANGED':'Установленная версия изменилась. Повторите диагностику после завершения обновления.',
 }
+
+EXTRA.update({"STAGE_"+stage:"Этап отказа: "+stage+" (не диагноз)." for stage in STAGES})
 
 class Report:
     def __init__(self,path):
@@ -102,6 +109,32 @@ def check_config(config,report,exists=None,environ=None):
         report.add('OK','PASSWORD_OK')
     return True
 
+def check_symbol_spec(info, currency, report):
+    """Mirror the broker's specification validation without constructing a broker.
+
+    This function cannot connect, mutate orders or open the trading database.
+    Only fixed reason codes leave this boundary; no symbol metadata is logged.
+    """
+    from tradfi.broker import Spec
+    fields = {
+        'profit_currency':'currency_profit', 'calc_mode':'trade_calc_mode',
+        'contract_size':'trade_contract_size', 'tick_size':'trade_tick_size',
+        'tick_value_profit':'trade_tick_value_profit', 'tick_value_loss':'trade_tick_value_loss',
+        'volume_min':'volume_min', 'volume_step':'volume_step', 'volume_max':'volume_max',
+        'point':'point', 'stops_level':'trade_stops_level', 'freeze_level':'trade_freeze_level',
+    }
+    try:
+        if any(not hasattr(info, name) for name in fields.values()):
+            report.add('ERROR','MT5_SPEC_INCOMPLETE');return False
+        data = {key:getattr(info, name) for key,name in fields.items()}
+        Spec.load(dict(data,symbol='XAUUSD.s',currency=currency))
+    except (ValueError,TypeError,ArithmeticError) as exc:
+        code = reason(exc)
+        if code not in {'MT5_SPEC_INCOMPLETE','MT5_SPEC_LIMITS','MT5_SPEC_NUMERIC'}:
+            code = 'MT5_SPEC_NUMERIC'
+        report.add('ERROR',code);return False
+    return True
+
 def probe(config,report,*,api=None,busy=port_busy,clock=time.time):
     web=config.get('web',{})
     if web.get('enabled',True):
@@ -124,14 +157,27 @@ def probe(config,report,*,api=None,busy=port_busy,clock=time.time):
         info=api.symbol_info(config['symbol'])
         if info is None or not info.visible:report.add('ERROR','MT5_SYMBOL');return False
         report.add('OK','SYMBOL_OK')
+        report.add('INFO','SYMBOL_SPEC_CHECK')
+        if not check_symbol_spec(info, account.currency, report):return False
+        report.add('OK','SYMBOL_SPEC_OK')
+        report.add('INFO','QUOTE_CHECK')
         tick=api.symbol_info_tick(config['symbol']);now=clock()
         numeric=lambda x:isinstance(x,(int,float)) and not isinstance(x,bool) and math.isfinite(x)
         if tick is None or not all(numeric(getattr(tick,k,None)) for k in ('bid','ask')) or tick.bid<=0 or tick.ask<tick.bid:report.add('ERROR','MT5_QUOTE');return False
         raw=getattr(tick,'time_msc',None);seconds=getattr(tick,'time',None)
         if not all(numeric(x) and x>0 for x in (raw,seconds)) or not 0<=raw/1000-seconds<1:report.add('WARN','TICK_INVALID')
         else:
-            age=now-raw/1000
-            report.add('WARN' if age>10 or age < -2 else 'OK','TICK_STALE' if age>10 else 'TICK_FUTURE' if age < -2 else 'TICK_OK')
+            if config.get('market_time_mode') == 'mt5_raw_v1':
+                from tradfi.raw_market_time import RawMarketTime
+                RawMarketTime(time.monotonic).observe(tick)
+                report.add('OK','TICK_OBSERVED')
+            elif 'market_time_mode' not in config:
+                # The service may restore raw mode from its durable binding.
+                # This no-database probe must not assume UTC from missing fields.
+                report.add('INFO','TICK_TIME_UNRESOLVED')
+            else:
+                age=now-raw/1000
+                report.add('WARN' if age>10 or age < -2 else 'OK','TICK_STALE' if age>10 else 'TICK_FUTURE' if age < -2 else 'TICK_OK')
             bars=api.copy_rates_from_pos(config['symbol'],api.TIMEFRAME_M1,0,2)
             current=int(raw/1000//60)*60
             try:valid=bars is not None and len(bars)==2 and sorted(int(b['time']) for b in bars)==[current-60,current]
@@ -139,7 +185,7 @@ def probe(config,report,*,api=None,busy=port_busy,clock=time.time):
             report.add('OK' if valid else 'WARN','BARS_OK' if valid else 'BARS_WAIT')
         report.add('INFO','COMPLETE');return True
     except Exception as exc:
-        report.add('ERROR',reason(exc));return False
+        report.add('ERROR',reason(exc));report.add('INFO','STAGE_'+failure_stage(exc));return False
     finally:
         try:api.shutdown()
         except Exception:pass
@@ -159,6 +205,8 @@ def run(root,output,*,api=None,busy=port_busy,exists=None,clock=time.time):
                 codes=[line.removeprefix('STARTUP ') for line in lines if line.startswith('STARTUP ')]
                 if len(codes)==1 and codes[0] in REASONS:
                     report.add('INFO','PREVIOUS_FAILURE');report.add('WARN',codes[0])
+                    stages=[line.removeprefix('STAGE ') for line in lines if line.startswith('STAGE ')]
+                    if len(stages)==1 and stages[0] in STAGES:report.add('INFO','STAGE_'+stages[0])
             except (OSError,UnicodeError):pass
             try:config=read_config(root/'data'/'service.json')
             except (json.JSONDecodeError,UnicodeError):report.add('ERROR','CONFIG_JSON');return False

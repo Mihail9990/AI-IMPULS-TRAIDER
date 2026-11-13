@@ -89,7 +89,8 @@ class LauncherTest(unittest.TestCase):
         from tradfi.runtime import _run_mt5
         api=NativeAPI(); current=int(api.now//60)*60
         api.rates=[dict(time=t,open=3999.,close=4000.) for t in (current-120,current-60,current)]
-        config=dict(self.config,enable_trading=True)
+        # This fixture deliberately models the retained legacy UTC inspection.
+        config=dict(self.config,enable_trading=True,market_time_mode="fixed_utc_v1")
         output=io.StringIO()
         with patch('tradfi.runtime.Store',side_effect=AssertionError('SQLite forbidden')),redirect_stdout(output):
             _run_mt5(config,True,evidence=True,api=api,clock=lambda:api.now,monotonic=lambda:api.now)

@@ -49,7 +49,7 @@ class NativeServiceTest(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.root=Path(self.tmp.name); self.api=NativeAPI()
-        self.config=dict(backend='mt5_direct_v1',time_profile=BYBIT_PROFILE,
+        self.config=dict(backend='mt5_direct_v1',time_profile=BYBIT_PROFILE,market_time_mode="fixed_utc_v1",
             expected_server='Bybit-Live-6',expected_login=111111111,symbol='XAUUSD.s',magic=25101102,
             terminal_path='C:/Program Files/MetaTrader 5/terminal64.exe',enable_trading=False,
             state_file=str(self.root/'state.db'),log_file=str(self.root/'diagnostic.log'))

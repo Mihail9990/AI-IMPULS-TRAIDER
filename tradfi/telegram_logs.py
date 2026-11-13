@@ -229,3 +229,14 @@ def from_environment(runtime_path):
     if not token and not chat:
         return None
     return TelegramLogs(str(runtime_path)+'.telegram-outbox.sqlite3', token, chat)
+
+
+def from_settings(runtime_path):
+    """Explicit local settings take priority; absent file preserves environment setup."""
+    from .telegram_settings import load
+    configured = load(runtime_path)
+    if configured is None:
+        return from_environment(runtime_path)
+    if not configured['enabled']:
+        return None
+    return TelegramLogs(str(runtime_path)+'.telegram-outbox.sqlite3', configured['bot_token'], configured['chat_id'])

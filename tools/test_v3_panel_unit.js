@@ -49,7 +49,7 @@ vm.runInContext(part,ctx);vm.runInContext('v3Fresh=true;v3FillSettings();v3Rende
 async function main(){
  // Execute actual chart rendering with verified, unverified and missing semantics.
  ctx.svg=$('chart');ctx.ns='http://www.w3.org/2000/svg';ctx.document.createElementNS=()=>new Element();
- Object.assign(ctx,{lines:[],zoom:1,pan:0,timeOffset:0,visibleCount:60,frameHeight:520,plotBottom:480,plotHeight:450,innerWidth:1000,preview:null,previewFocus:null,previewWasOpen:false,prefs:{colors:{}},drawAnalysis:()=>{}});
+ Object.assign(ctx,{lines:[],zoom:1,pan:0,timeOffset:0,visibleCount:60,frameHeight:520,plotBottom:480,plotHeight:450,innerWidth:1000,preview:null,previewFocus:null,previewWasOpen:false,prefs:{colors:{}}});
  vm.runInContext(src.slice(src.indexOf(' function node('),src.indexOf(' function openPreview(')),ctx);
  const stamp=1804800000;
  const chartView={...structuredClone(base),levels:{},positions:[],orders:[],feed:{timestamp_semantics:'VERIFIED',timestamp:stamp,candles:[{utc_time:stamp,raw_time:stamp,open:1,close:2,low:1,high:2}],quote:{}}};

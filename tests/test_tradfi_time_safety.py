@@ -263,7 +263,7 @@ class DurableTimeTest(unittest.TestCase):
         from test_tradfi_native_service import NativeAPI
         self.broker.close(); self.store.close()
         self.api=NativeAPI(); self.store=Store(self.path.with_name('native.db'))
-        config=dict(self.config,time_profile=BYBIT_PROFILE,execution_contract='cycle_scoped_identity_v1')
+        config=dict(self.config,time_profile=BYBIT_PROFILE,market_time_mode="fixed_utc_v1",execution_contract='cycle_scoped_identity_v1')
         self.broker=MT5EvidenceBroker(config,self.store,api=self.api,clock=lambda:self.api.now,monotonic=lambda:self.api.now)
         self.broker.connect()
         with patch('requests.get',side_effect=AssertionError('No network during guard')):

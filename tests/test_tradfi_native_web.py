@@ -112,7 +112,7 @@ class RuntimePipelineTest(unittest.TestCase):
                 elif self.n==12:
                     assert bot.state['phase'] in {'COOLDOWN','WAIT_CANDLE'};stop.done=True
         with tempfile.TemporaryDirectory() as tmp:
-            config=dict(backend='mt5_direct_v1',time_profile=BYBIT_PROFILE,expected_server='Bybit-Live-6',expected_login=111111111,
+            config=dict(backend='mt5_direct_v1',time_profile=BYBIT_PROFILE,market_time_mode="fixed_utc_v1",expected_server='Bybit-Live-6',expected_login=111111111,
                 symbol='XAUUSD.s',magic=25101102,terminal_path='C:/Program Files/MetaTrader 5/terminal64.exe',enable_trading=True,
                 execution_contract='cycle_scoped_identity_v1',legacy_ea_removed=True,legacy_state_reconciled=True,
                 state_file=str(Path(tmp)/'state.db'),log_file=str(Path(tmp)/'log'),web={'enabled':True})

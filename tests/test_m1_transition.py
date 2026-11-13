@@ -139,7 +139,7 @@ class TransitionNativeControllerTests(unittest.TestCase):
         self.api=RolloverAPI()
         self.api.info=self.api.info._replace(trade_stops_level=1)
         self.store=Store(Path(self.tmp.name)/'state.db');self.addCleanup(self.store.close)
-        cfg=dict(terminal_path='C:/Program Files/MetaTrader 5/terminal64.exe',backend='mt5_direct_v1',time_profile='bybit_live6_time_v1',expected_server='Bybit-Live-6',expected_login=111111111,symbol='XAUUSD.s',magic=25101102,enable_trading=True,execution_contract='cycle_scoped_identity_v1',legacy_ea_removed=True,legacy_state_reconciled=True)
+        cfg=dict(terminal_path='C:/Program Files/MetaTrader 5/terminal64.exe',backend='mt5_direct_v1',time_profile='bybit_live6_time_v1',market_time_mode='fixed_utc_v1',expected_server='Bybit-Live-6',expected_login=111111111,symbol='XAUUSD.s',magic=25101102,enable_trading=True,execution_contract='cycle_scoped_identity_v1',legacy_ea_removed=True,legacy_state_reconciled=True)
         self.broker=MT5EvidenceBroker(cfg,self.store,api=self.api,clock=lambda:self.api.now,monotonic=lambda:self.api.now)
         self.broker.connect();self.addCleanup(self.broker.close)
         safety=self.broker.time_safety

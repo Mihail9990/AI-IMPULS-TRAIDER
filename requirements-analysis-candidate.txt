@@ -1,3 +1,0 @@
-# Compatibility alias for the tested isolated Python 3.13 dependency lock.
-# Not part of the LIVE installer.
--r requirements-analysis.txt

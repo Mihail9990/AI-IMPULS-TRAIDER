@@ -55,7 +55,7 @@ vm.runInContext(source.split('\n').find(line=>line.includes("$('refresh-settings
 accept=false;$('refresh-settings').onclick();assert.equal(reloads,0,'refresh cannot silently discard the draft');
 accept=true;$('refresh-settings').onclick();assert.equal(reloads,1);
 // Draw actual SVG nodes over narrow/wide panes, candle counts and zoom levels.
-Object.assign(ctx,{svg:$('chart'),ns:'svg',lines:[],zoom:1,pan:0,timeOffset:0,visibleCount:60,frameHeight:520,plotBottom:480,plotHeight:450,plotRight:855,innerWidth:1280,preview:null,previewFocus:null,previewWasOpen:false,prefs:{colors:{}},drawAnalysis:()=>{},utcLabel:()=>'',feedUtcVerified:()=>true});
+Object.assign(ctx,{svg:$('chart'),ns:'svg',lines:[],zoom:1,pan:0,timeOffset:0,visibleCount:60,frameHeight:520,plotBottom:480,plotHeight:450,plotRight:855,innerWidth:1280,preview:null,previewFocus:null,previewWasOpen:false,prefs:{colors:{}},utcLabel:()=>'',feedUtcVerified:()=>true});
 vm.runInContext(source.slice(source.indexOf(' const feedUtcVerified='),source.indexOf(' function timeSafetyText()')),ctx);
 vm.runInContext(source.slice(source.indexOf(' function node('),source.indexOf(' function openPreview(')),ctx);
 let cases=0;

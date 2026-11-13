@@ -33,3 +33,7 @@ analysis-install*.log
 *.telegram-outbox.sqlite3*
 .env.*
 telegram-secrets*
+
+# DPAPI-protected local Telegram credentials are never release artifacts.
+telegram-credentials.dpapi
+.telegram-settings-*

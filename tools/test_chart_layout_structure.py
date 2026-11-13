@@ -49,10 +49,10 @@ assert inside('v3-link-status','drawer-content') and not inside('v3-link-toggle'
 # Removed analytics tab cannot be restored through old preferences or navigation.
 for id in ('analysis-page', 'tab-analysis', 'patterns-chart', 'structure-chart', 'main-trend'):
     assert id not in p.nodes, id
-for id in ('liquidity-visible', 'main-analysis-status'):
-    assert inside(id, 'chart-page') and not inside(id, 'chart')
+for id in ('liquidity-visible', 'main-analysis-status', 'zone-opacity'):
+    assert id not in p.nodes, id
 assert "const tabs=['chart','history','settings']" in js
-assert 'createAnalysisUI' not in js and 'mainTrend' not in js
-assert 'analysis-scenario.js' not in (ROOT/'index.html').read_text()
-assert 'function createMainAnalysisUI' in (ROOT/'analysis.js').read_text()
-print('PASS SMC retained, analytics tab and trend controls removed.')
+assert 'createAnalysisUI' not in js and 'mainTrend' not in js and 'mainAnalysisUI' not in js
+assert 'analysis.js' not in (ROOT/'index.html').read_text()
+assert not (ROOT/'analysis.js').exists()
+print('PASS SMC and all analytics controls removed.')

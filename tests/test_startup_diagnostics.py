@@ -20,7 +20,7 @@ class API:
         self.calls=[];self.initialized=True
         self.terminal=NS(connected=True,path=r'C:\MT5')
         self.account=NS(login=987654321,server='Bybit-Live-6',currency='UST',margin_mode=2)
-        self.symbol=NS(visible=True)
+        self.symbol=NS(visible=True,currency_profit='USD',trade_calc_mode=0,trade_contract_size=100.,trade_tick_size=.01,trade_tick_value_profit=1.,trade_tick_value_loss=1.,volume_min=.01,volume_step=.01,volume_max=100.,point=.01,trade_stops_level=0,trade_freeze_level=0)
         self.tick=NS(bid=4000.,ask=4000.1,time=1800000000,time_msc=1800000000100)
         self.bars=[{'time':1799999940},{'time':1800000000}]
     def initialize(self,*args,**kwargs):self.calls.append('initialize');assert kwargs=={'timeout':10000};return self.initialized
@@ -89,9 +89,31 @@ class Diagnostics(unittest.TestCase):
     def test_hidden_symbol(self):
         self.api.symbol.visible=False;self.assertFalse(self.probe());self.assertIn('MT5_SYMBOL',self.text())
     def test_stale_tick_warn_not_guessed_exit_cause(self):
+        self.cfg['market_time_mode']='fixed_utc_v1'
         self.api.tick.time-=100;self.api.tick.time_msc-=100000;self.assertTrue(self.probe());self.assertIn('WARN TICK_STALE',self.text())
     def test_future_tick_no_offset_correction(self):
+        self.cfg['market_time_mode']='fixed_utc_v1'
         self.api.tick.time+=7200;self.api.tick.time_msc+=7200000;self.assertTrue(self.probe());self.assertIn('WARN TICK_FUTURE',self.text())
+    def test_omitted_mode_no_windows_age_warning_or_db_creation(self):
+        self.api.tick.time+=7200;self.api.tick.time_msc+=7200000
+        self.assertTrue(self.probe())
+        self.assertIn('INFO TICK_TIME_UNRESOLVED',self.text())
+        self.assertNotIn('WARN TICK_FUTURE',self.text())
+        self.assertFalse(Path(self.cfg['state_file']).exists())
+    def test_omitted_mode_existing_db_not_opened_or_mutated(self):
+        # Even an inaccessible/unknown binding is not grounds to assume UTC.
+        path=Path(self.cfg['state_file']);path.write_bytes(b'opaque database fixture')
+        self.api.tick.time-=7200;self.api.tick.time_msc-=7200000
+        self.assertTrue(self.probe())
+        self.assertIn('INFO TICK_TIME_UNRESOLVED',self.text())
+        self.assertNotIn('WARN TICK_STALE',self.text())
+        self.assertEqual(path.read_bytes(),b'opaque database fixture')
+    def test_explicit_raw_no_windows_age_warning(self):
+        self.cfg['market_time_mode']='mt5_raw_v1'
+        self.api.tick.time+=7200;self.api.tick.time_msc+=7200000
+        self.assertTrue(self.probe())
+        self.assertIn('OK TICK_OBSERVED',self.text())
+        self.assertNotIn('WARN TICK_FUTURE',self.text())
     def test_tick_invalid(self):
         self.api.tick.time_msc=float('nan');self.assertTrue(self.probe());self.assertIn('TICK_INVALID',self.text())
     def test_no_bars(self):
@@ -132,6 +154,54 @@ class Diagnostics(unittest.TestCase):
     def test_unknown_previous_failure_not_echoed(self):
         (self.root/'data'/'startup-error.txt').write_text('STARTUP SECRET-IN-CODE')
         self.assertTrue(self.runprobe());self.assertNotIn('SECRET',self.text())
+    def test_full_symbol_spec_validated_without_secret_values(self):
+        for field in ('trade_contract_size','trade_tick_size','trade_tick_value_profit','trade_tick_value_loss','volume_min','volume_step','volume_max','point'):
+            with self.subTest(field=field):
+                api=API();setattr(api.symbol,field,0)
+                report=d.Report(self.output)
+                self.assertFalse(d.probe(self.cfg,report,api=api,busy=lambda *a:False))
+                self.assertIn('MT5_SPEC_INCOMPLETE',self.text())
+                self.assertEqual(api.calls,['initialize','shutdown'])
+    def test_missing_spec_metadata_detected(self):
+        del self.api.symbol.trade_tick_value_loss
+        self.assertFalse(self.probe());self.assertIn('MT5_SPEC_INCOMPLETE',self.text())
+    def test_nonfinite_and_invalid_spec_metadata_redacted(self):
+        for value in (float('nan'),float('inf'),'SECRET-METADATA'):
+            self.api.symbol.trade_contract_size=value
+            self.assertFalse(self.probe());self.assertIn('MT5_SPEC_NUMERIC',self.text())
+            self.assertNotIn('SECRET-METADATA',self.text())
+    def test_invalid_spec_limits(self):
+        self.api.symbol.trade_freeze_level=-1
+        self.assertFalse(self.probe());self.assertIn('MT5_SPEC_LIMITS',self.text())
+    def test_raw_tick_not_compared_to_windows(self):
+        self.cfg['market_time_mode']='mt5_raw_v1'
+        self.api.tick.time+=7200;self.api.tick.time_msc+=7200000
+        self.assertTrue(self.probe());self.assertIn('TICK_OBSERVED',self.text())
+        self.assertNotIn('TICK_FUTURE',self.text());self.assertNotIn('TICK_STALE',self.text())
+    def test_invalid_raw_tick_identity_detected_and_redacted(self):
+        self.cfg['market_time_mode']='mt5_raw_v1';self.api.tick.flags='SECRET-TICK'
+        self.assertFalse(self.probe());self.assertIn('MT5_RAW_TICK_IDENTITY',self.text())
+        self.assertIn('STAGE_RAW_TICK',self.text());self.assertNotIn('SECRET-TICK',self.text())
+        self.assertEqual(self.api.calls,['initialize','shutdown'])
+    def test_symbol_failure_runtime_stage_is_fixed_and_secret_free(self):
+        from tradfi.broker import Spec
+        try:Spec.load(dict(symbol='SECRET',currency='UST'))
+        except Exception as exc:
+            # KeyError is intentionally not diagnosed as a known failure;
+            # the stage is still identified without echoing exception content.
+            text=write_failure(self.config,exc)
+        self.assertIn('STAGE SYMBOL_SPEC',text);self.assertNotIn('SECRET',text)
+    def test_previous_failure_stage_allowlisted_only(self):
+        path=self.root/'data'/'startup-error.txt'
+        path.write_text('STARTUP MT5_SPEC_INCOMPLETE\nSTAGE SYMBOL_SPEC\nSECRET')
+        self.assertTrue(self.runprobe());self.assertIn('STAGE_SYMBOL_SPEC',self.text())
+        self.assertNotIn('SECRET',self.text())
+        path.write_text('STARTUP STARTUP_UNKNOWN\nSTAGE SECRET-PATH')
+        self.assertTrue(self.runprobe());self.assertNotIn('SECRET-PATH',self.text())
+    def test_new_failure_reasons_are_exact_only(self):
+        for message,code in [('Incomplete/nonpositive live symbol specification','MT5_SPEC_INCOMPLETE'),('Invalid stop/freeze levels','MT5_SPEC_LIMITS'),('Invalid native tick identity','MT5_RAW_TICK_IDENTITY'),('INVALID_MONOTONIC_CLOCK','MONOTONIC_CLOCK')]:
+            self.assertEqual(reason(ValueError(message)),code)
+            self.assertEqual(reason(ValueError(message+' SECRET')),'STARTUP_UNKNOWN')
     def manager(self,runner):
         m=installer.Manager(self.root,runner=runner,report=lambda x:None);m.current_release=lambda:self.root/'release';return m
     def test_manager_timeout_no_service_launch(self):

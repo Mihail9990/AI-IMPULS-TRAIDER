@@ -52,10 +52,10 @@ class NativeUTCTest(unittest.TestCase):
         original=self.api.copy_rates_from_pos
         def wrong(*args):return [dict(r,time=r['time']-60) for r in original(*args)]
         self.api.copy_rates_from_pos=wrong;self.assertFalse(self.verifier())
-    def test_default_production_broker_wait_then_verifies_utc_and_enters(self):
+    def test_legacy_production_broker_wait_then_verifies_utc_and_enters(self):
         with tempfile.TemporaryDirectory() as tmp:
             store=Store(Path(tmp)/'state.db');self.addCleanup(store.close)
-            config=dict(terminal_path='C:/Program Files/MetaTrader 5/terminal64.exe',backend='mt5_direct_v1',time_profile='bybit_live6_time_v1',expected_server='Bybit-Live-6',expected_login=111111111,symbol='XAUUSD.s',magic=25101102,enable_trading=True,execution_contract='cycle_scoped_identity_v1',legacy_ea_removed=True,legacy_state_reconciled=True)
+            config=dict(terminal_path='C:/Program Files/MetaTrader 5/terminal64.exe',backend='mt5_direct_v1',time_profile='bybit_live6_time_v1',market_time_mode='fixed_utc_v1',expected_server='Bybit-Live-6',expected_login=111111111,symbol='XAUUSD.s',magic=25101102,enable_trading=True,execution_contract='cycle_scoped_identity_v1',legacy_ea_removed=True,legacy_state_reconciled=True)
             self.api.info=self.api.info._replace(trade_stops_level=1)
             broker=MT5EvidenceBroker(config,store,api=self.api,clock=lambda:self.api.now,monotonic=lambda:self.api.now);broker.connect();self.addCleanup(broker.close)
             self.assertIsInstance(broker.time_safety.semantics_verifier,NativeUTCVerifier)
@@ -80,7 +80,7 @@ class NativeUTCTest(unittest.TestCase):
         from tools.check_mt5_utc import main
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'service.json'
-            path.write_text(json.dumps(dict(terminal_path='C:/Program Files/MetaTrader 5/terminal64.exe',backend='mt5_direct_v1',time_profile='bybit_live6_time_v1',expected_server='Bybit-Live-6',expected_login=111111111,symbol='XAUUSD.s',magic=25101102,enable_trading=True)))
+            path.write_text(json.dumps(dict(terminal_path='C:/Program Files/MetaTrader 5/terminal64.exe',backend='mt5_direct_v1',time_profile='bybit_live6_time_v1',market_time_mode='fixed_utc_v1',expected_server='Bybit-Live-6',expected_login=111111111,symbol='XAUUSD.s',magic=25101102,enable_trading=True)))
             def factory(config):
                 self.assertFalse(config['enable_trading'])
                 broker=MT5EvidenceBroker(config,api=self.api,clock=lambda:self.api.now,monotonic=lambda:self.api.now)

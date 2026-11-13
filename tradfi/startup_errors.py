@@ -20,6 +20,12 @@ REASONS = {
  'MT5_ACCOUNT_MISMATCH': 'Счёт или сервер MT5 не совпадает с настройками. Значения намеренно не выводятся.',
  'MT5_CURRENCY_MODE': 'Счёт не удовлетворяет требованиям валюты UST/режима позиций. Проверьте тип счёта.',
  'MT5_SYMBOL': 'XAUUSD.s отсутствует или не показан в Обзоре рынка MT5.',
+ 'MT5_SPEC_INCOMPLETE': 'Спецификация XAUUSD.s неполная или содержит неположительные contract/tick/volume/point. Дождитесь загрузки данных MT5; запуск не разрешён этой проверкой.',
+ 'MT5_SPEC_LIMITS': 'Спецификация XAUUSD.s содержит недопустимые stops/freeze. Значения не подменяются.',
+ 'NUMERIC_DATA': 'Некорректное или неконечное числовое значение. Проверьте этап отказа; исходные значения не выводятся.',
+ 'MT5_SPEC_NUMERIC': 'Числовые поля данных MT5 некорректны или не конечны. Данные не подменяются.',
+ 'MT5_RAW_TICK_IDENTITY': 'Дополнительные поля тика MT5 некорректны. Проверка не меняет котировку.',
+ 'MONOTONIC_CLOCK': 'Монотонные часы процесса недопустимы. Системное время не изменялось.',
  'MT5_QUOTE': 'Котировка отсутствует или некорректна.',
  'MARKET_TIME_STATE': 'Профиль времени или ожидаемый счёт/сервер отличается от сохранённой базы. Запуск остановлен даже без открытых позиций: команды, долг, история и курсор сохранены. Для старой базы без привязки допустим только offset 0. Верните прежний профиль; не удаляйте базу и не сдвигайте сохранённые метки времени.',
  'TIME_PROFILE': 'Не выполнены требования профиля времени. Диагностика не меняет часы или допуски.',
@@ -46,6 +52,12 @@ _EXACT = {
  'UST hedging account required':'MT5_CURRENCY_MODE',
  'XAUUSD.s must already be visible in Market Watch':'MT5_SYMBOL',
  'Invalid executable quote':'MT5_QUOTE',
+ 'Incomplete/nonpositive live symbol specification':'MT5_SPEC_INCOMPLETE',
+ 'Invalid stop/freeze levels':'MT5_SPEC_LIMITS',
+ 'Invalid decimal':'NUMERIC_DATA',
+ 'Non-finite decimal':'NUMERIC_DATA',
+ 'Invalid native tick identity':'MT5_RAW_TICK_IDENTITY',
+ 'INVALID_MONOTONIC_CLOCK':'MONOTONIC_CLOCK',
  'Web server requires loopback':'WEB_CONFIG', 'Invalid loopback port':'WEB_CONFIG',
  'web must be a configuration object':'WEB_CONFIG', 'web.enabled must be boolean':'WEB_CONFIG',
  'web должен быть объектом настроек.':'WEB_CONFIG',
@@ -67,11 +79,36 @@ def reason(exc):
     # Equality to fixed literals only; the raw text is never included in output.
     return _EXACT.get(str(exc),'STARTUP_UNKNOWN')
 
+# Match fixed code locations only, never serialize traceback text, paths or locals.
+_STAGE_FRAMES = {
+    ('mt5_adapter.py', 'connect'): 'MT5_CONNECT',
+    ('mt5_adapter.py', '_context'): 'MT5_CONTEXT',
+    ('broker.py', 'load'): 'SYMBOL_SPEC',
+    ('raw_market_time.py', 'observe'): 'RAW_TICK',
+    ('market_time_state.py', 'bind_market_time_state'): 'STATE_BINDING',
+    ('storage.py', '__init__'): 'STATE_OPEN',
+    ('engine.py', '__init__'): 'CONTROLLER_INIT',
+    ('web_control.py', '__init__'): 'PANEL_INIT',
+    ('web_auth.py', 'resolve_password'): 'WEB_AUTH',
+    ('web_auth.py', 'validate_password'): 'WEB_AUTH',
+}
+STAGES = frozenset(_STAGE_FRAMES.values()) | {'UNKNOWN'}
+
+def failure_stage(exc):
+    result = 'UNKNOWN'
+    tb = exc.__traceback__
+    while tb is not None:
+        code = tb.tb_frame.f_code
+        # Basename is compared only; it is never returned to the report.
+        result = _STAGE_FRAMES.get((Path(code.co_filename).name, code.co_name), result)
+        tb = tb.tb_next
+    return result
+
 def write_failure(config_path,exc):
     code=reason(exc)
     names={ValueError:'ValueError',OSError:'OSError',TimeoutError:'TimeoutError',FileNotFoundError:'FileNotFoundError',PermissionError:'PermissionError',TypeError:'TypeError',RuntimeError:'RuntimeError',json.JSONDecodeError:'JSONDecodeError'}
     label=names.get(type(exc),'Exception')
-    message='STARTUP '+code+'\nТип: ('+label+')\n'+REASONS[code]+'\n'
+    message='STARTUP '+code+'\nSTAGE '+failure_stage(exc)+'\nТип: ('+label+')\n'+REASONS[code]+'\n'
     path=Path(config_path).resolve().parent/'startup-error.txt'
     try: path.write_text(datetime.now(timezone.utc).isoformat()+'\n'+message,encoding='utf-8-sig')
     except OSError: pass

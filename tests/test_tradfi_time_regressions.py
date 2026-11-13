@@ -160,7 +160,7 @@ class TimeRegressions(unittest.TestCase):
     def native(self):
         self.broker.close(); self.store.close()
         self.api = NativeAPI(); self.path = self.path.with_name('native-regression.db')
-        self.config.update(time_profile=BYBIT_PROFILE, execution_contract='cycle_scoped_identity_v1')
+        self.config.update(time_profile=BYBIT_PROFILE,market_time_mode="fixed_utc_v1", execution_contract='cycle_scoped_identity_v1')
         self.restart()
 
     def test_unverified_raw_times_do_not_prevent_owned_observation(self):

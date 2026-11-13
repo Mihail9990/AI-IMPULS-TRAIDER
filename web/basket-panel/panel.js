@@ -356,7 +356,6 @@
   const d=domain(),y=p=>plotBottom-(p-d.min)/(d.max-d.min)*plotHeight;svg.replaceChildren();
   for(let i=0;i<=6;i++){const price=d.min+(d.max-d.min)*i/6,py=y(price);svg.append(node('line',{x1:0,x2:plotRight,y1:py,y2:py,stroke:colors.grid}),node('text',{x:badgeX+7,y:py+5,fill:'#afc0d2','font-size':labelSize},price.toFixed(2)));}
   const candles=visibleCandles(),w=(plotRight-20)/Math.max(3,candles.length+2);svg.dataset.firstCandle=String(marketCoordinate(candles[0])??'');svg.dataset.visibleCount=String(candles.length);candles.forEach((c,i)=>{const x=10+(i+.5)*w,green=Number(c.close)>=Number(c.open),color=green?colors.up:colors.down;svg.append(node('line',{x1:x,x2:x,y1:y(Number(c.high)),y2:y(Number(c.low)),stroke:color}),node('rect',{x:x-w*.3,y:Math.min(y(Number(c.open)),y(Number(c.close))),width:Math.max(2,w*.6),height:Math.max(1,Math.abs(y(Number(c.open))-y(Number(c.close)))),fill:color}));});
-  if(typeof mainAnalysisUI!=='undefined')mainAnalysisUI?.draw({svg,candles,x:i=>10+(i+.5)*w,y,left:0,right:plotRight,top:20,bottom:plotBottom});
   for(const l of lines){const py=y(l.price);if(py<0||py>frameHeight)continue;const g=node('g',{'data-line':l.key,visibility:prefs.mainCycle?'visible':'hidden'});g.append(node('line',{x1:0,x2:plotRight,y1:py,y2:py,stroke:l.color,'stroke-width':4,'stroke-dasharray':'none'}),node('line',{x1:0,x2:plotRight,y1:py,y2:py,stroke:'transparent','stroke-width':18}));g.append(node('title',{},l.label+' '+l.price.toFixed(2)));if(!labelRows.some(row=>Math.abs(row-py)<labelSize)){g.append(node('text',{x:badgeX+7,y:py-5,fill:l.color,'font-size':labelSize-2},l.price.toFixed(2)));labelRows.push(py);}svg.append(g);}
   // Bid/Ask are display-only live quote lines, never draggable trading levels.
   const quoteLabels=[];
@@ -465,7 +464,7 @@
   $('reverse-enable').disabled=!!pending||busy||view.reverse_controls?.can_enable!==true;
   $('reverse-disable').disabled=!!pending||busy||view.reverse_controls?.can_disable!==true;
   $('reverse-enable').title=view.reverse_controls?.reason??'';$('reverse-disable').title=view.reverse_controls?.reason??'';
-  diagnosticRenderComponent='FIELDS';if(loadedScope!==view.scope){fields();loadedScope=view.scope;}diagnosticRenderComponent='V3';v3Render();mainAnalysisUI?.updateFeed(view.feed,v3Fresh);diagnosticRenderComponent='CHART';draw();
+  diagnosticRenderComponent='FIELDS';if(loadedScope!==view.scope){fields();loadedScope=view.scope;}diagnosticRenderComponent='V3';v3Render();diagnosticRenderComponent='CHART';draw();
  }
  async function poll(){
   if(polling||busy)return;polling=true;diagnosticRenderComponent=null;
@@ -489,20 +488,18 @@
    const interrupted=['FETCH','PARSE'].includes(stage)?(e?.name==='TimeoutError'?'REQUEST_TIMEOUT':e?.name==='AbortError'?'REQUEST_ABORTED':null):null;
    const reason=interrupted??(stage==='FETCH'?(httpStatus>=400?'HTTP_ERROR':'NETWORK_ERROR'):({PARSE:'JSON_INVALID',VALIDATE:'CONTRACT_MISMATCH',RECONCILE:'RECONCILE_ERROR',RENDER:'RENDER_ERROR'}[stage]??'OTHER'));
    diagnosticRecord({source:'STATE',stage,outcome:'ERROR',reason,error_type:e?.name,http_status:httpStatus,request_ms:diagnosticNow()-started,...timings,...diagnosticFacts()});
-   try{renderMt5TimeControls();diagnosticRenderComponent='RECOVERY_ANALYSIS';mainAnalysisUI?.updateFeed(view?.feed,false);if(view){diagnosticRenderComponent='RECOVERY_V3';v3Render();diagnosticRenderComponent='RECOVERY_STATUS';connectionLabel();updateBotActivity();diagnosticRenderComponent='RECOVERY_CHART';draw();}}
+   try{renderMt5TimeControls();if(view){diagnosticRenderComponent='RECOVERY_V3';v3Render();diagnosticRenderComponent='RECOVERY_STATUS';connectionLabel();updateBotActivity();diagnosticRenderComponent='RECOVERY_CHART';draw();}}
    catch(recoveryError){diagnosticRecord({source:'STATE',stage:'RECOVERY_RENDER',outcome:'ERROR',reason:'RECOVERY_RENDER_ERROR',error_type:recoveryError?.name,...diagnosticFacts()});}
    const message={FETCH:'Нет свежего снимка',PARSE:'Ответ сервера не прочитан',VALIDATE:'Несовместимый снимок контроллера',RECONCILE:'Ошибка обработки снимка',RENDER:'Ошибка отображения снимка'}[stage]??'Ошибка снимка';
    $('feed-status').textContent=message+' ['+reason+']. Команды заблокированы.';
   }finally{polling=false;}
  }
- const defaultPrefs={mainCycle:true,liquidity:false,opacity:20,colors:{BUY:'#26a69a',SELL:'#ef5350',sl:'#ef5350',tp:'#26a69a',entry:'#e0b565',up:'#26a69a',down:'#ef5350',grid:'#25282e',zone:'#e0b565'}};
- let prefs=structuredClone(defaultPrefs);try{const saved=JSON.parse(localStorage.getItem('chart-preferences-v1')??'null');if(saved){for(const k of ['mainCycle','liquidity'])if(typeof saved[k]==='boolean')prefs[k]=saved[k];if(Number.isFinite(saved.opacity))prefs.opacity=Math.max(0,Math.min(100,saved.opacity));for(const k of Object.keys(prefs.colors))if(/^#[0-9a-f]{6}$/i.test(saved.colors?.[k]))prefs.colors[k]=saved.colors[k];}}catch{}
- const savePrefs=()=>{localStorage.setItem('chart-preferences-v1',JSON.stringify(prefs));layout();mainAnalysisUI?.refresh();draw();};
- const mainAnalysisUI=typeof createMainAnalysisUI==='function'?createMainAnalysisUI({document,fetch,getHeaders:headers,getPreferences:()=>prefs,diagnostics,onChange:()=>requestAnimationFrame(draw)}):null;
- function layout(){$('main-cycle').checked=prefs.mainCycle;$('liquidity-visible').checked=prefs.liquidity;$('zone-opacity').value=prefs.opacity;}
- for(const [id,key]of [['main-cycle','mainCycle'],['liquidity-visible','liquidity']])$(id).onchange=e=>{prefs[key]=e.target.checked;savePrefs();};
- $('zone-opacity').oninput=e=>{prefs.opacity=Number(e.target.value);savePrefs();};
- const colorNames={BUY:'BUY STOP',SELL:'SELL STOP',sl:'SL',tp:'TP',entry:'Вход',up:'Растущая свеча',down:'Падающая свеча',grid:'Сетка',zone:'Зоны SMC'};
+ const defaultPrefs={mainCycle:true,colors:{BUY:'#26a69a',SELL:'#ef5350',sl:'#ef5350',tp:'#26a69a',entry:'#e0b565',up:'#26a69a',down:'#ef5350',grid:'#25282e'}};
+ let prefs=structuredClone(defaultPrefs);try{const saved=JSON.parse(localStorage.getItem('chart-preferences-v1')??'null');if(saved){for(const k of ['mainCycle'])if(typeof saved[k]==='boolean')prefs[k]=saved[k];for(const k of Object.keys(prefs.colors))if(/^#[0-9a-f]{6}$/i.test(saved.colors?.[k]))prefs.colors[k]=saved.colors[k];}}catch{}
+ const savePrefs=()=>{localStorage.setItem('chart-preferences-v1',JSON.stringify(prefs));layout();draw();};
+ function layout(){$('main-cycle').checked=prefs.mainCycle;}
+ for(const [id,key]of [['main-cycle','mainCycle']])$(id).onchange=e=>{prefs[key]=e.target.checked;savePrefs();};
+ const colorNames={BUY:'BUY STOP',SELL:'SELL STOP',sl:'SL',tp:'TP',entry:'Вход',up:'Растущая свеча',down:'Падающая свеча',grid:'Сетка'};
  for(const [k,v]of Object.entries(prefs.colors)){const label=document.createElement('label');label.textContent=colorNames[k];const input=document.createElement('input');input.type='color';input.id='color-'+k;input.value=v;input.oninput=()=>{prefs.colors[k]=input.value;savePrefs();};label.append(input);$('color-fields').append(label);}
  let logPage=0;let logViewSequence=0;
  async function showLogs(){
@@ -618,7 +615,7 @@
  // Presentation-only navigation: the LIVE role and API paths never change.
  let activeTab='chart';
  const tabs=['chart','history','settings'];
- function setTab(tab){if(preview)return;cancelGesture();cancelSidePanelDrags();for(const name of [...sidePanelOrder])setSidePanel(name,false);activeTab=tabs.includes(tab)?tab:'chart';for(const name of tabs){$(name+'-page').hidden=activeTab!==name;$('tab-'+name).setAttribute('aria-selected',String(activeTab===name));$('tab-'+name).setAttribute('tabindex',activeTab===name?'0':'-1');}if(typeof mainAnalysisUI!=='undefined')mainAnalysisUI?.setVisible(activeTab==='chart');requestAnimationFrame(draw);}
+ function setTab(tab){if(preview)return;cancelGesture();cancelSidePanelDrags();for(const name of [...sidePanelOrder])setSidePanel(name,false);activeTab=tabs.includes(tab)?tab:'chart';for(const name of tabs){$(name+'-page').hidden=activeTab!==name;$('tab-'+name).setAttribute('aria-selected',String(activeTab===name));$('tab-'+name).setAttribute('tabindex',activeTab===name?'0':'-1');}requestAnimationFrame(draw);}
  for(const name of tabs){$('tab-'+name).onclick=()=>setTab(name);$('tab-'+name).setAttribute('tabindex',name==='chart'?'0':'-1');$('tab-'+name).addEventListener('keydown',e=>{if(['ArrowLeft','ArrowRight','Home','End'].includes(e.key)){e.preventDefault();if(preview)return;const other=e.key==='Home'?tabs[0]:e.key==='End'?tabs.at(-1):tabs[(tabs.indexOf(name)+(e.key==='ArrowRight'?1:tabs.length-1))%tabs.length];setTab(other);$('tab-'+other).focus();}});}
  function setDrawer(open){$('command-drawer').dataset.open=String(open);$('drawer-toggle').setAttribute('aria-expanded',String(open));$('drawer-content').hidden=!open;requestAnimationFrame(draw);}
  $('drawer-toggle').onclick=()=>setDrawer($('command-drawer').dataset.open!=='true');

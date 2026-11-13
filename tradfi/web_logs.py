@@ -52,8 +52,8 @@ class DiagnosticLogs:
         self.failures+=1
     def _writer(self):
         try:
-            from .telegram_logs import from_environment
-            self.telegram=from_environment(self.runtime_path)
+            from .telegram_logs import from_settings
+            self.telegram=from_settings(self.runtime_path)
             if self.telegram:
                 self.telegram.start();self.telegram_status="ENABLED"
         except Exception:

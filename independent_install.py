@@ -234,6 +234,14 @@ def gui(role,root=None):
     def settings():
         try:manager.prepare_settings();os.startfile(str(manager.config_path),'edit')
         except Exception:messagebox.showerror('Настройки','Сначала установите приложение. Проверьте его service.json.')
+    def telegram_settings():
+        if busy or child:return
+        try:
+            config=manager.config()
+            if not config or not config.get('log_file'):raise ValueError()
+            from tradfi.telegram_settings import dialog
+            dialog(app,config['log_file'])
+        except Exception:messagebox.showerror('Telegram','Сначала установите приложение. Настройки Telegram не изменены.')
     def stop():
         if child and messagebox.askyesno('Остановка '+role.upper(),'Остановить только этот процесс? Это не закрывает позиции и не отменяет ордера.'):
             try:manager.request_stop(session)
@@ -250,6 +258,7 @@ def gui(role,root=None):
         options.append(('Диагностика',lambda:work(manager.diagnose)))
     for label,fn in options:
         b=ttk.Button(row,text=label,command=fn);b.pack(side='left',padx=2);buttons.append(b)
+    telegram_button=ttk.Button(app,text='Настройки Telegram · логи .txt',command=telegram_settings);telegram_button.pack(pady=4);buttons.append(telegram_button)
     stop_button=ttk.Button(app,text='Остановить '+role.upper(),command=stop,state='disabled');stop_button.pack(pady=4)
     ttk.Label(app,text='Локальная панель: http://127.0.0.1:8765\nОбновление не меняет настройки и базу. MT5 остаётся внешним источником.').pack(pady=8)
     def poll():

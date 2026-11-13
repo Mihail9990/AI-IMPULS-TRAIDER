@@ -51,7 +51,7 @@ class TimePanelTests(unittest.TestCase):
         return json.loads(json.dumps(view, allow_nan=False))
 
     def test_panel_sync_and_migration_replace_time_caches_without_trade(self):
-        old_feed = self.panel.feed; old_analysis = self.panel.analysis
+        old_feed = self.panel.feed
         view = self.action('clock_align_01', '/sync_mt5_time')
         self.assertEqual(view['time_status']['display_clock']['status'], 'ALIGNED')
         self.assertEqual(view['time_status']['market_time_mode'], 'fixed_utc_v1')
@@ -62,8 +62,6 @@ class TimePanelTests(unittest.TestCase):
         self.assertFalse(view['time_status']['can_switch_raw'])
         self.assertTrue(view['read_only']); self.assertTrue(view['stopped'])
         self.assertIsNot(self.panel.feed, old_feed)
-        self.assertIsNot(self.panel.analysis, old_analysis)
-        self.assertIs(self.panel.transport.analysis, self.panel.analysis)
         self.assertNotEqual(self.panel.feed.instance, old_feed.instance)
         self.assertIsNone(self.panel.snapshot)
         self.assertEqual(view['feed']['candles'], [])

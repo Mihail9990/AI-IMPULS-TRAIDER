@@ -66,21 +66,33 @@ def bind_market_time_state(store, config):
 
 
 def resolve_market_time_config(store, config):
-    """Only a committed panel migration may override a legacy implicit UTC config.
+    """Recover the persisted clock contract without asking for a manual offset.
 
-    Explicit fixed mode remains an operator demand and is never overridden.
-    Raw-native bindings without the authority marker retain strict old behavior.
+    Explicit options remain demands and are checked by bind_market_time_state.
+    Missing options never reinterpret existing timestamps or monetary state.
     """
     result = dict(config)
     table = store.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='market_time_binding'").fetchone()
     row = store.db.execute('SELECT payload FROM market_time_binding WHERE id=1').fetchone() if table else None
     if not row:
+        # Fresh production installs use raw MT5 time. Unbound legacy rows retain
+        # their old UTC-zero interpretation until the explicit panel migration.
+        if ('market_time_mode' not in config and 'market_time_offset_seconds' not in config
+                and config.get('time_profile') == 'bybit_live6_time_v1'):
+            tables = [r[0] for r in store.db.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+            has_state = any(store.db.execute('SELECT 1 FROM "' + name.replace('"', '""') + '" LIMIT 1').fetchone()
+                            for name in tables if not name.startswith('sqlite_') and name != 'market_time_binding')
+            result['market_time_mode'] = 'fixed_utc_v1' if has_state else RAW_MARKET_MODE
         return result
     try:
         binding = json.loads(row[0])
     except (ValueError, TypeError):
         raise MarketTimeStateError('Invalid persisted market-time binding; state preserved') from None
     if binding.get('migration_authority') != 'panel_explicit_v1':
+        if 'market_time_mode' not in config:
+            result['market_time_mode'] = binding.get('market_time_mode', 'fixed_utc_v1')
+        if 'market_time_offset_seconds' not in config:
+            result['market_time_offset_seconds'] = binding.get('market_time_offset_seconds', 0)
         return result
     if (binding.get('market_time_mode') != RAW_MARKET_MODE
             or binding.get('market_time_offset_seconds') != 0
