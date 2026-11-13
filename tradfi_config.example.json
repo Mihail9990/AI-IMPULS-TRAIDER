@@ -7,6 +7,7 @@
   "expected_login": null,
   "symbol": "XAUUSD.s",
   "magic": 25101102,
+  "execution_contract": "cycle_scoped_identity_v1",
   "enable_trading": false,
   "legacy_ea_removed": false,
   "legacy_state_reconciled": false,

@@ -3,6 +3,7 @@ from contextlib import closing, contextmanager, nullcontext, ExitStack
 import hashlib
 import io
 import json
+import ntpath
 import os
 from pathlib import Path
 import queue
@@ -168,35 +169,104 @@ def state_path(root,config):
     return p.resolve() if p.is_absolute() else (root/'data'/p).resolve()
 
 
-def inspect_state(root, config, instance="live"):
+def _empty_initial_state(db, config):
+    """Recognize only a never-started store. Preserve every binding and byte.
+
+    Runtime binds the DB before MT5 connect. A failed first connect can leave
+    these tables without a controller snapshot. Any operational row or unknown
+    schema still requires reconciliation, never an automatic reset.
+    """
+    schemas = {
+        'snapshot': 'id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL',
+        'audit': 'seq INTEGER PRIMARY KEY, event TEXT NOT NULL, payload TEXT NOT NULL',
+        'market_time_binding': 'id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL',
+        'mt5_binding': 'id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL',
+        'mt5_commands': 'id TEXT PRIMARY KEY, payload TEXT NOT NULL',
+        'mt5_facts': 'kind TEXT, ticket TEXT, payload TEXT NOT NULL, PRIMARY KEY(kind,ticket)',
+        'mt5_events': 'seq INTEGER PRIMARY KEY, payload TEXT NOT NULL',
+        'consumed_deals': 'backend TEXT, account TEXT, ticket TEXT, payload TEXT NOT NULL, PRIMARY KEY(backend,account,ticket)',
+    }
+    objects = db.execute("SELECT type,name,sql FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'").fetchall()
+    tables = {name for kind, name, sql in objects if kind == 'table'}
+    if not {'snapshot', 'audit'} <= tables or not tables <= schemas.keys(): return False
+    if any(kind != 'table' for kind, name, sql in objects): return False
+    normalize=lambda sql: re.sub(r'\s+', '', sql).lower()
+    for kind,table,sql in objects:
+        if normalize(sql)!=normalize('CREATE TABLE '+table+' ('+schemas[table]+')'): return False
+        if table in {'market_time_binding', 'mt5_binding'}:
+            rows = db.execute('SELECT id,payload FROM '+table).fetchall()
+            if len(rows)>1: return False
+            for i,payload in rows:
+                value=json.loads(payload)
+                if i!=1 or not isinstance(value,dict): return False
+                if table=='market_time_binding':
+                    expected=dict(version=2,market_time_offset_seconds=0,
+                                  expected_server=config.get('expected_server'),
+                                  expected_login=config.get('expected_login'),
+                                  market_time_mode='mt5_raw_v1',timestamp_semantics='BROKER_RAW')
+                    # Only the new raw-mode bootstrap is repairable here.
+                    if config.get('market_time_mode')!='mt5_raw_v1' or value!=expected: return False
+                else:
+                    expected=dict(backend='mt5_direct_v1',time_profile=config.get('time_profile'),
+                                  account=str(config.get('expected_login'))+'@'+str(config.get('expected_server')),
+                                  symbol=config.get('symbol'),magic=config.get('magic'),currency='UST',
+                                  terminal=ntpath.normcase(ntpath.normpath(config.get('terminal_path',''))))
+                    if value!=expected: return False
+        elif db.execute('SELECT 1 FROM '+table+' LIMIT 1').fetchone(): return False
+    return True
+
+
+def inspect_state(root, config, instance="live", *, require_quiescent=True):
     p=state_path(root,config); binding=binding_path(root,instance)
     if binding.exists():
         if read_json(binding)!={'path':str(p)} or not p.is_file():
             raise SetupError('Путь сохранённой SQLite изменён или файл потерян. Автосброс запрещён.')
     if not p.exists(): return
+    reason='STATE_UNREADABLE'
     try:
         db=sqlite3.connect(p.as_uri()+'?mode=ro',uri=True)
         try:
             db.execute('PRAGMA query_only=ON')
             db.execute('BEGIN')
+            reason='INTEGRITY_CHECK_FAILED'
             if db.execute('PRAGMA integrity_check').fetchone()[0]!='ok': raise ValueError()
+            # A software update preserves state without interpreting it.
+            # Runtime reconciliation and explicit launch remain separate.
+            if not require_quiescent: return
+            reason='SNAPSHOT_MISSING_OR_INVALID'
             row=db.execute('SELECT payload FROM snapshot WHERE id=1').fetchone()
-            if row is None: raise ValueError()
+            if row is None:
+                if _empty_initial_state(db, config): return
+                raise ValueError()
             s=json.loads(row[0])
-            if s.get('schema')!=1 or s.get('backend')!='mt5_direct_v1' : raise ValueError()
-            if instance=='live' and s.get('ledger_contract')!='deal_ledger_v1':raise ValueError()
+            reason='STATE_SCHEMA_INCOMPATIBLE'
+            if s.get('schema')!=1 or s.get('backend')!='mt5_direct_v1': raise ValueError()
+            reason='LEDGER_CONTRACT_INCOMPATIBLE'
+            if instance=='live' and s.get('ledger_contract')!='deal_ledger_v1': raise ValueError()
+            reason='COMMAND_SCOPE_INCOMPATIBLE'
             if instance=='live' and s.get('commands') and s.get('scope_contract')!='cycle_scope_v1': raise ValueError()
-            if instance=='live' and (s.get('cycle') or s.get('phase') not in {'IDLE','PAUSED','WAIT_START'}): raise ValueError()
+            reason='CYCLE_NOT_FINISHED'
+            if instance=='live' and s.get('cycle'): raise ValueError()
+            reason='PHASE_REQUIRES_RECONCILIATION'
+            if instance=='live' and s.get('phase') not in {'IDLE','PAUSED','WAIT_START'}: raise ValueError()
             if instance=='live':
+                reason='COMMAND_NOT_TERMINAL'
                 if any(v.get('status') not in {'DONE','REJECTED','CANCELLED','FILLED','OBSOLETE'} for v in s.get('commands',{}).values()): raise ValueError()
+                reason='COMMAND_JOURNAL_MISMATCH'
                 journal=db.execute('SELECT id FROM mt5_commands').fetchall()
                 if any(cid not in s.get('commands',{}) for (cid,) in journal): raise ValueError()
+            reason='DEAL_LEDGER_MISMATCH'
             tickets=[r[0] for r in db.execute('SELECT ticket FROM consumed_deals')]
             seen=s.get('seen_deals',[])
             if len(seen)!=len(set(seen)) or len(tickets)!=len(set(tickets)) or set(tickets)!=set(seen): raise ValueError()
         finally: db.close()
     except Exception:
-        raise SetupError('Состояние активно, неизвестно или несовместимо. Обновление/rollback заблокировано; SQLite сохранена.') from None
+        if not require_quiescent:
+            raise SetupError('Не удалось прочитать или проверить целостность файла SQLite ['+reason+']. '
+                             'Это ошибка файла, а не активного состояния. Данные сохранены; обновление не выполнено.') from None
+        raise SetupError('Обновление/rollback заблокировано ['+reason+']. SQLite сохранена. '
+                         'Остановка процесса не завершает цикл. Нужна проверка сохранённого состояния; '
+                         'не удаляйте SQLite и не создавайте новый сервер для обхода проверки.') from None
 
 
 def account_lock(root, config):
@@ -231,8 +301,8 @@ class Manager:
             stack.enter_context(account_lock(self.root,live))
             stack.enter_context(state_lock(self.root,live))
             yield
-    def inspect_states(self):
-        for instance in ('live',):inspect_state(self.root,self.config(instance),instance)
+    def inspect_states(self, *, require_quiescent=True):
+        for instance in ('live',):inspect_state(self.root,self.config(instance),instance,require_quiescent=require_quiescent)
     def pointer(self):
         path=self.root/'current.json'
         value=read_json(path) if path.exists() else {'current':None,'previous':None}
@@ -271,7 +341,7 @@ class Manager:
         with self.maintenance_guard():
             old=self.pointer()
             if old['current'] and not self.config_path.is_file(): raise SetupError('Конфигурация потеряна.')
-            self.inspect_states()
+            self.inspect_states(require_quiescent=False)
             self.backup()
             sha=latest_sha(self.fetch); self.report(f'{REPO}\nwork → {sha}')
             if sha==old['current']:

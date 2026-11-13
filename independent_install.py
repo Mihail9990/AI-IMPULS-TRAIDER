@@ -128,7 +128,8 @@ class IndependentManager(legacy.Manager):
             if self.role=='live' and not self._migrating:stack.enter_context(legacy.account_lock(self.root,config))
             stack.enter_context(legacy.state_lock(self.root,config))
             yield
-    def inspect_states(self):legacy.inspect_state(self.root,self.config(),self.role)
+    def inspect_states(self, *, require_quiescent=True):
+        legacy.inspect_state(self.root,self.config(),self.role,require_quiescent=require_quiescent)
     def initialize(self,code):
         validate_code(code);self._check_installation()
         marker=self.root/'managed-install.json'

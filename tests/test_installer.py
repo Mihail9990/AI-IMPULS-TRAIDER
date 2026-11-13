@@ -83,22 +83,23 @@ class InstallerTest(unittest.TestCase):
             return real(path,value)
         with patch.object(tool,'atomic_json',side_effect=fail),self.assertRaises(OSError):self.install()
         self.assertEqual(self.manager.pointer()['current'],A)
-    def test_active_unknown_and_foreign_state_block_update(self):
-        self.install();self.sha=B
+    def test_update_preserves_all_states_without_interpreting_them(self):
+        self.install()
         for data in [dict(cycle={'id':'x'}),dict(phase='WAIT_CANDLE'),dict(commands={'x':{'status':'UNKNOWN'}}),dict(backend='file_gateway_v1'),dict(schema=2)]:
             with self.subTest(data=data):
-                self.state(**data)
-                with self.assertRaises(tool.SetupError):self.install()
-        self.assertEqual(self.manager.pointer()['current'],A)
-    def test_orphan_journal_and_ledger_mismatch_block_update(self):
+                p=self.state(**data);before=p.read_bytes()
+                self.sha=B if self.manager.pointer()['current']==A else A
+                self.install()
+                self.assertEqual(self.manager.pointer()['current'],self.sha)
+                self.assertEqual(p.read_bytes(),before)
+    def test_update_preserves_orphan_journal_and_ledger_for_runtime(self):
         self.install();p=self.state();self.sha=B
         with sqlite3.connect(p) as db:
             db.execute("INSERT INTO mt5_commands VALUES('orphan','{}')")
-        with self.assertRaises(tool.SetupError):self.install()
-        with sqlite3.connect(p) as db:
-            db.execute('DELETE FROM mt5_commands')
             db.execute("INSERT INTO consumed_deals VALUES('orphan','{}')")
-        with self.assertRaises(tool.SetupError):self.install()
+        before=p.read_bytes();self.install()
+        self.assertEqual(p.read_bytes(),before)
+        self.assertEqual(self.manager.pointer()['current'],B)
     def test_missing_bound_state_never_resets(self):
         self.install();p=self.state()
         tool.atomic_json(self.root/'data'/'state-binding.json',{'path':str(p)})

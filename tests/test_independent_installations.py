@@ -2,6 +2,7 @@
 import io
 import json
 import os
+import sqlite3
 from pathlib import Path
 import tempfile
 import unittest
@@ -43,6 +44,37 @@ class IndependentInstallationsTest(unittest.TestCase):
         self.sha=B;self.manager.install();self.manager.rollback()
         self.assertEqual(self.manager.pointer()['current'],A)
         self.assertEqual(self.manager.config_path.read_bytes(),before)
+    def test_update_active_state_is_code_only_no_launch_and_bytes_preserved(self):
+        self.manager.install()
+        dbpath=legacy.state_path(self.root,self.manager.config())
+        with sqlite3.connect(dbpath) as db:
+            db.execute('CREATE TABLE snapshot(id INTEGER PRIMARY KEY,payload TEXT)')
+            db.execute('INSERT INTO snapshot VALUES(1,?)',(json.dumps(dict(
+                phase='SAFE_PAUSE',cycle={'id':'active','recovery':'12.34'},
+                commands={'pending':{'status':'UNKNOWN'}})),))
+        legacy.atomic_json(legacy.binding_path(self.root),{'path':str(dbpath)})
+        before=dbpath.read_bytes();cfg=self.manager.config_path.read_bytes()
+        self.sha=B
+        with patch('subprocess.Popen',side_effect=AssertionError('Update must not launch bot')):
+            self.manager.install()
+        self.assertEqual(self.manager.pointer()['current'],B)
+        self.assertEqual(dbpath.read_bytes(),before)
+        self.assertEqual(self.manager.config_path.read_bytes(),cfg)
+        with self.assertRaises(legacy.SetupError):self.manager.rollback()
+    def test_update_corrupt_database_still_blocked_as_file_error(self):
+        self.manager.install();dbpath=legacy.state_path(self.root,self.manager.config())
+        dbpath.write_bytes(b'not a SQLite database');self.sha=B
+        with self.assertRaisesRegex(legacy.SetupError,'ошибка файла'):self.manager.install()
+        self.assertEqual(dbpath.read_bytes(),b'not a SQLite database')
+        self.assertEqual(self.manager.pointer()['current'],A)
+    def test_update_does_not_require_any_snapshot_schema(self):
+        self.manager.install();dbpath=legacy.state_path(self.root,self.manager.config())
+        with sqlite3.connect(dbpath) as db:
+            db.execute('CREATE TABLE future_state(payload TEXT)')
+            db.execute("INSERT INTO future_state VALUES('opaque future state')")
+        before=dbpath.read_bytes();self.sha=B;self.manager.install()
+        self.assertEqual(dbpath.read_bytes(),before)
+        self.assertEqual(self.manager.pointer()['current'],B)
     def test_legacy_contract_rejected_with_pointer_and_data_intact(self):
         self.manager.install();before=self.manager.config_path.read_bytes();self.sha=B
         blob=archive(B);out=io.BytesIO()
