@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>AI Impuls · __PANEL_ROLE__</title>
+<link rel="stylesheet" href="panel.css">
+</head>
+<body>
+<main><section id="login" class="card"><h2>Вход</h2>
+<label>Пароль сервиса<input id="password" type="password" autocomplete="current-password"></label><button id="login-button">Войти</button><p id="login-error" role="alert"></p>
+<p>Пароль задаётся локально в конфигурации этого сервиса → web.password. От 5 символов только внутри VPS; для HTTPS-доступа — от 32. Короткий пароль нельзя использовать через внешний прокси.</p></section>
+<div id="workspace" hidden><section id="bot-activity" role="region" aria-label="Уведомления и состояние бота" tabindex="0"><div id="activity-totals" aria-label="Итоги RECOVERY"><div><small>RECOVERY</small><strong id="activity-recovery">—</strong></div><div><small>Общий результат</small><strong id="activity-total-net">—</strong></div></div><p id="activity-provisional-recovery" role="status" hidden></p><p id="activity-totals-note" role="status" hidden></p><p id="bot-activity-warning" role="status"></p><p id="bot-activity-state" aria-live="polite">Ожидание снимка контроллера.</p><p id="bot-activity-action"></p><p id="action-error" role="alert"></p></section>
+<section id="chart-page" role="tabpanel" aria-labelledby="tab-chart"><section class="card chart-card"><div id="chart-and-tools">
+<div id="chart-workspace">
+<div id="main-pane"><div class="chart"><svg id="chart" viewBox="0 0 1000 520" role="img" aria-label="График M1 с фактическими ордерами, входами, SL и индивидуальными TP"></svg></div></div>
+
+</div>
+</div>
+</section>
+<aside id="v3-panels" aria-label="Ручное управление RECOVERY V3" hidden>
+<div class="side-panel-tabs" aria-label="Боковые панели"><button id="toggle-sl-panel" type="button" aria-expanded="false" aria-controls="v3-sl-panel" aria-label="Открыть контроль SL" title="Контроль SL: нажмите или потяните вправо">&gt;</button><button id="toggle-entry-panel" type="button" aria-expanded="false" aria-controls="v3-entry-panel" aria-label="Открыть выставление ордеров" title="Ордера: нажмите или потяните вправо">&gt;</button></div><section id="v3-sl-panel" class="side-panel" role="region" aria-labelledby="sl-panel-title" inert><div class="side-panel-heading"><h2 id="sl-panel-title">SL контроль</h2><button id="close-sl-panel" type="button" aria-label="Закрыть контроль SL">✕</button></div>
+<div class="sl-stepper">
+<button id="v3-sl-minus" aria-label="Уменьшить расстояние SL на 0.10">−</button><output id="v3-sl-value" aria-label="Расстояние SL от входа" aria-live="polite">—</output><button id="v3-sl-plus" aria-label="Увеличить расстояние SL на 0.10">+</button>
+</div>
+<button id="v3-sl-confirm" type="button" aria-describedby="v3-sl-status">Подтвердить</button><p id="v3-sl-status" class="visually-hidden"></p></section>
+<section id="v3-entry-panel" class="side-panel" role="region" aria-labelledby="entry-panel-title" inert><div class="side-panel-heading"><h2 id="entry-panel-title">Ордера</h2><button id="close-entry-panel" type="button" aria-label="Закрыть выставление ордеров">✕</button></div><div class="fields">
+<label>Тип<select id="v3-order-type" aria-label="Тип ордеров"><option value="STOP">STOP</option>
+<option value="MARKET">MARKET</option></select></label><label>Когда<select id="v3-timing" aria-label="Когда выставить ордера"><option value="current" title="После закрытия текущей M1">Эта M1</option>
+<option value="next" title="После закрытия следующей M1">След. M1</option>
+<option value="now">Сейчас</option></select></label><label>Сторона<select id="v3-side" aria-label="Направление ордеров"><option value="BUY">BUY</option>
+<option value="SELL">SELL</option></select></label>
+</div>
+<details class="entry-details"><summary aria-label="Показать параметры и описание ордеров">Параметры</summary><p id="v3-direction-note"></p>
+<p id="recovery-selected-summary"></p><p id="recovery-current-summary"></p>
+<p id="v3-entry-distance"></p></details>
+<div class="entry-actions"><button id="v3-submit-entry">Выставить ордера</button><button id="v3-cancel-request" hidden>Отменить ожидание свечи</button><button id="v3-cancel-entry" hidden>Отменить выставленные триггеры</button></div><p id="v3-request-status" role="status"></p>
+<p id="v3-control-reason" role="status"></p></section>
+</aside>
+<section id="command-drawer" aria-label="Панель команд" data-open="false"><button id="drawer-toggle" type="button" aria-expanded="false" aria-controls="drawer-content">Команды</button><div id="drawer-content" hidden="hidden">
+<section class="card cycle-controls"><details id="cycle-keyboard"><summary>Управление позицией</summary><div class="controls">
+<button id="own-entry-sl">SL на точку входа</button><button id="reverse-enable">Обратная SL-лестница…</button><button id="reverse-disable">Отменить обратную лестницу…</button><button id="cancel-initial">Отменить начальный триггер один раз…</button><button id="v3-link-toggle">Выставить триггеры на SL</button>
+</div><p id="v3-link-status" role="status" hidden></p></details>
+</section>
+<details class="level-list"><summary>Уровни SL / TP на графике</summary><div id="level-buttons"></div></details>
+</div></section><div id="preview-backdrop" hidden aria-hidden="true"></div>
+<section id="preview" class="card" hidden role="dialog" aria-modal="true" aria-labelledby="preview-title"><h2 id="preview-title">Правка уровня</h2>
+<p id="preview-text"></p><p id="preview-error" role="alert" aria-live="polite"></p>
+<div class="preview-actions"><label>Цена<input id="new-price" inputmode="decimal"></label><button id="apply-level">Подтвердить</button><button id="cancel-level">Отмена</button></div><p id="preview-scope"></p></section>
+</section><section id="settings-page" role="tabpanel" aria-labelledby="tab-settings" hidden="hidden"><h1>Настройки</h1>
+<header><div>
+<small>AI IMPULS / XAUUSD.s</small><h1>__PANEL_ROLE__</h1>
+</div>
+<button id="logout">Выйти</button></header>
+<section id="mt5-time-controls" class="card" aria-labelledby="mt5-time-title"><h2 id="mt5-time-title">Время MT5</h2>
+<p id="mt5-display-clock" role="timer" aria-live="off">Оценка времени MT5: —</p><p id="mt5-clock-status" role="status">Для оценки времени выполните сверку.</p>
+<div class="controls"><button id="sync-mt5-time" type="button" disabled>Сверить часы MT5…</button><button id="use-mt5-raw-time" type="button" disabled>Использовать время MT5…</button></div>
+<p id="mt5-time-mode" role="status"></p><p id="mt5-switch-reason" role="status"></p>
+<p>Сверка задаёт только отображаемую оценку по последнему доступному тику, даже задержанному. Часы Windows, котировки и торговый режим не меняются. После перезапуска или переподключения сверку нужно повторить.</p></section>
+<details id="service-controls" class="card"><summary>Управление сервисом</summary>
+<div class="controls">
+<button id="start">Старт</button><button id="stop">Стоп новых входов</button><button id="resume">Проверить время…</button><button id="reset">Ручная сверка…</button><button id="reset-pause">Сброс паузы и сверки…</button>
+</div></details><details class="card"><summary>Состояние цикла и связь</summary><div class="stats">
+<article><small>Цикл / этап</small><strong id="phase">—</strong><span id="cycle">—</span></article><article><small>Долг RECOVERY</small><strong id="debt">—</strong><span id="realized">—</span></article><article><small>Защита и связь</small><strong id="feed-status">—</strong><span id="mode">—</span></article>
+</div>
+
+</details>
+<details class="card"><summary id="state-heading">Брокерское состояние</summary>
+<div class="table-wrap"><table>
+<thead><tr>
+<th>Билет</th>
+<th>Состояние</th>
+<th>Сторона / объём</th>
+<th>Вход</th>
+<th>TP</th>
+<th>SL</th>
+</tr></thead>
+<tbody id="tickets"></tbody>
+</table></div>
+<p id="edit-status"></p></details>
+
+<details class="card"><summary>Параметры торговли</summary>
+<section id="v3-settings" hidden>
+<details class="settings-group" id="recovery-profile-settings"><summary id="recovery-profile-summary">Профили RECOVERY</summary>
+<p>1–20 ступеней с точным объёмом и TP каждой. TP должны возрастать по номеру ступени. Следующая корзина использует выбранный профиль. Существующие позиции, триггеры и заявки сохраняют прежний стандарт.</p>
+<label>Сохранённый профиль<select id="recovery-profile-select"></select></label>
+<div class="controls"><button id="recovery-profile-apply">Выбрать профиль…</button><button id="recovery-profile-edit" aria-controls="recovery-profile-editor">Загрузить для правки</button><button id="recovery-profile-new" aria-controls="recovery-profile-editor">Новый профиль</button><button id="recovery-profile-remove">Исключить из списка</button><button id="recovery-profile-save-list">Сохранить исключения…</button></div>
+<p id="recovery-profile-removals" role="status"></p><details class="settings-group" id="recovery-profile-editor"><summary>Редактор профиля · объёмы и TP</summary>
+<label>Название<input id="recovery-profile-name" maxlength="80"></label><div id="recovery-stage-rows"></div><p id="recovery-draft-total" role="status"></p><button id="recovery-add-stage">Добавить ступень</button><button id="recovery-profile-save">Сохранить и выбрать…</button></details></details>
+<details class="settings-group"><summary id="recovery-sl-summary">SL новых корзин RECOVERY</summary><label>Расстояние SL от входа<input id="recovery-sl-distance" inputmode="decimal"></label><p>Сохраняется в новой заявке. SL действующей корзины меняется отдельно в командах.</p><button id="recovery-save-sl">Сохранить SL…</button></details>
+<details class="settings-group"><summary id="recovery-offset-summary">Отступ STOP от M1</summary><label>Отступ RECOVERY STOP от Close M1<input id="v3-setting-distance" inputmode="decimal" value="1.00"></label><button id="save-v3-settings">Применить отступ…</button></details></section><p id="strategy-settings-note">V3: начальное следование M1 сохраняется. После SL бот ждёт ручного RECOVERY-входа; после исполнения сопровождает всю корзину. Объёмы и TP RECOVERY задаёт выбранный профиль. Число и объём не меняют уже открытые позиции.</p>
+<details class="settings-group"><summary id="initial-settings-summary">Начальный вход · следование M1</summary><div id="fields" class="fields"></div>
+<button id="save-settings">Предпросмотр параметров…</button><button id="refresh-settings">Загрузить актуальные</button></details><section id="tp-grid-settings"><h3>Ступени RECOVERY</h3>
+<p>TP1 обязателен. Расстояния — от собственного фактического входа каждой части. Пустые промежуточные ступени интерполируются; хвост рассчитывается для покрытия долга. После частичного закрытия — отдельные правки на графике.</p>
+<div id="tp-fields" class="fields"></div>
+<button id="save-tp-grid">Предпросмотр ступеней…</button></section><details class="settings-group"><summary id="recovery-debt-summary">Остаток RECOVERY</summary>
+<p>Сначала остановите новые входы. Списание возможно только без позиций, ордеров и неизвестных исходов. Уже учтённый убыток не вычитается повторно. После подтверждения — новый цикл с новой закрытой M1.</p>
+<button id="writeoff-recovery">Сбросить остаток RECOVERY…</button></details><details id="logs-section"><summary>Логи</summary><label>Контур<select id="log-scope"><option value="live">Торговля · audit</option>
+
+<option value="runtime">Файл этого сервиса · очищенный</option><option value="browser">Диагностика браузера · эта вкладка</option></select></label><button id="logs-refresh">Показать</button><button id="logs-prev">Предыдущая страница</button><button id="logs-next">Следующая страница</button><button id="logs-download">Скачать .txt</button><p id="logs-status"></p><button id="logs-telegram-send" disabled>Отправить логи в Telegram .txt</button><button id="logs-telegram-refresh">Проверить статус Telegram</button><p id="logs-telegram-status" role="status" aria-live="polite">Отправка очищенных логов основного бота в настроенный личный чат.</p>
+<pre id="logs-view"></pre>
+<p>UTC — исходное время; UTC+2 — отдельно подписанное отображение. Выгрузка ограничена последними записями и удаляет чувствительные поля. Исходные логи не очищаются.</p></details></details>
+<details class="card"><summary>События и ошибки</summary>
+<pre id="journal"></pre></details><details id="display-settings" class="card settings-group"><summary>График и отображение</summary><fieldset id="chart-height-settings"><legend>Высота графика</legend><label>Режим высоты<select id="chart-height-mode"><option value="auto">Автоматически</option><option value="custom">Настроить вручную</option></select></label><label for="chart-height-range">Доля высоты экрана: <output id="chart-height-value" for="chart-height-range">60%</output></label><input id="chart-height-range" type="range" min="30" max="85" step="5" value="60" disabled><p>30–85% экрана. При открытии команд или клавиатуры график уменьшается до доступной высоты. Жесты, уровни SL/TP и торговые параметры не меняются.</p><button id="chart-height-reset" type="button">Автоматическая высота</button><p id="chart-height-status" role="status"></p></fieldset><div class="heading">
+<h2>XAUUSD.s · M1</h2>
+<div>
+<button id="zoom-in">+</button><button id="zoom-out">−</button><button id="chart-reset">Сброс вида</button>
+</div>
+</div>
+<p id="quote">—</p>
+<p id="source-label"></p>
+<div class="chart-toolbar">
+<label><input type="checkbox" id="main-cycle" checked> Цикл / ордера</label>
+</div>
+<details class="appearance"><summary>Цвета и отображение</summary><div id="color-fields" class="fields"></div>
+</details><p>Удерживайте линию 0,5 секунды и перемещайте: после отпускания выберите «Подтвердить» или «Отмена». Изменение отправляется только после подтверждения. После TP1 SL оставшихся частей один раз переносится на собственный фактический вход каждой части. Последующая ручная правка сохраняется.</p></details><footer>Авторизованная панель сервиса. STOP и SL не являются атомарным разворотом; UNKNOWN и неожиданные перекрытия требуют сверки.</footer></section><section id="history-page" role="tabpanel" aria-labelledby="tab-history" hidden><h1>История позиций</h1><p>Результат закрытых позиций включает расходы открытия и закрытия. Переносы и отмены триггеров здесь не отображаются.</p><p id="position-history-note" role="status"></p><p id="position-history-empty"></p><div id="position-history-list"></div></section><div id="chart-notices" aria-live="polite">
+<p id="safety" role="alert"></p>
+<p id="request-status" role="status"></p>
+</div>
+<nav id="bottom-tabs" role="tablist" aria-label="Разделы приложения"><button id="tab-chart" type="button" role="tab" aria-selected="true" aria-controls="chart-page">График</button><button id="tab-history" type="button" role="tab" aria-selected="false" aria-controls="history-page">История</button><button id="tab-settings" type="button" role="tab" aria-selected="false" aria-controls="settings-page">Настройки</button></nav>
+</div></main><script src="diagnostics.js"></script><script src="panel.js"></script>
+</body>
+</html>
