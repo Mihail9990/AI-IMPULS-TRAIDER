@@ -181,3 +181,5 @@ body{background:var(--bg)}main{padding:0;max-width:none}#login{max-width:480px;m
 #v3-panels #v3-entry-panel .entry-actions button,#v3-panels #v3-sl-confirm{white-space:normal;overflow-wrap:anywhere;font-size:12px}
 #bot-activity #bot-activity-state,#bot-activity p[data-tone=info]{color:#83c3ff;font-weight:700}
 #bottom-tabs button{width:33.333%}
+
+#bot-activity #activity-provisional-recovery{font-size:11px;color:#b8f36a;margin:4px 0}

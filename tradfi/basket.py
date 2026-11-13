@@ -16,6 +16,7 @@ from .basket_math import BasketSettings,ladder,expanded_levels,net_money
 CONTRACT='ticket_basket_v1'
 
 class BasketController(Controller):
+    related_close_observation=True
     def __init__(self,store,broker,**kwargs):
         prior=store.load()
         super().__init__(store,broker,**kwargs)
@@ -35,7 +36,21 @@ class BasketController(Controller):
             self.state['operation_mode']='auto';self.state['modules']={'engine':'basket','recovery':{}}
         self.save('basket_controller_loaded')
 
-    def _guard(self,entry=False):
+    def _independent_action_ready(self,cmd):
+        from .related_close import independent_action, resource_conflict, resource_basis
+        # Unknown/accepted in-flight requests on this exact resource never permit
+        # a second send. Other positions/orders remain independently manageable.
+        if any(other['id']!=cmd['id'] and other['status'] not in TERMINAL|{'READY'}
+               and resource_conflict(cmd,other) for other in self.state['commands'].values()):return False
+        try:snap=self.snapshot()
+        except (OSError,TimeoutError,ValueError):return False
+        if not independent_action(snap,cmd,state=self.state):return False
+        basis=resource_basis(snap,cmd)
+        if basis is None:return False
+        cmd['independent_resource_basis']=basis
+        return True
+
+    def _guard(self,entry=False,*,allow_related_cancel=False):
         if self.state.get('migration_block'):raise ActionRejected(self.state['migration_block'])
         self._deadline_guard();blocked=self._time_guard()
         if getattr(self.broker,'read_only',False):raise ActionRejected('READ_ONLY: торговля отключена')
@@ -55,7 +70,9 @@ class BasketController(Controller):
             if self._time_waiting():raise TransientDataWait('Ожидаются свежие данные M1')
             raise ActionRejected('Время не подтверждено; команда требует свежих данных')
         if not snap.get('hedging'):raise ActionRejected('Нужен hedging-счёт с независимыми билетами')
-        if any(not x.get('owned') for x in snap['positions']+snap['orders']):raise ActionRejected('Есть неизвестные позиции/ордера')
+        from .related_close import foreign_obligations, pending_closes, pending_sources
+        if foreign_obligations(snap):raise ActionRejected('Есть неизвестные позиции/ордера')
+        if not allow_related_cancel and (pending_closes(snap) or pending_sources(snap,self.state) or self._source_bootstrap_candidates(snap)):raise TransientDataWait('Ожидается подтверждение исполнения TP/SL этой позиции')
         if entry and self.evidence_contract=='per_obligation_v1' and snap['quote'].get('utc_time') is None and snap.get('market_time_mode')!='mt5_raw_v1':raise ActionRejected('Нет свежей проверенной котировки')
         return snap
 
@@ -184,9 +201,15 @@ class BasketController(Controller):
             self._enter_manual(c,reason,self.clock())
         else:self.pause(reason)
 
-    def _observe(self,snap):
+    def _observe(self,snap,*,related_wait=False):
+        from .related_close import pending_closes, pending_sources
+        sources=pending_sources(snap,self.state) if related_wait else {}
+        pending=pending_closes(snap) if related_wait else []
+        pending_orders={o['id'] for o in pending}
+        pending_positions={o['related_close']['position_id'] for o in pending}|set(sources)
+        pending_entries={o['related_close']['entry_command_id'] for o in pending}|set(sources.values())
         c=self.state['cycle'];changed=False
-        if any(o.get('command_id') not in c['entries'] and not any(self.state['commands'][cid].get('order_id')==o['id'] for cid in c['entries']) for o in snap['orders']):self._halt(snap,'UNKNOWN_ORDER_IDENTITY');return False
+        if any(o.get('command_id') not in c['entries'] and not any(self.state['commands'][cid].get('order_id')==o['id'] for cid in c['entries']) for o in snap['orders'] if o['id'] not in pending_orders):self._halt(snap,'UNKNOWN_ORDER_IDENTITY');return False
         for g in c['groups']:
             for cid in g['commands']:
                 cmd=self.state['commands'][cid];ins=[d for d in snap['deals'] if d['entry']=='IN' and d.get('command_id')==cid]
@@ -194,6 +217,7 @@ class BasketController(Controller):
                 ids={d['position_id'] for d in ins}
                 if len(ids)!=1 or sum((number(d['volume']) for d in ins),D(0))!=number(cmd['size']):self._halt(snap,'PARTIAL_FILL_OR_NONINDEPENDENT_TICKET');return False
                 pid=next(iter(ids));proof=snap.get('obligations',{}).get(cid,{})
+                if cid in pending_entries and pid in c['tickets'] and proof.get('status') in {'PARTIAL_CLOSE','AWAIT_POSITION_EVIDENCE'}:continue
                 if self.evidence_contract=='per_obligation_v1' and proof.get('status') not in {'FILLED_OPEN_EVIDENCE','CLOSED_EVIDENCE'}:
                     if proof.get('status') in {'PARTIAL_FILL','PARTIAL_CLOSE','EXTERNAL_EXIT','UNSUPPORTED_EXIT','MIXED_EXIT_REASONS','VOLUME_EVIDENCE_INCONSISTENT'}:self._halt(snap,'INCOMPLETE_TICKET_EVIDENCE')
                     return False
@@ -203,10 +227,24 @@ class BasketController(Controller):
                     except ValueError:self._halt(snap,'OPENING_COSTS_UNKNOWN');return False
                     c['tickets'][pid]=dict(id=pid,command_id=cid,group=g['id'],role=g['role'],side=cmd['side'],entry=str(entry),size=cmd['size'],sl=cmd['sl'],tp=cmd['tp'],index=cmd['basket_index'],opening_net=str(cost),closed=False)
                     c['realized']=str(number(c['realized'])+cost);c['recovery']=str(max(D(0),-number(c['realized'])-number(c.get('recovery_waived','0'))));c['opened_ids'].append(pid);changed=True
-        if changed:self.save('basket_fills_adopted')
+        if changed:
+            self._update_recovery_projection(c)
+            self.save('basket_fills_adopted')
         if any(p['id'] not in c['tickets'] for p in snap['positions']):self._halt(snap,'UNKNOWN_POSITION_IDENTITY');return False
+        confirmed_changed=False
+        for position in snap['positions']:
+            t=c['tickets'][position['id']]
+            proof=snap.get('obligations',{}).get(t['command_id'],{})
+            if self.evidence_contract!='per_obligation_v1' or proof.get('status')!='FILLED_OPEN_EVIDENCE':continue
+            if str(proof.get('position_id',position['id']))!=str(t['id']):continue
+            if number(position['size'])!=number(t['size']):continue
+            prior={k:str(position[k]) for k in ('id','side','entry','size','sl','tp')}
+            prior.update(command_id=t['command_id'],cycle_id=c['id'])
+            if t.get('confirmed_position')!=prior:t['confirmed_position']=prior;confirmed_changed=True
+        if confirmed_changed:self.save('basket_position_protection_observed')
         if len({t['command_id'] for t in c['tickets'].values()})!=len(c['tickets']):self._halt(snap,'MERGED_TICKETS_UNSUPPORTED');return False
         for pid,t in c['tickets'].items():
+            if pid in pending_positions:continue
             exits=[d for d in snap['deals'] if d['entry']=='OUT' and d['position_id']==pid]
             live=next((p for p in snap['positions'] if p['id']==pid),None)
             if live and number(live['size'])!=number(t['size']):self._halt(snap,'PARTIAL_POSITION_CHANGE');return False
@@ -221,10 +259,108 @@ class BasketController(Controller):
                 self._book_ticket_close(snap,c,pid,t,exits,reasons,net)
         return True
 
+    def _source_bootstrap_candidates(self,snap):
+        # Pure read-only proof of relationship. Absence is NEVER a closed deal.
+        if self.evidence_contract!='per_obligation_v1':return {}
+        from .related_close import foreign_obligations,authorized_counter_group
+        if foreign_obligations(snap):return {}
+        c=self.state.get('cycle') or {};tickets=c.get('tickets',{});result={}
+        live={str(p['id']):p for p in snap['positions'] if p.get('owned')}
+        groups=c.get('groups',[]);commands=self.state['commands']
+        for pid,t in tickets.items():
+            if t.get('closed') or pid in live or pid in c.get('provisional_recovery',{}):continue
+            cid=t.get('command_id');cmd=commands.get(cid,{})
+            proof=snap.get('obligations',{}).get(cid,{})
+            prior=t.get('confirmed_position',{})
+            if (cid not in c.get('entries',[]) or cmd.get('cycle_id')!=c.get('id')
+                    or proof.get('status')!='AWAIT_POSITION_EVIDENCE'
+                    or str(proof.get('position_id'))!=pid
+                    or prior.get('id')!=pid or prior.get('command_id')!=cid
+                    or prior.get('cycle_id')!=c.get('id')):continue
+            try:
+                if (prior.get('side')!=t['side'] or number(prior['entry'])!=number(t['entry'])
+                        or number(prior['size'])!=number(t['size']) or number(prior['sl'])<=0):continue
+            except (KeyError,TypeError,ValueError,ArithmeticError):continue
+            linked=[g for g in groups if authorized_counter_group(self.state,g,t)]
+            for group in linked:
+                for other_id in group['commands']:
+                    other=commands[other_id];evidence=snap.get('obligations',{}).get(other_id,{})
+                    position=live.get(str(evidence.get('position_id')))
+                    if (other.get('cycle_id')==c['id'] and other.get('side')!=t['side']
+                            and evidence.get('status')=='FILLED_OPEN_EVIDENCE' and position
+                            and position['side']==other['side']
+                            and number(position['size'])==number(other['size'])):
+                        result[pid]=dict(t,sl=prior['sl']);break
+        return result
+
+    def _bootstrap_source_estimates(self,snap):
+        from .provisional_recovery import estimate_previous_close
+        candidates=self._source_bootstrap_candidates(snap)
+        if not candidates:return
+        c=self.state['cycle'];changed=False
+        for pid,t in candidates.items():
+            try:row=estimate_previous_close(self.broker,t,cycle_id=c['id'])
+            except (OSError,TimeoutError,ValueError,ArithmeticError):
+                self.reconciliation_diagnostics['reason']='PROVISIONAL_RECOVERY_UNAVAILABLE';continue
+            row['protection_source']='DURABLE_CONFIRMED_POSITION'
+            c.setdefault('provisional_recovery',{})[pid]=row;changed=True
+        if changed:
+            self._update_recovery_projection(c);self.save('previous_position_estimate_bootstrapped')
+
+    def _update_recovery_projection(self,c):
+        from .provisional_recovery import effective_recovery
+        if 'provisional_recovery' in c:
+            c['recovery_effective']=str(effective_recovery(c['realized'],c['provisional_recovery'],
+                cycle_id=c['id'],waived=c.get('recovery_waived','0')))
+
+    def _estimate_related_sources(self,snap,pending):
+        from .provisional_recovery import estimate_previous_close
+        from .related_close import authorized_counter_group
+        c=self.state.get('cycle')
+        if not c:return
+        live={str(p['id']) for p in snap['positions'] if p.get('owned')}
+        changed=False
+        for order in pending:
+            relation=order['related_close'];pid=relation['position_id'];old=c['tickets'].get(pid)
+            if not old or old.get('closed') or relation.get('reason')!='SL':continue
+            if pid in c.get('provisional_recovery',{}):continue
+            linked={g['id'] for g in c['groups'] if authorized_counter_group(self.state,g,old)}
+            opened=[t for t in c['tickets'].values() if not t['closed'] and t['id'] in live
+                and t['group'] in linked and t['side']!=old['side']]
+            if not opened:continue
+            previous=dict(old,sl=order['sl'])
+            try:estimate=estimate_previous_close(self.broker,previous,cycle_id=c['id'])
+            except (OSError,TimeoutError,ValueError,ArithmeticError):
+                self.reconciliation_diagnostics['reason']='PROVISIONAL_RECOVERY_UNAVAILABLE'
+                continue
+            c.setdefault('provisional_recovery',{})[pid]=estimate;changed=True
+        if changed:
+            self._update_recovery_projection(c);self.save('previous_position_sl_estimated')
+
+    def _related_management(self,snap):
+        # V3 may prepare independent protection here; never new dependent entries.
+        pass
+
     def _book_ticket_close(self,snap,c,pid,t,exits,reasons,net):
         """Atomic accounting only; no broker or strategy actions."""
         expected=deepcopy(self._durable_state)
-        t.update(closed=True,reason=next(iter(reasons)),exit_net=str(net),exit_facts=[{k:d.get(k) for k in ('id','price','volume','time','reason')} for d in exits]);c['realized']=str(number(c['realized'])+net);c['recovery']=str(max(D(0),-number(c['realized'])-number(c.get('recovery_waived','0'))))
+        # Validate the entire projection before mutating any booked state. A bad
+        # persisted estimate must not leave an in-memory closed ticket that a
+        # caller's error handler could accidentally save without its ledger.
+        realized=number(c['realized'])+net
+        recovery=max(D(0),-realized-number(c.get('recovery_waived','0')))
+        estimates=c.get('provisional_recovery',{})
+        settled=str(pid) in estimates
+        revision=int(c.get('recovery_revision',0))+(1 if settled else 0)
+        if 'provisional_recovery' in c:
+            from .provisional_recovery import without_settled_estimate,effective_recovery
+            estimates=without_settled_estimate(estimates,pid,cycle_id=c['id'],command_id=t['command_id'])
+            effective=effective_recovery(realized,estimates,cycle_id=c['id'],waived=c.get('recovery_waived','0'))
+        t.update(closed=True,reason=next(iter(reasons)),exit_net=str(net),exit_facts=[{k:d.get(k) for k in ('id','price','volume','time','reason')} for d in exits])
+        c.update(realized=str(realized),recovery=str(recovery))
+        if 'provisional_recovery' in c:
+            c['provisional_recovery']=estimates;c['recovery_effective']=str(effective)
+        if settled:c['recovery_revision']=revision
         self.state['seen_deals'].extend(d['id'] for d in exits)
         for cmd in self.state['commands'].values():
             if cmd['kind']=='MODIFY' and cmd.get('position_id')==pid and cmd['status'] not in TERMINAL:cmd.update(status='OBSOLETE',closed_by_deals=[d['id'] for d in exits])
@@ -234,7 +370,7 @@ class BasketController(Controller):
             except BaseException:self.state=self.store.load() or expected;self._durable_state=deepcopy(self.state);raise
         else:self.save('basket_ticket_closed')
 
-    def _observe_paused_closures(self):
+    def _observe_paused_closures(self, snap=None):
         """Read and settle proven existing LIVE tickets without leaving SAFE_PAUSE.
 
         Never adopt fills, reconcile pending commands, cancel, dispatch, or advance
@@ -242,8 +378,9 @@ class BasketController(Controller):
         """
         c=self.state.get('cycle')
         if not c or self.evidence_contract!='per_obligation_v1':return
-        try:snap=self.snapshot()
-        except (OSError,TimeoutError,ValueError):return
+        if snap is None:
+            try:snap=self.snapshot()
+            except (OSError,TimeoutError,ValueError):return
         for pid,t in c['tickets'].items():
             if t.get('closed'):continue
             cid=t.get('command_id');cmd=self.state['commands'].get(cid,{})
@@ -442,10 +579,34 @@ class BasketController(Controller):
         except ValueError:self.pause('Не удалось подтвердить брокерские факты');return
         if getattr(self.broker,'read_only',False):return
         self._reconcile_commands(snap)
-        if any(not x.get('owned') for x in snap['positions']+snap['orders']):
+        from .related_close import foreign_obligations, pending_closes, pending_sources
+        if foreign_obligations(snap):
             from .reconciliation_diagnostics import unowned_diagnostics
             self.reconciliation_diagnostics.update(unowned_diagnostics(snap))
             self.pause('Неизвестные ордера/позиции');return
+        self._bootstrap_source_estimates(snap)
+        pending=pending_closes(snap);sources=pending_sources(snap,self.state)
+        if pending or sources:
+            # A verified broker TP/SL is executing, not a foreign entry. Keep
+            # observing, never cancel it, replay UNKNOWN, or advance dependent
+            # strategy actions before its terminal position evidence arrives.
+            self.reconciliation_diagnostics['reason']='RELATED_PROTECTIVE_CLOSE_PENDING'
+            ids=sorted(o['id'] for o in pending)
+            wait=self.state.get('related_close_wait') or {}
+            if wait.get('order_ids')!=ids or wait.get('source_ids')!=sorted(sources):
+                self.state['related_close_wait']={'order_ids':ids,'source_ids':sorted(sources),'since':snap['now'],
+                    'status':'PROTECTIVE_CLOSE_PENDING'}
+                self.save('basket_related_close_pending')
+            if self.state.get('cycle'):
+                if not self._observe(snap,related_wait=True):return
+                self._estimate_related_sources(snap,pending)
+                self._related_management(snap)
+            if self.state['stop'] and self.state.get('cycle'):
+                self._cancel_pending(snap,self.state['cycle']['entries'])
+            self.dispatch({'CANCEL','MODIFY','CLOSE'},ready_filter=self._independent_action_ready)
+            return
+        if self.state.pop('related_close_wait',None) is not None:
+            self.save('basket_related_close_observed')
         c=self.state.get('cycle')
         if self._time_guard() and self._time_waiting():
             # Keep broker evidence and cancellation working without consuming a

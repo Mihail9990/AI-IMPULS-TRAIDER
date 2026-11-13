@@ -13,6 +13,10 @@ class ChartFeed:
         self.instance=uuid.uuid4().hex;self.sequence=0;self.last=None;self.last_mono=None
     def capture(self,snapshot):
         self.sequence+=1
+        # Bars are read after the controller snapshot. A failed capture must not
+        # leave an earlier chart masquerading as this observation. The normal
+        # polling loop retries with a new snapshot; never retry trading actions.
+        self.last=None;self.last_mono=None
         b=self.broker;start=self.monotonic()
         raw=b.api.copy_rates_from_pos(b.symbol,b.api.TIMEFRAME_M1,0,120)
         if raw is None or not len(raw):raise OSError('Chart candles unavailable')
@@ -41,6 +45,11 @@ class ChartFeed:
             for bar in bars:
                 if bar['raw_time'] % 60 or bar['raw_time'] > tick:raise ValueError('Invalid native M1 timestamp')
                 bar.update(broker_time=bar['raw_time'],time_domain='BROKER_RAW',closed=bar is not bars[-1])
+            # Both boundary races matter: bar0 may already be the next minute,
+            # or the tick may have advanced before the terminal updates bar0.
+            # Cached quotes are accepted, but only with their matching M1 bar.
+            if bars[-1]['raw_time'] != math.floor(tick/60)*60:
+                raise OSError('Chart tick and M1 observation disagree')
         candle_status='UNVERIFIED'
         if verified:
             now=b._quote_clock();latest=max(r['utc_time'] for r in bars)

@@ -32,3 +32,8 @@ assert(css.includes('#activity-totals strong{font-size:15.2px}'));
 const nav=html.slice(html.indexOf('<nav id="bottom-tabs"'));assert(nav.indexOf('id="tab-chart"')<nav.indexOf('id="tab-history"'));assert(nav.indexOf('id="tab-history"')<nav.indexOf('id="tab-settings"'));
 assert(css.includes('#activity-totals #activity-recovery,#debt{color:#b8f36a}'));
 console.log('PASS negative RECOVERY, all-closed net, incomplete evidence, exact position prices/times/reasons, no cycle/carry history, three-tab navigation and lime styling');
+// An estimate is always separate from confirmed recovery and booked result.
+ctx.view={metrics:{recovery_total:'2',all_closed_net:'-2',currency:'UST',history_complete:true},provisional_recovery:{pending:true,amount:'4.25'}};
+run();assert($('activity-provisional-recovery').textContent.includes('Предварительный RECOVERY: 4.25 UST'));assert.equal($('activity-provisional-recovery').hidden,false);assert.equal($('activity-recovery').textContent,'-2 UST');assert.equal($('activity-total-net').textContent,'-2 UST');
+ctx.view.provisional_recovery=null;run();assert.equal($('activity-provisional-recovery').hidden,true);assert.equal($('activity-provisional-recovery').textContent,'');
+assert(html.includes('id="activity-provisional-recovery"'));

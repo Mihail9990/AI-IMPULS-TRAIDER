@@ -434,8 +434,24 @@ class MT5Broker:
         _,_,info,tick,data=self._context(mutation=True)
         spec=Spec.load(data)
         snap['quote']=dict(bid=dec(tick.bid),ask=dec(tick.ask))
+        from .related_close import independent_action, resource_conflict, recovery_target_valid, resource_basis
+        if 'independent_resource_basis' in cmd and cmd['independent_resource_basis']!=resource_basis(snap,cmd):
+            raise NotSent('INDEPENDENT_RESOURCE_CHANGED')
+        current_state=self.store.load() if self.store is not None else None
+        if 'counter_entry_source' in cmd:
+            from .related_close import counter_source_valid
+            if cmd.get('kind') not in {'STOP','MARKET'} or not counter_source_valid(snap,cmd['counter_entry_source'],state=current_state,entry_command=cmd):
+                raise NotSent('COUNTER_ENTRY_SOURCE_CHANGED')
+        if cmd.get('kind')=='MODIFY' and cmd.get('purpose')=='RECOVERY_TARGET' and not recovery_target_valid(snap,cmd,current_state):
+            raise NotSent('RECOVERY_TARGET_BASIS_CHANGED')
+        conflict=any(cid!=cmd['id'] and row.get('send_started') is True
+            and row.get('result',{}).get('status') not in {'DONE','REJECTED'}
+            and resource_conflict(cmd,row.get('command',{})) for cid,row in self.rows.items())
+        if conflict:
+            raise NotSent('Another unresolved request owns this resource')
         if any(not p['owned'] for p in snap['orders']+snap['positions']):
-            raise NotSent('Foreign order/position; ownership conflict')
+            if not independent_action(snap,cmd,state=current_state):
+                raise NotSent('Foreign or conflicting order/position; ownership conflict')
         kind=cmd['kind']
         req=dict(symbol=self.symbol,magic=self.magic,comment=cmd['id'],deviation=0)
         if kind in {'STOP','MARKET'}:
@@ -512,7 +528,7 @@ class MT5Broker:
             if len(matches)!=1:
                 raise TimeoutError('Position absent/ambiguous; reconcile deals')
             p=matches[0]; sl=spec.price(cmd['sl']); tp=spec.price(cmd['tp'])
-            if cmd.get('purpose') not in {'ANCHOR','STEP'}:
+            if cmd.get('purpose') not in {'ANCHOR','STEP','RECOVERY_TARGET'}:
                 raise NotSent('Invalid protection purpose')
             if cmd['purpose']=='STEP' and number(p['sl'])>0 and ((p['side']=='BUY' and sl<number(p['sl'])) or (p['side']=='SELL' and sl>number(p['sl']))):
                 raise NotSent('Stepped SL cannot worsen')

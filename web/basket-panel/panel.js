@@ -125,6 +125,11 @@
   const safetyBlocked=v3ContextInvalid||view.manual_reason||view.migration_block||view.time_block||['MANUAL','SAFE_PAUSE','MIGRATION_BLOCK'].includes(view.phase);
   if(!safetyBlocked){if(view.positions?.length)detail='Ожидаю исполнения TP или SL';else if(view.orders?.length)detail='Ожидаю исполнения триггер ордера';}
   else detail='Действия приостановлены: требуется проверка';
+  if(!safetyBlocked){
+    const delivery=view.trigger_delivery?.counts??{};
+    const stages=[['SENDING','Отправляю триггер в MT5; ожидаю ответ'],['NO_RESPONSE_RECONCILING','Ответ MT5 не получен. Сверяю результат без повторной отправки'],['OUTCOME_UNCONFIRMED','Результат отправки не подтверждён. Сверяю с MT5'],['REJECTED_AWAITING_RECONCILIATION','MT5 отклонил триггер. Обновляю состояние'],['ACKNOWLEDGED_AWAITING_READBACK','MT5 принял триггер. Ожидаю подтверждения состояния ордера'],['QUEUED','Триггер подготовлен. Ожидаю отправки']];
+    const active=stages.find(([stage])=>delivery[stage]>0);if(active)detail=active[1];
+  }
   if(view.time_status?.waiting_data)detail=feedBrokerRaw()?'Ожидаю следующее изменение данных MT5. Команды принимаются, новые входы ждут.':'Переход M1: ожидаю свежие данные до 3 секунд. Команды принимаются, новые входы ждут.';
   if(busy||pending)detail='Ожидаю подтверждения команды; повтор недоступен';
   if(view.v3_request)detail+=' · Запланирован '+view.v3_request.order_type+' по закрытию выбранной свечи';
@@ -428,6 +433,9 @@
   const debt=metrics?.recovery_total;
   const negative=debt===null||debt===undefined?null:Number(debt)===0?'0':'-'+String(debt).replace(/^[-+]/,'');
   notice('activity-recovery',money(negative,metrics?.currency),'info');
+  const provisional=view?.provisional_recovery;
+  $('activity-provisional-recovery').hidden=provisional?.pending!==true;
+  $('activity-provisional-recovery').textContent=provisional?.pending===true?'Предварительный RECOVERY: '+money(provisional.amount,metrics?.currency)+' · ожидает сверки MT5':'';
   const total=metrics?.all_closed_net;
   notice('activity-total-net',money(total,metrics?.currency),total===null||total===undefined?'info':Number(total)<0?'loss':'success');
   $('activity-totals-note').textContent=metrics?.history_complete===true?'':'Общий результат недоступен: история исполнений неполна.';

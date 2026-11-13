@@ -96,9 +96,9 @@ class ControlledRecoveryController(LatestCloseBasketController):
         if self.state.get('migration_block'):return False
         return super()._mutation_allowed(kind)
 
-    def dispatch(self,kinds=None):
+    def dispatch(self,kinds=None, *, ready_filter=None):
         if self.state.get('migration_block'):return
-        return super().dispatch(kinds)
+        return super().dispatch(kinds,ready_filter=ready_filter)
 
     def request_manual_close(self,a):
         raise ActionRejected('Закрытие с выбором диапазонов больше не используется')
@@ -122,7 +122,7 @@ class ControlledRecoveryController(LatestCloseBasketController):
         if c.get('edit') or c.get('v3_edit') or c.get('manual_close') or c.get('initial_cancel') or self._uncertain():
             raise ActionRejected('Предыдущая операция ещё не сверена')
         if self.state['stop']:raise ActionRejected('Новые входы остановлены')
-        if any(g.get('actual_ladder_tx',{}).get('status')=='PENDING' or g.get('entry_sl_once',{}).get('status') in ('PREPARED','PENDING') for g in c['groups']):
+        if any(g.get('actual_ladder_tx',{}).get('status')=='PENDING' or g.get('entry_sl_once',{}).get('status') in ('PREPARED','PENDING','INDEPENDENT') for g in c['groups']):
             raise ActionRejected('Защита корзины ещё не сверена')
         return snap,c
 
@@ -148,7 +148,7 @@ class ControlledRecoveryController(LatestCloseBasketController):
         if kind=='v3_link':return self._request_link(a)
         if kind=='v3_cancel_link':
             if set(a)!={'type','cycle_id'}:raise ActionRejected('Неверные поля отмены')
-            snap=self._guard();c=self.state.get('cycle')
+            snap=self._guard(allow_related_cancel=True);c=self.state.get('cycle')
             if not c or a['cycle_id']!=c['id'] or not c.get('v3_link'):raise ActionRejected('Нет связанных триггеров')
             c['v3_link']['cancel']=True;self.save('v3_link_cancel_requested')
             self._cancel(snap,c['v3_link']['ids']);return
@@ -164,14 +164,14 @@ class ControlledRecoveryController(LatestCloseBasketController):
     def _cancel_entry_groups(self,snap,c):
         # Linked-to-SL batches retain their separate cancellation owner.
         linked=(c.get('v3_link') or {}).get('group')
-        return [g for g in c.get('groups',[]) if g['role']=='v3' and not g.get('linked_source')
+        return [g for g in c.get('groups',[]) if g['role']=='v3' and (not g.get('linked_source') or g.get('manual_counter'))
                 and g['id']!=linked and not g.get('retired')
                 and (g.get('cancel_entry') or self._pending(snap,g['commands'])
                      or any(self.state['commands'][cid]['kind']=='STOP' and self.state['commands'][cid]['status']=='READY' for cid in g['commands']))]
 
     def _cancel_v3_entry(self,a):
         if set(a)!={'type','cycle_id'}:raise ActionRejected('Неверные поля отмены')
-        snap=self._guard();c=self.state.get('cycle')
+        snap=self._guard(allow_related_cancel=True);c=self.state.get('cycle')
         if not self._v3() or not c or a['cycle_id']!=c['id']:raise ActionRejected('Цикл изменился; обновите панель')
         if c.get('edit') or c.get('v3_edit') or c.get('v3_rearm'):raise ActionRejected('Сначала дождитесь завершения правки')
         groups=self._cancel_entry_groups(snap,c)
@@ -200,13 +200,45 @@ class ControlledRecoveryController(LatestCloseBasketController):
         initial=next((t for t in c['tickets'].values() if t['role']=='initial'),None)
         return bool(initial and initial['closed'] and number(c['recovery'])>0 and not snap['positions'] and not snap['orders'] and not self._unresolved() and not c.get('v3_link') and not c.get('v3_request') and not c.get('v3_rearm') and not c.get('v3_relink'))
 
+    def _manual_counter_source(self,snap,c):
+        if (snap['orders'] or self._unresolved() or any(c.get(k) for k in ('v3_link','v3_request','v3_rearm','v3_relink','edit','v3_edit','manual'))):return None
+        active=[t for t in c['tickets'].values() if not t['closed']]
+        if not active or len({t['group'] for t in active})!=1 or len({t['side'] for t in active})!=1 or sorted(t['id'] for t in active)!=sorted(p['id'] for p in snap['positions']):return None
+        basis=dict(cycle_id=c['id'],source_group=active[0]['group'],positions=[{k:str(p[k]) for k in ('id','side','entry','size','sl')} for p in sorted(snap['positions'],key=lambda p:p['id'])])
+        from .related_close import counter_source_valid
+        return basis if counter_source_valid(snap,basis,state=self.state) else None
+
+    def _advance_manual_counter_request(self,snap):
+        c=self.state['cycle'];request=c.get('v3_request') or {};basis=request.get('counter_source')
+        if not basis:return False
+        from .related_close import counter_source_valid
+        if self.state['stop'] or self.state.get('time_block') or not counter_source_valid(snap,basis,state=self.state):
+            c.pop('v3_request',None);self.notify('Исходная корзина изменилась: встречный вход отменён.');self.save('manual_counter_source_changed');return True
+        target=request['bar_id'];bar=snap['candle']
+        if number(self._market_now(snap))<target+60:return False
+        c.pop('v3_request');self.save('manual_counter_schedule_consumed')
+        if bar['id']!=target or not self._fresh_closed_candle(snap):
+            self.notify('Свеча пропущена: встречный вход отменён.');return True
+        direction='BUY' if number(bar['close'])>number(bar['open']) else 'SELL' if number(bar['close'])<number(bar['open']) else None
+        if direction!=request['side']:
+            self.notify('Свеча не подтверждает встречное направление: вход отменён.');return True
+        level=str(number(bar['close'])+(1 if direction=='BUY' else -1)*number(request['distance'])) if request['order_type']=='STOP' else None
+        try:self._arm_v3(snap,request,direction,level)
+        except (ActionRejected,OSError):
+            self.notify('Встречный вход не выставлен: расчёт или данные недоступны. Повторите команду.');self.save('manual_counter_entry_unavailable');return True
+        return True
+
     def _request_entry(self,a):
         if set(a) not in ({'type','cycle_id','order_type','timing','side'},{'type','cycle_id','order_type','timing','side','count'}):raise ActionRejected('Неверные поля входа V3')
         snap,c=self._context(a);profile=self._profile_request(snap,a);count=len(profile['stages'])
-        if not self._entry_ready(snap,c):raise ActionRejected('Дождитесь завершения всей корзины и сверки ордеров')
+        counter=None if self._entry_ready(snap,c) else self._manual_counter_source(snap,c)
+        if not self._entry_ready(snap,c) and counter is None:raise ActionRejected('Дождитесь подтверждения одной исходной корзины и сверки ордеров')
         if a['order_type'] not in ('STOP','MARKET') or a['timing'] not in ('now','current','next') or a['side'] not in ('BUY','SELL') or (a['order_type']=='STOP' and a['timing']=='now'):
             raise ActionRejected('Неверный тип или момент входа')
         request=dict(order_type=a['order_type'],timing=a['timing'],side=a['side'],count=count,distance=self.state['v3_settings']['entry_distance'],recovery_profile=profile)
+        if counter:
+            if any(p['side']==a['side'] for p in counter['positions']):raise ActionRejected('Ручной встречный вход должен быть противоположным исходной позиции')
+            request['counter_source']=counter
         if a['timing']=='now':self._arm_v3(snap,request,a['side']);return
         accepted=getattr(self,'_deferred_action_accepted_utc',None)
         if snap.get('market_time_mode')=='mt5_raw_v1':
@@ -248,7 +280,189 @@ class ControlledRecoveryController(LatestCloseBasketController):
             return exact_targets(spec,g['recovery_profile'],g['activated'],tickets,g.get('manual_tp_distances'))
         return super()._group_recovery_tps(cfg,spec,g,tickets,debt)
 
+    def _recovery_target_key(self):
+        c=self.state['cycle']
+        return dict(revision=c.get('recovery_revision',0),realized=c['realized'],
+                    waived=c.get('recovery_waived','0'),estimates=deepcopy(c.get('provisional_recovery',{})))
+
+    def _recovery_target_rows(self,snap,g):
+        rows=[];c=self.state['cycle']
+        for t in c['tickets'].values():
+            if t['group']!=g['id'] or t['closed'] or t['id'] in c.get('provisional_recovery',{}):continue
+            matches=[p for p in snap['positions'] if p['id']==t['id'] and p.get('owned')]
+            if len(matches)!=1:raise ValueError('Position readback missing')
+            p=matches[0]
+            if p['side']!=t['side'] or any(number(p[k])!=number(t[k]) for k in ('entry','size')):
+                raise ValueError('Position changed during recovery calculation')
+            rows.append(dict(id=t['id'],index=t['index'],side=t['side'],entry=p['entry'],
+                             size=p['size'],sl=p['sl'],tp=p['tp'],closed=False))
+        return sorted(rows,key=lambda t:t['index'])
+
+    def _advance_recovery_target(self,snap,g):
+        tx=g.get('recovery_target_tx')
+        if not tx or tx['status']!='PENDING':return False
+        c=self.state['cycle'];t=c['tickets'].get(tx['position_id'])
+        cmd=self.state['commands'][tx['command_id']]
+        if t and t['closed']:
+            # Closure bookkeeping obsoletes any unsent/in-flight modification.
+            tx['status']='CLOSED';self.save('recovery_target_position_closed');return False
+        from .related_close import financial_basis
+        try:stale=(cmd['status']=='READY' and cmd.get('recovery_target_basis')!=financial_basis(snap,self.state))
+        except (KeyError,ValueError,ArithmeticError,TypeError):return True
+        rejected=cmd.get('result',{})
+        safe_reject=(cmd['status']=='REJECTED' and rejected.get('never_sent') is True
+                     and rejected.get('reason')=='RECOVERY_TARGET_BASIS_CHANGED')
+        if stale:
+            before=next((p for p in cmd.get('recovery_target_basis',{}).get('positions',[]) if p['id']==tx['position_id']),None)
+            current=next((p for p in snap['positions'] if p['id']==tx['position_id']),None)
+            if before and current and any(number(before[k])!=number(current[k]) for k in ('sl','tp')):
+                cmd.update(status='OBSOLETE',edit_superseded=True);tx['status']='FAILED'
+                self._recovery_target_wait(g,'EXTERNAL_PROTECTION_CHANGE_PRESERVED')
+                return True
+        if stale or safe_reject:
+            cmd.update(status='OBSOLETE',edit_superseded=True)
+            tx['status']='STALE';self.save('recovery_target_not_sent_superseded');return False
+        if cmd['status']=='REJECTED':
+            tx['status']='FAILED';self.save('recovery_target_rejected')
+            return True
+        if cmd['status']!='DONE':return True
+        live=next((p for p in snap['positions'] if p['id']==tx['position_id']),None)
+        if not live or any(number(live[k])!=number(tx[k]) for k in ('sl','tp')):return True
+        t.update(sl=live['sl'],tp=live['tp'])
+        tx['status']='DONE';g['recovery_target_applied']=tx['key']
+        self.save('recovery_target_confirmed');return False
+
+    def _recovery_target_wait(self,g,reason):
+        if g.get('recovery_target_wait')!=reason:
+            g['recovery_target_wait']=reason;self.save('recovery_target_wait:'+reason)
+
+    def _recovery_retarget(self,snap,g):
+        from .provisional_recovery import last_open_target
+        from .related_close import financial_basis
+        c=self.state['cycle']
+        if self._advance_recovery_target(snap,g):return
+        if not g.get('recovery_target_tracking'):return
+        sources=[t for t in c['tickets'].values() if t['group']==g.get('linked_source')
+                 or (t['role']=='initial' and g['role']=='reversal')]
+        if any(not t['closed'] and t['id'] not in c.get('provisional_recovery',{}) for t in sources):
+            self._recovery_target_wait(g,'SOURCE_RESULT_OR_ESTIMATE_REQUIRED');return
+        live_ids={p['id'] for p in snap['positions'] if p.get('owned')}
+        active_groups={t['group'] for t in c['tickets'].values() if not t['closed'] and t['id'] in live_ids and t['role']!='initial'
+                       and t['id'] not in c.get('provisional_recovery',{})}
+        if len(active_groups)>1:
+            self._recovery_target_wait(g,'MULTIPLE_ACTIVE_GROUPS_REQUIRE_REVIEW');return
+        key=self._recovery_target_key()
+        try:rows=self._recovery_target_rows(snap,g)
+        except (ValueError,ArithmeticError,KeyError,TypeError):
+            self._recovery_target_wait(g,'TARGET_OR_EVIDENCE_UNAVAILABLE');return
+        if not rows:return
+        key['open_rungs']=[{k:r[k] for k in ('id','index','side','entry','size')} for r in rows]
+        key['other_targets']=[dict(id=r['id'],tp=r['tp']) for r in rows[:-1]]
+        if g.get('recovery_target_applied')==key:return
+        if g.get('recovery_target_tx',{}).get('status')=='FAILED':return
+        if (self.state['stop'] or c.get('manual') or c.get('edit') or c.get('v3_edit')
+                or g.get('entry_sl_once',{}).get('status') in ('PREPARED','PENDING','INDEPENDENT')
+                or g.get('actual_ladder_tx',{}).get('status')=='PENDING'):return
+        try:
+            last=rows[-1]
+            if str(last['index']) in g.get('manual_tp_distances',{}):
+                self._recovery_target_wait(g,'MANUAL_LAST_TP_PRESERVED');return
+            # Independent volume evidence is mandatory; pending source closure
+            # contributes only its separately persisted estimate, never cash.
+            projected=sum((number(r['estimated_close_net']) for r in c.get('provisional_recovery',{}).values()),D(0))
+            debt=-number(c['realized'])-projected-number(c.get('recovery_waived','0'))
+            spec=Spec.load(snap['spec']);cfg=BasketSettings.load(c['cfg'])
+            target=last_open_target(self.broker,spec,rows,debt,reserve=cfg.COST_RESERVE,quote=snap['quote'])
+            spec.protection(last['side'],number(last['entry']),number(last['sl']),number(target['tp']),snap['quote'],modify=True)
+            if any(cmd['status'] not in TERMINAL and cmd.get('position_id')==last['id']
+                   for cmd in self.state['commands'].values()):return
+            basis=financial_basis(snap,self.state)
+        except (ValueError,ArithmeticError,KeyError,StopIteration,OSError,TimeoutError):
+            self._recovery_target_wait(g,'TARGET_OR_EVIDENCE_UNAVAILABLE');return
+        g.pop('recovery_target_wait',None)
+        if number(target['tp'])==number(last['tp']):
+            g['recovery_target_applied']=key;self.save('recovery_target_already_observed');return
+        cid=self._intent('MODIFY',position_id=last['id'],sl=last['sl'],tp=target['tp'],
+                         purpose='RECOVERY_TARGET',recovery_target_basis=basis)
+        g['recovery_target_tx']=dict(status='PENDING',position_id=last['id'],sl=last['sl'],
+                                    tp=target['tp'],command_id=cid,key=key)
+        self.save('recovery_last_target_prepared')
+
+    def _independent_first_tp_sl(self,snap):
+        """Advance only proven TP1 own-entry protection on disjoint resources."""
+        c=self.state['cycle']
+        if c.get('manual') or c.get('edit') or c.get('v3_edit'):return
+        for g in c['groups']:
+            if g['role']=='initial':continue
+            tx=g.get('entry_sl_once')
+            tickets=[t for t in c['tickets'].values() if t['group']==g['id']]
+            if tx is None:
+                trigger=next((t for t in tickets if t['index']==0 and t['closed']
+                              and t.get('reason')=='TP' and t.get('exit_facts')),None)
+                selected={cid for cid in g['commands'] if self.state['commands'][cid]['side']==g.get('activated')}
+                if (not trigger or not self._group_indexes_valid(g,tickets)
+                        or len(tickets)!=len(selected) or {t['command_id'] for t in tickets}!=selected):continue
+                tx=dict(status='INDEPENDENT',trigger=trigger['id'],anchor_policy='own_entry_v1',targets=[
+                    dict(position_id=t['id'],sl=t['entry'],old_sl=t['sl'],command_id=None,status='WAITING')
+                    for t in tickets if not t['closed']])
+                g['entry_sl_once']=tx;self.save('independent_entry_sl_prepared')
+            if tx['status']=='INDEPENDENT':self._advance_entry_sl_once(snap,g)
+
+    def _advance_entry_sl_once(self,snap,g):
+        tx=g['entry_sl_once']
+        if tx['status']!='INDEPENDENT':return super()._advance_entry_sl_once(snap,g)
+        c=self.state['cycle'];changed=False
+        for u in tx['targets']:
+            if u['status'] in ('DONE','CLOSED','PRESERVED'):continue
+            t=c['tickets'][u['position_id']]
+            if t['closed']:u['status']='CLOSED';changed=True;continue
+            if t['id'] in c.get('provisional_recovery',{}):continue
+            live=next((p for p in snap['positions'] if p['id']==t['id'] and p.get('owned')),None)
+            if not live or live['side']!=t['side'] or any(number(live[k])!=number(t[k]) for k in ('entry','size')):continue
+            cid=u['command_id'];cmd=self.state['commands'].get(cid) if cid else None
+            if cmd:
+                if cmd['status']=='REJECTED':
+                    u['status']='PRESERVED';changed=True;continue
+                if cmd['status']!='DONE':continue
+                if any(number(live[k])!=number(u[k]) for k in ('sl','tp')):continue
+                t.update(sl=live['sl'],tp=live['tp']);u['status']='DONE';changed=True;continue
+            # Unknown/READY protection on this resource is never overlapped.
+            if any(x['status'] not in TERMINAL and x.get('position_id')==t['id'] for x in self.state['commands'].values()):continue
+            if number(live['sl'])==number(u['sl']):u['status']='DONE';changed=True;continue
+            if number(live['sl'])!=number(u['old_sl']):u['status']='PRESERVED';changed=True;continue
+            sign=1 if t['side']=='BUY' else -1
+            if sign*(number(u['sl'])-number(live['sl']))<0:
+                u['status']='PRESERVED';changed=True;continue
+            try:
+                spec=Spec.load(snap['spec'])
+                spec.protection(t['side'],number(t['entry']),number(u['sl']),number(live['tp']),snap['quote'],modify=True)
+            except (ValueError,ArithmeticError,KeyError):continue
+            u['tp']=live['tp']
+            from .related_close import resource_basis
+            basis=resource_basis(snap,dict(kind='MODIFY',position_id=t['id']))
+            if basis is None:continue
+            u['command_id']=self._intent('MODIFY',position_id=t['id'],sl=u['sl'],tp=u['tp'],purpose='ANCHOR',independent_resource_basis=basis)
+            u['status']='PENDING';changed=True
+        if all(u['status'] in ('DONE','CLOSED','PRESERVED') for u in tx['targets']):tx['status']='DONE';changed=True
+        if changed:self.save('independent_entry_sl_progress')
+        return tx['status']!='DONE'
+
+    def _related_management(self,snap):
+        if not self._v3():return
+        c=self.state['cycle']
+        for g in c['groups']:
+            if g['role']=='initial':continue
+            sources=[t for t in c['tickets'].values() if t['id'] in c.get('provisional_recovery',{})
+                     and (t['group']==g.get('linked_source') or (t['role']=='initial' and g['role']=='reversal'))]
+            if sources and not g.get('recovery_target_tracking'):
+                g['recovery_target_tracking']=True;self.save('recovery_target_tracking_started')
+            self._recovery_retarget(snap,g)
+        self._independent_first_tp_sl(snap)
+
     def _live_ladder(self,snap,g):
+        # Existing live protection is the baseline of a provisional basket.
+        # Do not subsequently re-anchor all its targets after settlement.
+        if g.get('recovery_target_tracking'):return
         if not g.get('recovery_profile'):return super()._live_ladder(snap,g)
         c=self.state['cycle'];tickets=sorted((t for t in c['tickets'].values() if t['group']==g['id']),key=lambda t:t['index'])
         anchored=set(g.get('profile_anchored_positions',[]))
@@ -292,12 +506,26 @@ class ControlledRecoveryController(LatestCloseBasketController):
 
     def _arm_v3(self,snap,request,side,level=None,debt=None,*,persist=True):
         c=self.state['cycle']
+        basis=request.get('counter_source')
+        if basis:
+            from .related_close import counter_source_valid
+            if not counter_source_valid(snap,basis,state=self.state) or any(p['side']==side for p in basis['positions']):raise ActionRejected('Исходная корзина изменилась')
+            try:
+                net=number(c['realized'])+sum(number(self.broker.profit(p['side'],number(p['size']),number(p['entry']),number(p['sl']))) for p in basis['positions'])
+                debt=max(D(0),-net)
+            except (ValueError,ArithmeticError,OSError) as exc:raise ActionRejected('Расчёт исходной позиции недоступен; встречный вход не выставлен') from exc
         try:plans=self._plans_v3(snap,request,side,level,debt)
         except (ValueError,ArithmeticError) as exc:raise ActionRejected(str(exc),public_message='Вход V3 недопустим по цене, объёму или TP-сетке') from exc
         group=dict(id=uuid.uuid4().hex,role='v3',levels={side:plans[0]['price']},commands=[],activated=None,ladder_applied=False,v3_count=len(plans))
         if request.get('recovery_profile'):group['recovery_profile']=deepcopy(request['recovery_profile'])
         for plan in plans:
+            if basis:plan['counter_entry_source']=deepcopy(basis)
             cid=self._intent(**plan);group['commands'].append(cid);c['entries'].append(cid)
+        if basis:
+            from .related_close import authorize_counter_group
+            group.update(linked_source=basis['source_group'],manual_counter=True,counter_entry_source=deepcopy(basis))
+            authorize_counter_group(self.state,group,basis['source_group'],[p['id'] for p in basis['positions']])
+            group['counter_authorization']['kind']='OWNER_MANUAL_COUNTER_ENTRY'
         c['groups'].append(group);c['round']+=1;self._on_group_armed(group)
         self.state['phase']='RECOVERY_PENDING'
         if persist:self.save('v3_entry_prepared')
@@ -312,7 +540,7 @@ class ControlledRecoveryController(LatestCloseBasketController):
         p=next(p for p in snap['positions'] if p['id']==source['id'])
         return source,g,p
 
-    def _request_link(self,a,*,recovery_profile=None,legacy=False):
+    def _request_link(self,a,*,recovery_profile=None,legacy=False,owner_authorized=True):
         if set(a) not in ({'type','cycle_id','expected_positions'},{'type','cycle_id','count','expected_positions'}) or not isinstance(a['expected_positions'],list):raise ActionRejected('Неверные поля связанных триггеров')
         snap,c=self._context(a)
         profile=None if legacy else deepcopy(recovery_profile) if recovery_profile is not None else self._profile_request(snap,a)
@@ -325,6 +553,9 @@ class ControlledRecoveryController(LatestCloseBasketController):
         net=number(c['realized'])+sum((number(self.broker.profit(t['side'],number(t['size']),number(t['entry']),number(p['sl']))) for t in c['tickets'].values() if t['group']==g['id'] and not t['closed']),D(0))
         group=self._arm_v3(snap,dict(order_type='STOP',count=count,recovery_profile=profile),side,p['sl'],max(D(0),-net),persist=False)
         group['linked_source']=g['id']
+        from .related_close import authorize_counter_group
+        if owner_authorized:
+            authorize_counter_group(self.state,group,g['id'],[t['id'] for t in c['tickets'].values() if t['group']==g['id'] and not t['closed']])
         c['v3_link']=dict(source_position=source['id'],source_group=g['id'],group=group['id'],ids=group['commands'][:],count=count,side=side,price=p['sl'],cancel=False,recovery_profile=deepcopy(profile))
         self.save('v3_link_created')
 
@@ -492,16 +723,22 @@ class ControlledRecoveryController(LatestCloseBasketController):
             return
         if c.get('v3_relink') and not c.get('edit'):
             request=c.pop('v3_relink');self.save('v3_relink_consumed')
-            try:self._request_link(dict(type='v3_link',cycle_id=c['id'],count=request['count'],expected_positions=sorted(p['id'] for p in snap['positions'])),recovery_profile=request.get('recovery_profile'),legacy=not bool(request.get('recovery_profile')))
+            try:self._request_link(dict(type='v3_link',cycle_id=c['id'],count=request['count'],expected_positions=sorted(p['id'] for p in snap['positions'])),recovery_profile=request.get('recovery_profile'),legacy=not bool(request.get('recovery_profile')),owner_authorized=request.get('owner_authorized') is True)
             except TransientDataWait:
                 c['v3_relink']=request;self.save('v3_relink_waiting_data')
             except ActionRejected:self._halt(snap,'V3_LINK_REPLACEMENT_REQUIRES_REVIEW')
             return
+        target_wait=False
         for g in c['groups']:
+            target_wait=self._advance_recovery_target(snap,g) or target_wait
             if self._advance_actual_ladder(snap,g):return
+        if target_wait:
+            self._independent_first_tp_sl(snap)
+            return  # dependent actions wait; disjoint verified protection does not
         if self._stage_first_tp_if_ready(snap):return
         for g in c['groups']:
             if g.get('entry_sl_once') and self._advance_entry_sl_once(snap,g):return
+        if self._advance_manual_counter_request(snap):return
         initial=next((t for t in c['tickets'].values() if t['role']=='initial'),None)
         if initial is None or (not initial['closed'] and not any(t['role']!='initial' for t in c['tickets'].values())):
             return super()._step(snap)
@@ -523,6 +760,7 @@ class ControlledRecoveryController(LatestCloseBasketController):
                     # provisional protection until the loss is actually booked.
                     if not g.get('recovery_profile') and anchor and (not anchor['closed'] or (anchor.get('reason')=='SL' and any(not t['closed'] for t in source_tickets))):continue
                     self._live_ladder(snap,g)
+                    self._recovery_retarget(snap,g)
             return
         if c.get('v3_link') and snap['orders']:
             self.state['phase']='RECOVERY_PENDING';return
@@ -596,7 +834,8 @@ class ControlledRecoveryController(LatestCloseBasketController):
         group['retired']=True;c.pop('v3_link')
         edit=c.pop('v3_edit',None)
         if link.get('replace') and not link.get('cancel') and not source['closed']:
-            c['v3_relink']={'count':link['count']}
+            from .related_close import authorized_counter_group
+            c['v3_relink']={'count':link['count'],'owner_authorized':authorized_counter_group(self.state,group,source)}
             if link.get('recovery_profile'):c['v3_relink']['recovery_profile']=deepcopy(link['recovery_profile'])
             if edit:
                 if 'prepared_edit' in edit:c['edit']=edit['prepared_edit']
@@ -610,7 +849,7 @@ class ControlledRecoveryController(LatestCloseBasketController):
         blocked=bool(not snap.get('spec') or not self._v3() or self.state['stop'] or self.state.get('time_block') or self.state.get('migration_block') or c.get('manual') or c.get('edit') or c.get('v3_edit') or self._uncertain() or getattr(self.broker,'read_only',False))
         controls=dict(can_writeoff_recovery=self.can_writeoff_recovery(snap),can_enter=False,can_link=False,can_cancel_link=bool(c.get('v3_link')),can_cancel_entry=bool(c and not getattr(self.broker,'read_only',False) and not c.get('edit') and not c.get('v3_edit') and not c.get('v3_rearm') and not c.get('manual') and not self.state.get('migration_block') and self.state['phase'] not in {'SAFE_PAUSE','MANUAL'} and self._cancel_entry_groups(snap,c)),can_adjust_sl=False,can_own_entry_sl=False,reason='Дождитесь сверки или подходящего этапа V3')
         if c and not blocked:
-            controls.update(can_enter=self._entry_ready(snap,c),can_link=bool(active and len({t['group'] for t in active})==1 and any(t['index']==0 for t in active) and not snap.get('orders') and not self._unresolved() and not c.get('v3_link')),can_adjust_sl=bool(active and len({t['group'] for t in active})==1),can_own_entry_sl=bool(active and len({t['group'] for t in active})==1 and not self._protection_busy(snap)))
+            controls.update(can_enter=self._entry_ready(snap,c) or self._manual_counter_source(snap,c) is not None,can_link=bool(active and len({t['group'] for t in active})==1 and any(t['index']==0 for t in active) and not snap.get('orders') and not self._unresolved() and not c.get('v3_link')),can_adjust_sl=bool(active and len({t['group'] for t in active})==1),can_own_entry_sl=bool(active and len({t['group'] for t in active})==1 and not self._protection_busy(snap)))
         cfg=c.get('cfg',self.state['basket_settings']);key='INITIAL_SL_DISTANCE' if active and active[0]['role']=='initial' else 'RECOVERY_SL_DISTANCE'
         profile_settings=deepcopy(self.state['recovery_profiles']);selected=selected_snapshot(profile_settings)
         current=[]

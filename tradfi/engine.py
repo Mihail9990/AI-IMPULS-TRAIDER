@@ -254,6 +254,7 @@ class Controller:
             if not snap.get('observations_usable'):
                 raise OSError('Required evidence API is unavailable')
             self.store.verify_deal_ledger(self._durable_state or self.state)
+            bootstrap=getattr(self,'_source_bootstrap_candidates',lambda snap:{})(snap)
             for cid,cmd in self.state['commands'].items():
                 if self._archived(cmd) or (self.state.get('cycle') or {}).get('manual'):
                     continue
@@ -275,7 +276,21 @@ class Controller:
                     other['kind']=='MODIFY' and other['position_id']==cmd['position_id']
                     and snap['obligations'].get(other_id,{}).get('status')=='PROTECTION_READBACK'
                     for other_id,other in self.state['commands'].items() if other_id!=cid))
-                if cmd['status'] in allowed and proof not in allowed[cmd['status']] and not (closed_modify or superseded_modify):
+                # Basket may observe a strictly classified partial protective execution.
+                # This is NOT permission to act on that position or book partial P&L.
+                from .related_close import pending_closes, pending_sources
+                observing_related_partial=(getattr(self,'related_close_observation',False)
+                    and cmd['kind'] in {'STOP','MARKET'} and cmd['status']=='FILLED'
+                    and ((proof=='PARTIAL_CLOSE' and any(
+                        o['related_close']['entry_command_id']==cid for o in pending_closes(snap)))
+                        or cid in pending_sources(snap,self.state).values()
+                        or (proof=='AWAIT_POSITION_EVIDENCE' and any(t.get('command_id')==cid for t in bootstrap.values()))))
+                observing_source_protection=(getattr(self,'related_close_observation',False)
+                    and cmd['kind']=='MODIFY' and cmd['status']=='DONE' and proof=='UNKNOWN'
+                    and cmd.get('cycle_id')==(self.state.get('cycle') or {}).get('id')
+                    and str(cmd.get('position_id')) in (set(bootstrap)|set(pending_sources(snap,self.state)))
+                    and not any(str(p['id'])==str(cmd.get('position_id')) for p in snap['positions']))
+                if cmd['status'] in allowed and proof not in allowed[cmd['status']] and not (closed_modify or superseded_modify or observing_related_partial or observing_source_protection):
                     if proof in {'UNKNOWN','AWAIT_FILL_EVIDENCE','AWAIT_POSITION_EVIDENCE','API_EVIDENCE_UNAVAILABLE','ORDER_NOT_FINAL'}:
                         raise OSError('Terminal obligation evidence is delayed')
                     raise ValueError('Terminal obligation evidence changed; reconcile before execution')
@@ -631,12 +646,14 @@ class Controller:
         self.state['commands'][cid] = dict(id=cid, kind=kind, status='READY', **params)
         return cid
 
-    def dispatch(self, kinds=None):
+    def dispatch(self, kinds=None, *, ready_filter=None):
         self._deadline_guard()
         self._time_guard()
         for cmd in list(self.state['commands'].values()):
             if cmd['status'] != 'READY' or (kinds is not None and cmd['kind'] not in kinds):
                 continue
+            if ready_filter is not None and not ready_filter(cmd):
+                continue  # no durable may-send/UNKNOWN transition for a waiting resource
             if (getattr(self.broker, 'backend_id', '') == 'mt5_direct_v1'
                     and cmd['kind'] in {'STOP', 'MARKET'}
                     and any(other['kind'] in {'STOP', 'MARKET'} and other['status'] == 'UNKNOWN'
@@ -648,11 +665,14 @@ class Controller:
             self.save('may_send:' + cmd['id'])
             self.observation.fail('AWAITING_POST_MUTATION_READBACK')
             try:
+                self._submitting_command_id = cmd['id']  # volatile display only
                 self.broker.submit(deepcopy(cmd))
                 if self._restore_deferred_entry(cmd):
                     self.save('entry_waiting_data_not_sent')
             except (OSError, TimeoutError) as exc:
                 LOG.warning('Unknown gateway outcome %s: %s', cmd['id'], exc)
+            finally:
+                self._submitting_command_id = None
             # Never call submit again for this intent, even if the file/reply was lost.
 
     def _reconcile_evidence_commands(self, snap):
