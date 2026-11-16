@@ -38,6 +38,27 @@ def account_lock_path(config):
     return directory/(digest + '.lock')
 
 
+@contextmanager
+def native_ea_compatibility_lock(config):
+    """Same Common Files handle as native EA; held before any live MT5 connection.
+
+    MQL opens this file without FILE_SHARE_READ/WRITE. On Windows, an already
+    open Python read/write handle and the exclusive MQL handle exclude each
+    other. Never infer ownership from existence of a stale lock file.
+    """
+    if os.name != 'nt' or not os.environ.get('APPDATA'):
+        yield
+        return
+    symbol=config['symbol']
+    if any(c in symbol for c in '/\\\r\n'):
+        raise ValueError('Unsafe symbol for native owner lock')
+    common=Path(os.environ['APPDATA'])/'MetaQuotes'/'Terminal'/'Common'/'Files'
+    common.mkdir(parents=True,exist_ok=True)
+    lock=common/('AI_IMPULS_NATIVE_'+str(config['expected_login'])+'_'+symbol+'.lock')
+    with owner_lock(lock):
+        yield
+
+
 def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=False, execute=False,
              api=None, stop_event=None, clock=time.time, monotonic=time.monotonic,
              config_path=None, panel_factory=None):
@@ -107,6 +128,7 @@ def _run_mt5(config, inspect, *, evidence=False, journal_path=None, service=Fals
         state_file.parent.mkdir(parents=True, exist_ok=True)
         resources.enter_context(owner_lock(str(state_file)+'.lock'))
         resources.enter_context(owner_lock(account_lock_path(config)))
+        if execute:resources.enter_context(native_ea_compatibility_lock(config))
         store = Store(state_file)
         resources.callback(store.close)
         from .market_time_state import bind_market_time_state, resolve_market_time_config
@@ -185,6 +207,11 @@ def main(argv=None):
                     'no automatic migration. Use --mode mt5 --inspect with a direct-MT5 config.\n')
     try:
         config = json.loads(Path(args.config).read_text(encoding='utf-8-sig'))
+        if config.get('backend') == 'ea_native_v1':
+            if args.execute or args.inspect or args.inspect_evidence or args.journal_snapshot:
+                raise ValueError('Native EA owns execution; Python --execute/inspect are not available')
+            from .native_service import run_native
+            return run_native(config)
         if config.get('backend') != 'mt5_direct_v1':
             raise ValueError('Direct MT5 backend config is required')
         for key in ('enable_trading', 'legacy_ea_removed', 'legacy_state_reconciled'):
