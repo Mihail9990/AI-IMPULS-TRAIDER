@@ -1,0 +1,12 @@
+{
+  "backend": "ea_native_v1",
+  "common_files_directory": "C:/Users/USER/AppData/Roaming/MetaQuotes/Terminal/Common/Files/AI_IMPULS_NATIVE_V1",
+  "identity": {
+    "installation": "REPLACE-WITH-ONE-NEW-UUID",
+    "login": "REPLACE-WITH-ACCOUNT-LOGIN",
+    "server": "REPLACE-WITH-EXACT-SERVER",
+    "symbol": "XAUUSD.s"
+  },
+  "log_file": "native-panel.log",
+  "web": {"host": "127.0.0.1", "port": 8765, "password": ""}
+}
