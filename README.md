@@ -1,4 +1,4 @@
-# AI IMPULS · RECOVERY WEB 0.1.0-preview
+# AI IMPULS · RECOVERY WEB 0.1.1-preview
 
 Отдельная ветка от прямого MT5-варианта AI-IMPULS-TRAIDER (исходная основа 48130516).
 Оформление и навигация взяты из основной веб-панели; источник данных, кнопки

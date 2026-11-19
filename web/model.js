@@ -5,6 +5,13 @@
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const rows = x => Array.isArray(x) && x.length <= 10000 && x.every(object);
   function state(envelope, nonce) {
+    if (object(envelope) && envelope.mode === 'read_only') {
+      if (envelope.schema_version !== 1 || envelope.connection_only !== true ||
+          envelope.live_trading !== false || envelope.can_cancel_ranges !== false ||
+          envelope.web_trading === true || ['ranges','positions','orders','loss_history'].some(k =>
+            !Array.isArray(envelope[k]) || envelope[k].length !== 0)) fail();
+      return { connectionOnly: true, widget: null, age: null, webTrading: false };
+    }
     if (!object(envelope) || !object(envelope.widget) || !object(envelope.state_freshness)) fail();
     const w = envelope.widget, proof = envelope.state_freshness, s = w.snapshot;
     if (w.schema_version !== 1 || w.mode !== 'native' || !object(s) || !['fresh','unavailable'].includes(s.status)) fail();

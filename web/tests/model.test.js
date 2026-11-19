@@ -11,3 +11,12 @@ test('receipt absent/unknown is never described as no effect',()=>{const f={cont
 test('terminal partial is separate from full confirmation',()=>{const f={context_id:'mock-context',command:{request_id:id,phase:'completed',outcome:'partially_applied',range_outcomes:[{range_id:'1',status:'confirmed'},{range_id:'2',status:'not_dispatched'}]}};assert.match(M.receipt(f,id).message,/частично/);assert.equal(M.receipt(f,id).outcomes.length,2);f.command.outcome='invented';assert.throws(()=>M.receipt(f,id));});
 test('mocked fetch uses only GET and parses actual envelope shape',async()=>{const calls=[];const fetchMock=async(path,options)=>{calls.push({path,options});return {json:async()=>fixture()};};const req=M.spec('state',null,nonce,key);const response=await fetchMock(req.path,req.options);assert.equal(M.state(await response.json(),nonce).widget.snapshot.symbol,'XAUUSD.s');assert.equal(calls.length,1);assert.equal(calls[0].options.method,'GET');});
 test('untrusted values remain strings, never HTML',()=>{assert.equal(M.text('<img src=x onerror=alert(1)>'),'<img src=x onerror=alert(1)>');assert.equal(M.text({secret:'not rendered'}),'—');});
+
+const connectivity=()=>({schema_version:1,mode:'read_only',live_trading:false,connection_only:true,can_cancel_ranges:false,ranges:[],positions:[],orders:[],loss_history:[]});
+test('authenticated connectivity-only never pretends to know positions or allows actions',()=>{
+ const f=connectivity();
+ assert.deepEqual(M.state(f,nonce),{connectionOnly:true,widget:null,age:null,webTrading:false});
+ for(const patch of [{connection_only:false},{live_trading:true},{web_trading:true},{positions:[{}]},{schema_version:2}]){
+  assert.throws(()=>M.state({...f,...patch},nonce));
+ }
+});
