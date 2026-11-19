@@ -1,0 +1,16 @@
+# Copy to Caddyfile and replace the documentation IP with your PUBLIC IPv4.
+# Validate with the installed Caddy version before running (profile support required).
+# No secrets belong here. Use one persistent Caddy identity/storage directory.
+{
+    admin 127.0.0.1:2019
+    skip_install_trust
+}
+https://203.0.113.10 {
+    tls {
+        issuer acme {
+            dir https://acme-v02.api.letsencrypt.org/directory
+            profile shortlived
+        }
+    }
+    reverse_proxy 127.0.0.1:8767
+}

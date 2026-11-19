@@ -1,0 +1,11 @@
+# Replace with a domain you control, pointing to this VPS.
+# .invalid is intentionally not deployable. No token belongs in this file.
+widget.example.invalid {
+    @recovery path /api/recovery/*
+    handle @recovery {
+        reverse_proxy 127.0.0.1:8767
+    }
+    handle {
+        respond "Not Found" 404
+    }
+}
