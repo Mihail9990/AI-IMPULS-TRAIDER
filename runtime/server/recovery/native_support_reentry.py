@@ -3,8 +3,7 @@
 The old opposite trigger is deliberately left in place until reentry actually fills.
 """
 from copy import deepcopy
-from .engine import number, sign
-from .volume_schedule import volume_for_slot
+from .engine import initial_stop_level, number, support_reentry_level
 from .mt5_plan import pending
 from .native_entry_observer import NativeEntryObserver
 from .native_close_ledger import NativeCloseLedger
@@ -56,11 +55,11 @@ class NativeSupportReentry:
             if count >= 24:
                 raise RuntimeError('Full-SL limit reached: new manual ranges required')
             side = item['intent']['side']
-            price = support_level + sign(side) * number(config['settings']['reentry_distance'])
+            price = support_reentry_level(side, support_level, config['settings']['reentry_distance'])
             distance = number(config['settings']['initial_sl_distance'])
             intent = {'id': item['intent']['id'] + '-reentry', 'range_id': range_id,
-                      'side': side, 'price': str(price), 'sl': str(price - sign(side) * distance),
-                      'volume': str(volume_for_slot(count + 1)), 'kind': 'reentry'}
+                      'side': side, 'price': str(price), 'sl': str(initial_stop_level(side, price, distance)),
+                      'volume': str(c.lot_for_slot(count + 1)), 'kind': 'reentry'}
             validator = self.session.transport.validator
             symbol, quote = validator._metadata({'action': 'TRADE_ACTION_PENDING',
                 'type': 'ORDER_TYPE_BUY_STOP' if side == 'BUY' else 'ORDER_TYPE_SELL_STOP'})

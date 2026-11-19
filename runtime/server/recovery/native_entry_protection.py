@@ -4,7 +4,7 @@ Requires authoritative terminal entry observation; no supplied fill/price assert
 Native preflight remains responsible for never weakening external/support stops.
 """
 from copy import deepcopy
-from .engine import number, sign
+from .engine import initial_stop_level, number, support_stop_stage
 from .mt5_plan import protect
 from .native_entry_observer import NativeEntryObserver
 from .initial_stop_proof import InitialStopProof
@@ -39,24 +39,21 @@ class NativeEntryProtection:
             states = data.setdefault('confirmed_protection', {})
             state = states.get(str(pid))
             entry = number(observed['evidence']['average_price'])
-            direction = sign(item['intent']['side'])
+            side = item['intent']['side']
             validator = self.session.transport.validator
             symbol, quote = validator._metadata({'action': 'TRADE_ACTION_SLTP'})
             validator._session()
             if support:
                 if state is None:
                     raise RuntimeError('Initial protection must be confirmed first')
-                executable = number(quote.bid if direction > 0 else quote.ask)
-                progress = (executable - entry) * direction
-                stage = 2 if progress >= number('.50') else 1 if progress >= number('.25') else 0
+                stage, target = support_stop_stage(side, entry, quote.bid, quote.ask)
                 if stage <= state['stage']:
                     if number(position['sl']) != number(state['sl']):
                         raise ValueError('Broker stop differs from confirmed protection')
                     return deepcopy(state)
-                target = entry if stage == 2 else entry - direction * number('.25')
             else:
                 stage = 0
-                target = entry - direction * number(config['settings']['initial_sl_distance'])
+                target = initial_stop_level(side, entry, config['settings']['initial_sl_distance'])
                 if state is not None:
                     if number(position['sl']) != number(state['sl']):
                         raise ValueError('Broker stop differs from confirmed protection')

@@ -3,8 +3,7 @@
 Not a close/reentry runner. Support SL never moves this initial opposite order.
 """
 from copy import deepcopy
-from .engine import number, sign, other
-from .volume_schedule import volume_for_slot
+from .engine import initial_stop_level, number, other
 from .mt5_plan import pending
 from .native_entry_observer import NativeEntryObserver
 from .native_close_ledger import NativeCloseLedger
@@ -72,15 +71,15 @@ class NativeInitialReverse:
             entry = number(observed['evidence']['average_price'])
             distance = number(config['settings']['initial_sl_distance'])
             side = other(item['intent']['side'])
-            price = entry - sign(item['intent']['side']) * distance
+            price = initial_stop_level(item['intent']['side'], entry, distance)
             # Lot is derived only from classified full-SL closes, never fills
             # or support closes. Owner-approved exception: an already prearmed
             # opposite keeps its volume after a manual/support exit, even at a
             # schedule boundary (four full stops: retain the prearmed .02).
             intent = {'id': item['intent']['id'] + '-reverse', 'range_id': range_id,
                       'side': side, 'price': str(price),
-                      'sl': str(price - sign(side) * distance),
-                      'volume': str(volume_for_slot(count + 2)), 'kind': 'reverse'}
+                      'sl': str(initial_stop_level(side, price, distance)),
+                      'volume': str(c.lot_for_slot(count + 2)), 'kind': 'reverse'}
             validator = self.session.transport.validator
             symbol, quote = validator._metadata({'action': 'TRADE_ACTION_PENDING',
                 'type': 'ORDER_TYPE_BUY_STOP' if side == 'BUY' else 'ORDER_TYPE_SELL_STOP'})

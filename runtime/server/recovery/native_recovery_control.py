@@ -7,7 +7,9 @@ Full fill/SL/reversal lifecycle must be connected before deployment.
 import json
 from copy import deepcopy
 from uuid import uuid4
-from .engine import Engine
+from .engine import Engine, number
+from .native_lot_schedule import DEFAULT_LOT_SCHEDULE, validate_lot_schedule
+from .volume_schedule import volume_for_slot
 from .mt5_plan import pending
 from .native_executor_session import NativeExecutorSession
 
@@ -25,6 +27,8 @@ class NativeRecoveryControl:
             self.db = session.executor.db
             self.db.execute('''CREATE TABLE IF NOT EXISTS native_recovery_control
                 (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL)''')
+            self.db.execute('''CREATE TABLE IF NOT EXISTS native_lot_schedule
+                (magic INTEGER PRIMARY KEY, payload TEXT NOT NULL)''')
             self.db.commit()
             data = self._read()
             if data is not None and data['magic'] != magic:
@@ -45,6 +49,17 @@ class NativeRecoveryControl:
         with self.db:
             self.db.execute('INSERT OR REPLACE INTO native_recovery_control VALUES(1,?)',
                             (json.dumps(data, sort_keys=True),))
+
+    def lot_schedule(self):
+        with self.session._lock:
+            self._guard()
+            row = self.db.execute('SELECT payload FROM native_lot_schedule WHERE magic=?',
+                                  (self.magic,)).fetchone()
+            return validate_lot_schedule(json.loads(row[0])) if row else list(DEFAULT_LOT_SCHEDULE)
+
+    def lot_for_slot(self, slot):
+        volume_for_slot(slot)  # shared ordinal and cap validation
+        return number(self.lot_schedule()[slot - 1])
 
     def stage_initial_ranges(self, ranges, *, initial_sl_distance='0.70', reentry_distance='0.70'):
         """Offline plan and persist only. One generation, never cancel old exposure."""

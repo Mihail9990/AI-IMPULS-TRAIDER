@@ -9,7 +9,6 @@ import json
 from copy import deepcopy
 from .engine import number, other, sign
 from .mt5_plan import pending
-from .volume_schedule import volume_for_slot
 from .native_entry_observer import NativeEntryObserver
 from .native_close_ledger import NativeCloseLedger
 from .native_initial_reverse import NativeInitialReverse
@@ -126,7 +125,7 @@ class NativeInterruptedRecovery:
             price=number(close['stop_level']);distance=number(config['settings']['initial_sl_distance'])
             intent=dict(id=source['intent']['id']+'-reverse',range_id=range_id,side=side,
                         price=str(price),sl=str(price-sign(side)*distance),
-                        volume=str(volume_for_slot(count+1)),kind='reverse')
+                        volume=str(c.lot_for_slot(count+1)),kind='reverse')
             proof=dict(generation=data['generation'],source=source['key'],close=close,
                        full_sl_count=count,config=config,scope=scope,intent=intent)
             fingerprint=hashlib.sha256(json.dumps(proof,sort_keys=True).encode()).hexdigest()

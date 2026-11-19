@@ -32,6 +32,25 @@ def other(side):
     return 'SELL' if side == 'BUY' else 'BUY'
 
 
+def initial_stop_level(side, execution_price, distance):
+    return number(execution_price) - sign(side) * number(distance)
+
+
+def support_stop_stage(side, execution_price, bid, ask):
+    entry, direction = number(execution_price), sign(side)
+    executable = number(bid if direction > 0 else ask)
+    progress = (executable - entry) * direction
+    if progress >= D('.50'):
+        return 2, entry
+    if progress >= D('.25'):
+        return 1, entry - direction * D('.25')
+    return 0, None
+
+
+def support_reentry_level(side, stop_level, distance):
+    return number(stop_level) + sign(side) * number(distance)
+
+
 class Engine:
     def __init__(self, state=None):
         self.data = deepcopy(state) if state is not None else {
@@ -65,7 +84,7 @@ class Engine:
     def _order(self, rid, side, price, kind):
         self.validate_distance_policy()
         price = number(price)
-        sl = price - sign(side) * number(self._range(rid).get('initial_sl_distance', '0.70'))
+        sl = initial_stop_level(side, price, self._range(rid).get('initial_sl_distance', '0.70'))
         if price <= 0 or sl <= 0:
             raise ValueError('Price and SL must be positive')
         order = {'id': self._id('order'), 'range_id': rid, 'side': side,
@@ -102,7 +121,7 @@ class Engine:
             price, volume = number(r['price']), number(r['volume'])
             if volume != volume_for_slot(1):
                 raise ValueError('Initial volume is fixed by approved schedule at 0.01')
-            if volume <= 0 or price <= 0 or price - sign(r['side']) * initial_sl_distance <= 0:
+            if volume <= 0 or price <= 0 or initial_stop_level(r['side'], price, initial_sl_distance) <= 0:
                 raise ValueError('Invalid price, volume or stop')
             prepared.append({'id': r['id'], 'price': str(price), 'side': r['side'],
                              'volume': str(volume), 'loss': '0', 'realized_net': '0',
@@ -138,7 +157,7 @@ class Engine:
         if self._range(order['range_id']).get('run_state', 'active') != 'active':
             raise ValueError('Fill during cancellation/manual transition: requires explicit broker reconciliation')
         entry = number(entry)
-        sl = entry - sign(order['side']) * number(self._range(order['range_id']).get('initial_sl_distance', '0.70'))
+        sl = initial_stop_level(order['side'], entry, self._range(order['range_id']).get('initial_sl_distance', '0.70'))
         if entry <= 0 or sl <= 0:
             raise ValueError('Invalid actual fill')
         r = self._range(order['range_id'])
@@ -166,12 +185,9 @@ class Engine:
         if bid <= 0 or ask < bid:
             raise ValueError('Invalid BID/ASK')
         for p in self.data['positions']:
-            entry, direction = number(p['entry']), sign(p['side'])
-            executable = bid if p['side'] == 'BUY' else ask
-            progress = (executable - entry) * direction
-            stage = 2 if progress >= D('.50') else 1 if progress >= D('.25') else 0
+            direction = sign(p['side'])
+            stage, target = support_stop_stage(p['side'], p['entry'], bid, ask)
             if stage > p['stop_stage']:
-                target = entry if stage == 2 else entry - direction * D('.25')
                 # A short configurable initial SL may already protect better than
                 # the stage-1 target. Never loosen it or call an unapplied stage
                 # confirmed: an unchanged initial stop remains an initial SL.
@@ -208,8 +224,8 @@ class Engine:
         if reason == 'initial_sl' and p['stop_stage'] != 0:
             raise ValueError('Initial stop is no longer active')
         if reason == 'support_sl':
-            reentry = number(p['sl']) + sign(p['side']) * number(self._range(p['range_id']).get('reentry_distance', '0.70'))
-            if reentry <= 0 or reentry - sign(p['side']) * number(self._range(p['range_id']).get('initial_sl_distance', '0.70')) <= 0:
+            reentry = support_reentry_level(p['side'], p['sl'], self._range(p['range_id']).get('reentry_distance', '0.70'))
+            if reentry <= 0 or initial_stop_level(p['side'], reentry, self._range(p['range_id']).get('initial_sl_distance', '0.70')) <= 0:
                 raise ValueError('Reentry price or SL is invalid; simulation paused')
         pnl = number(realized_net)
         r = self._range(p['range_id'])
@@ -225,7 +241,7 @@ class Engine:
                     if pending['range_id'] == r['id']:
                         pending['status'] = 'simulated_cancel_requested'
         if reason == 'support_sl':
-            self._order(r['id'], p['side'], number(p['sl']) + sign(p['side']) * number(r.get('reentry_distance', '0.70')), 'reentry')
+            self._order(r['id'], p['side'], support_reentry_level(p['side'], p['sl'], r.get('reentry_distance', '0.70')), 'reentry')
         # A support/manual close does not consume the projected full-stop slot.
         # Keep the opposite PRICE but reset its simulated volume to current slot.
         # A live controller must reconcile/replace its broker volume explicitly.

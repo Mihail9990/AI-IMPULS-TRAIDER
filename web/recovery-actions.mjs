@@ -1,6 +1,6 @@
-// Offline draft. Integrator must keep allowTrading=false until migration is approved.
+import {lotSchedule,lotScheduleInput} from './control-policy.mjs';
 const BASE='/api/recovery', KEY='recovery.native.pending.v1';
-const paths={ranges:`${BASE}/ranges`,cancel:`${BASE}/cancel`,close1:`${BASE}/ranges/1/close-cancel`,close2:`${BASE}/ranges/2/close-cancel`,reconcile:`${BASE}/reconcile`};
+const paths={ranges:`${BASE}/ranges`,cancel:`${BASE}/cancel`,close1:`${BASE}/ranges/1/close-cancel`,close2:`${BASE}/ranges/2/close-cancel`,lotSchedule:`${BASE}/lot-schedule`,reconcile:`${BASE}/reconcile`};
 const fail=code=>{throw new Error(code)};
 const object=x=>x!==null&&typeof x==='object'&&!Array.isArray(x);
 const finite=x=>typeof x==='number'&&Number.isFinite(x)&&x>0;
@@ -12,7 +12,7 @@ function canonical(value,key=''){
  if(object(value))return Object.fromEntries(Object.keys(value).sort().map(k=>[k,canonical(value[k],k)]));
  return value;
 }
-function expectedPayload(action,body){let p={...body};delete p.request_id;p.kind=action==='ranges'?'ranges':action==='cancel'?'cancel':action==='reconcile'?'reconcile':'close_cancel';if(action==='close1'||action==='close2')p.range_id=action==='close1'?'1':'2';return p;}
+function expectedPayload(action,body){let p={...body};delete p.request_id;p.kind=action==='ranges'?'ranges':action==='cancel'?'cancel':action==='reconcile'?'reconcile':action==='lotSchedule'?'lot_schedule':'close_cancel';if(action==='close1'||action==='close2')p.range_id=action==='close1'?'1':'2';return p;}
 export function nativeState(response,nonce){
  const proof=response?.state_freshness, w=(response?.state??response)?.widget;
  if(!object(proof)||proof.version!==1||proof.nonce!==nonce||!/^([0-9a-f]{32})$/.test(nonce)||!(proof.age_ms===null||Number.isSafeInteger(proof.age_ms)))fail('UNBOUND_STATE');
@@ -25,12 +25,20 @@ export function nativeState(response,nonce){
 }
 function allowed(w,action){
  if(action==='reconcile')return false; // Not wired until its receipt contract is independently approved.
- if(w.webTrading!==true||w.reconciliation_required)return false;
+ if(w.webTrading!==true)return false;
+ if(w.reconciliation_required)return false;
+ if(action==='lotSchedule')return !w.positions.length&&w.recovery_cycle_active!==true&&w.capabilities.set_lot_schedule===true&&lotSchedule(w)!==null;
  if(action==='ranges')return w.positions.length===0&&w.capabilities.set_ranges;
  if(action==='cancel')return w.positions.length===0&&w.executor_ready&&w.capabilities.cancel_ranges;
  return w.executor_ready&&w.capabilities.close_cancel_range_ids.includes(action==='close1'?'1':'2');
 }
 function input(action,p){
+ if(action==='lotSchedule'){
+  const expected=lotSchedule(p&&{lot_schedule:p.expected_lot_schedule});
+  if(!expected)fail('BAD_INPUT');
+  return {lot_schedule:lotScheduleInput(p.lot_schedule),expected_lot_schedule:expected};
+ }
+
  if(action!=='ranges')return {};
  if(!object(p)||p.initial_sl_distance<0.60||!Array.isArray(p.ranges)||p.ranges.length<1||p.ranges.length>2||!finite(p.initial_sl_distance)||!finite(p.reentry_distance))fail('BAD_INPUT');
  const seen=new Set();const ranges=p.ranges.map(r=>{if(!object(r)||!['1','2'].includes(r.id)||seen.has(r.id)||!['BUY','SELL'].includes(r.side)||!finite(r.price)||r.volume!==0.01)fail('BAD_INPUT');seen.add(r.id);return {id:r.id,side:r.side,price:r.price,volume:r.volume};});
@@ -69,12 +77,14 @@ export class RecoveryActions {
   this.busy=true;
   try{
    const values=input(action,params),shown=await this.getState();if(!allowed(shown,action))fail('CAPABILITY_DENIED');
+   if(action==='lotSchedule'&&JSON.stringify(lotSchedule(shown))!==JSON.stringify(values.expected_lot_schedule))fail('STATE_CHANGED');
    const body={...values,request_id:this.crypto.randomUUID(),expected_context:shown.snapshot.context_id,expected_generation:shown.snapshot.generation};
    const accepted=await this.confirm(Object.freeze({action,accountMode:shown.account_trade_mode,body:JSON.parse(JSON.stringify(body)),warning:action==='reconcile'?'Evidence-only; may allow configured strategy to continue.':'Explicit trading command. No automatic retry.'}));
    if(accepted!==true)return {status:'cancelled'};
    if(!this.enabled||this.pending())fail('TRADING_DISABLED');
    const current=await this.getState();
    if(current.snapshot.context_id!==body.expected_context||current.snapshot.generation!==body.expected_generation||!allowed(current,action))fail('STATE_CHANGED');
+   if(action==='lotSchedule'&&JSON.stringify(lotSchedule(current))!==JSON.stringify(body.expected_lot_schedule))fail('STATE_CHANGED');
    const record={version:1,action,request_id:body.request_id,context:body.expected_context,digest:await this.digest(expectedPayload(action,body)),rangeIds:(body.ranges??[]).map(r=>r.id)};
    // Persist and verify before the ONLY POST. No body, token or raw response is stored.
    const encoded=JSON.stringify(record);try{this.storage.setItem(KEY,encoded);if(this.storage.getItem(KEY)!==encoded)fail('STORAGE_UNAVAILABLE');}catch{fail('STORAGE_UNAVAILABLE');}

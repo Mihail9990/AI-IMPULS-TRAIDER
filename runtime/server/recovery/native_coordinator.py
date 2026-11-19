@@ -16,7 +16,8 @@ from .native_close_range import NativeCloseRange
 from .native_interrupted_recovery import NativeInterruptedRecovery
 from .native_range_management import NativeRangeManagement
 from .ea_stop_evidence import StopEvidenceUnavailable
-from .engine import Engine
+from .engine import Engine, number
+from .native_lot_schedule import validate_broker_lots, validate_lot_schedule
 from .mt5_plan import pending
 
 
@@ -63,6 +64,115 @@ class NativeCoordinator:
         return hashlib.sha256(json.dumps(dict(account=b.account, server=b.server,
             symbol=b.symbol, magic=self.control.magic), sort_keys=True).encode()).hexdigest()
 
+    def check_lot_schedule_idle(self, *, snapshot=None, observed=None):
+        """Read-only gate under the same owner lock as range dispatch.
+
+        Open positions are account-wide. An idle, verified primary pending
+        may remain unchanged; successor pending and resumable cycles block
+        writes even when broker position inventory is empty.
+        """
+        c = self.control
+        with self.session._lock:
+            c._guard()
+            transport = self.session.transport
+            transport.validator._session()
+            data = c._read() or {}
+            waiting = data.get('range_management', {}).get('phase') == 'waiting'
+            without_management = dict(data)
+            if waiting:
+                without_management.pop('range_management')
+            if (self._unfinished_api_command()
+                    or (not self.session.ready and not waiting)
+                    or (data and c._unresolved_entry_cancellations(without_management))
+                    or c.db.execute("SELECT id FROM recovery_outbox WHERE state NOT IN ('VERIFIED','REJECTED') LIMIT 1").fetchone()):
+                raise RuntimeError('Lot schedule unavailable until broker reconciliation')
+            # Manual intake is still offline-only. If a native manual controller
+            # is attached later, it must supply this authoritative idle check
+            # under the same owner lock before its trading path is enabled.
+            manual_cycle_active = getattr(self, 'manual_cycle_active', None)
+            if manual_cycle_active is not None and manual_cycle_active() is not False:
+                raise RuntimeError('Lot schedule unavailable while manual RECOVERY is active')
+            if data and not data.get('strategy_config'):
+                raise ValueError('Range state unavailable for lot schedule')
+            mapping = self.ranges._mapping(data) if data else {}
+            binding = transport.binding
+            scope = dict(account=binding.account, server=binding.server, symbol=binding.symbol, magic=c.magic)
+            if snapshot is None:
+                snapshot = transport.snapshot(scope)
+            if snapshot['positions']:
+                raise ValueError('Lot schedule unavailable while any account position is open')
+            def owned(orders):
+                result = {}
+                for row in orders:
+                    if row.get('symbol') != binding.symbol or row.get('magic') not in binding.magics:
+                        continue
+                    ticket = row['ticket']
+                    if ticket in result or ticket not in mapping or row['magic'] != c.magic:
+                        raise ValueError('Unverified pending prevents editing lot schedule')
+                    result[ticket] = row
+                return result
+
+            pending_before = owned(snapshot['orders'])
+            pending_seen = {}
+            modes = data.get('range_modes', {})
+            if not waiting and any(mode not in ('active', 'manual', 'cancelled')
+                                   for mode in modes.values()):
+                raise ValueError('RECOVERY range is active, resumable, or unresolved')
+            for ticket, item in mapping.items():
+                evidence = (observed[ticket] if observed is not None
+                            else self.observer.reader.read(item, magic=c.magic))
+                rid = item['intent']['range_id']
+                inactive = waiting or modes.get(rid) in ('manual', 'cancelled')
+                if evidence.get('position') is not None:
+                    raise ValueError('Lot schedule unavailable while any account position is open')
+                filled = number(evidence['filled_volume'])
+                order = evidence['pending_order']
+                if (not inactive and filled > 0) or (order is not None and
+                        (inactive or item['intent']['kind'] != 'primary' or filled != 0)):
+                    raise ValueError('RECOVERY range is active, resumable, or unresolved')
+                if order is not None:
+                    pending_seen[ticket] = order
+
+            if pending_seen != pending_before:
+                raise ValueError('Broker pending inventory changed during lot schedule check')
+            # Read positions last and rebind the account after the inventory calls.
+            rows = transport.api.orders_get()
+            positions = transport.api.positions_get()
+            transport.validator._session()
+            c._guard()
+            if rows is None or positions is None or positions:
+                raise ValueError('Lot schedule unavailable while positions are open or unknown')
+            current_owned = owned([transport.validator.session._normalize_order(row) for row in rows])
+            if current_owned != pending_before:
+                raise ValueError('Broker pending inventory changed during lot schedule check')
+
+    def _set_lot_schedule(self, request_id, payload, encoded):
+        c = self.control
+        try:
+            previous = validate_lot_schedule(payload.get('expected_lot_schedule'))
+            candidate = validate_lot_schedule(payload.get('lot_schedule'))
+            if previous != c.lot_schedule():
+                raise ValueError('Displayed lot schedule changed')
+            info = self.session.transport.api.symbol_info(self.session.transport.binding.symbol)
+            validate_broker_lots(candidate, info)
+            self.check_lot_schedule_idle()
+        except (ValueError, RuntimeError, OSError) as exc:
+            with c.db:
+                c.db.execute('INSERT INTO native_api_commands VALUES(?,?,?,?)',
+                    (str(request_id), encoded, 'rejected', json.dumps({'error':str(exc)})))
+            raise ValueError(str(exc)) from exc
+
+        # No broker effect to reconcile. Commit settings and completed receipt
+        # together (neither one can survive a crash without the other).
+        result = self.state()
+        result.update(command_outcome='confirmed', lot_schedule=candidate)
+        with c.db:
+            c.db.execute('INSERT OR REPLACE INTO native_lot_schedule (magic,payload) VALUES (?,?)',
+                         (c.magic, json.dumps(candidate)))
+            c.db.execute('INSERT INTO native_api_commands VALUES(?,?,?,?)',
+                         (str(request_id), encoded, 'completed', json.dumps(result)))
+        return result
+
     def command(self, request_id, payload):
         """Durable at-most-once HTTP command. Interrupted commands need review.
 
@@ -93,7 +203,7 @@ class NativeCoordinator:
                     self.session.ready = False
                     raise RuntimeError('Interrupted API command requires explicit reconciliation')
                 kind = payload.get('kind')
-                if kind not in ('ranges', 'cancel', 'close_cancel'):
+                if kind not in ('ranges', 'cancel', 'close_cancel', 'lot_schedule'):
                     raise ValueError('Unknown native command')
                 if kind == 'ranges':
                     engine = Engine()
@@ -114,7 +224,7 @@ class NativeCoordinator:
                 # checkpoint. They must not disable protection on an open position.
                 if kind in ('cancel', 'close_cancel') and data is None:
                     raise ValueError('No ranges configured')
-                if data is not None:
+                if data is not None and kind != 'lot_schedule':
                     if not self.session.ready or c._unresolved_entry_cancellations(data):
                         # A completed cancel generation is deliberately waiting for
                         # replacement and keeps ready false.
@@ -142,6 +252,8 @@ class NativeCoordinator:
                     c.db.execute('INSERT INTO native_api_commands VALUES(?,?,?,?)',
                         (str(request_id), encoded, 'rejected', json.dumps({'error':str(exc)})))
                 raise
+            if kind == 'lot_schedule':
+                return self._set_lot_schedule(request_id, payload, encoded)
             with c.db:
                 c.db.execute('INSERT INTO native_api_commands VALUES(?,?,?,NULL)',
                              (str(request_id), encoded, 'dispatching'))
@@ -480,13 +592,24 @@ class NativeCoordinator:
                         o = self.observer.observe(rid, order_key=key)
                     if o['phase'] == 'awaiting_protection':
                         self.protection.initial(rid, order_key=key)
-                        self.protection.support(rid, order_key=key)
-                        totals = self.ledger.totals().get(rid, {})
-                        if totals.get('classification_pending_count', 0): continue
-                        if key in c._read().get('reverse_commands', {}) or key in c._read().get('reentry_commands', {}):
-                            self.retirement.retire(rid, order_key=key)
-                        if totals.get('full_sl_count', 0) < 23:
-                            self.reverse.arm(rid, order_key=key)
+                        try:
+                            totals = self.ledger.totals().get(rid, {})
+                            if not totals.get('classification_pending_count', 0):
+                                current = c._read()
+                                if key in current.get('reverse_commands', {}) or key in current.get('reentry_commands', {}):
+                                    self.retirement.retire(rid, order_key=key)
+                                if totals.get('full_sl_count', 0) < 23:
+                                    self.reverse.arm(rid, order_key=key)
+                        except (ValueError, RuntimeError):
+                            # If the price/intent failed before a broker effect,
+                            # keep the protective path, then report the failure.
+                            if self.session.ready and not c._unresolved_entry_cancellations(c._read()):
+                                self.protection.support(rid, order_key=key)
+                            raise
+                        # Never move support across an unresolved broker effect.
+                        # Known close-evidence gaps still allow support below.
+                        if self.session.ready and not c._unresolved_entry_cancellations(c._read()):
+                            self.protection.support(rid, order_key=key)
                     elif o['phase'] == 'closed_before_protection':
                         data = c._read()
                         row = data.get('close_ledger', {}).get(str(item['broker_order']), {})

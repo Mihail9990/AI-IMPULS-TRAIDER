@@ -92,7 +92,7 @@ def native_caddy_config(ip, storage):
  }
  @write {
   method POST
-  path /api/recovery/ranges /api/recovery/cancel /api/recovery/reconcile /api/recovery/ranges/1/close-cancel /api/recovery/ranges/2/close-cancel
+  path /api/recovery/ranges /api/recovery/lot-schedule /api/recovery/cancel /api/recovery/reconcile /api/recovery/ranges/1/close-cancel /api/recovery/ranges/2/close-cancel
  }
  handle @panel {
   reverse_proxy 127.0.0.1:8767

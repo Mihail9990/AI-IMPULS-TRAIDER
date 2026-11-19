@@ -12,7 +12,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from .api import Command, SetRanges
-from pydantic import Field
+from pydantic import Field, StrictStr
 from .native_coordinator import NativeCoordinator
 
 
@@ -69,6 +69,11 @@ class NativeSetRanges(SetRanges):
     expected_context: str = Field(min_length=1)
 
 
+class NativeLotSchedule(NativeCommand):
+    lot_schedule: list[StrictStr] = Field(min_length=24, max_length=24)
+    expected_lot_schedule: list[StrictStr] = Field(min_length=24, max_length=24)
+
+
 def create_native_app(token, coordinator, *, lifespan=None):
     if not isinstance(token, str) or len(token) < 32 or not token.isascii():
         raise ValueError('Token must contain at least 32 ASCII characters')
@@ -83,7 +88,7 @@ def create_native_app(token, coordinator, *, lifespan=None):
         # It does NOT revoke a UUID or prove absence of another in-flight attempt.
         # Clients may clear only their persisted single-ever-attempt request.
         path = request.url.path
-        if request.method != 'POST' or not (path in ('/api/recovery/ranges', '/api/recovery/cancel')
+        if request.method != 'POST' or not (path in ('/api/recovery/ranges', '/api/recovery/cancel', '/api/recovery/lot-schedule')
                 or re.fullmatch(r'/api/recovery/ranges/[^/]+/close-cancel', path)):
             return None
         raw = await request.body()
@@ -180,6 +185,13 @@ def create_native_app(token, coordinator, *, lifespan=None):
         key = payload.pop('request_id')
         return command(key, dict(payload, kind='ranges'))
 
+    @app.post('/api/recovery/lot-schedule')
+    def lot_schedule(body: NativeLotSchedule, authorization: str | None = Header(default=None)):
+        auth(authorization)
+        payload = body.model_dump(mode='json')
+        key = payload.pop('request_id')
+        return command(key, dict(payload, kind='lot_schedule'))
+
     @app.post('/api/recovery/cancel')
     def cancel(body: NativeCommand, authorization: str | None = Header(default=None)):
         auth(authorization)
@@ -228,10 +240,10 @@ def native_widget_projection(coordinator):
                  if row['range_id'] == rid and row['fully_closed']), Decimal('0')))
         widget = dict(schema_version=1, mode='native', account_trade_mode='unknown',
             snapshot=dict(status='unavailable', observed_at=None, generation=data.get('generation'), symbol=binding.symbol, context_id=coordinator.context_id()),
-            settings=deepcopy(config.get('settings', {})), ranges=configured,
+            settings=deepcopy(config.get('settings', {})), ranges=configured, lot_schedule=c.lot_schedule(),
             positions=None, orders=None, loss_history=history, totals=totals,
             executor_ready=raw['executor_ready'], reconciliation_required=False, issues=issues,
-            capabilities=dict(set_ranges=False, cancel_ranges=False, close_cancel_range_ids=[], reasons=[]))
+            capabilities=dict(set_ranges=False, cancel_ranges=False, set_lot_schedule=False, close_cancel_range_ids=[], reasons=[]))
         # A completed cancel generation is intentionally unready, not an error.
         without_management = deepcopy(data); without_management.pop('range_management', None)
         checkpoint = bool(data and c._unresolved_entry_cancellations(without_management))
@@ -252,6 +264,7 @@ def native_widget_projection(coordinator):
             position_mappings = {}
             mapping_error = False
             observed_pending = {}
+            entry_evidence = {}
             observed_positions = {}
             mapped_position_ids = set()
             for item in coordinator._items(data) if data else []:
@@ -265,6 +278,7 @@ def native_widget_projection(coordinator):
                     if ticket in mappings: raise ValueError('Duplicate mapping')
                     mappings[ticket] = item['intent']['range_id']
                     evidence = coordinator.observer.reader.read(item, magic=c.magic)
+                    entry_evidence[ticket] = evidence
                     if evidence['position_identifier'] is not None:
                         mapped_position_ids.add(evidence['position_identifier'])
                     pending = evidence['pending_order']
@@ -351,6 +365,13 @@ def native_widget_projection(coordinator):
                     matching = [p for p in positions if p['range_id'] == r['id']]
                     if len(matching) == 1 and r['lifecycle'] == 'active':
                         cap['close_cancel_range_ids'].append(r['id'])
+            if not blocked and not snapshot['positions']:
+                try:
+                    coordinator.check_lot_schedule_idle(snapshot=snapshot, observed=entry_evidence)
+                except (KeyError, ValueError, RuntimeError, OSError):
+                    pass  # Leave only this capability disabled.
+                else:
+                    cap['set_lot_schedule'] = True
             if positions: cap['reasons'].append('open_positions_disable_set_and_cancel')
         except (ValueError, RuntimeError, OSError) as exc:
             # No guessed empty inventory and no stale data presented as fresh.

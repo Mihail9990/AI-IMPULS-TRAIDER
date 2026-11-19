@@ -5,12 +5,12 @@ import {RecoveryActions,nativeState} from './recovery-actions.mjs';
 const nonce='a'.repeat(32),values={ranges:[{id:'1',side:'BUY',price:100,volume:0.01}],initial_sl_distance:0.7,reentry_distance:0.7};
 function state(n=nonce){return {web_trading:true,state_freshness:{version:1,nonce:n,age_ms:null},widget:{schema_version:1,mode:'native',account_trade_mode:'demo',snapshot:{status:'fresh',context_id:'fixture-context',generation:'fixture-gen'},positions:[],orders:[],ranges:[],executor_ready:true,reconciliation_required:false,capabilities:{set_ranges:true,cancel_ranges:true,close_cancel_range_ids:[]}}};}
 function harness(options={}){
- const map=new Map(),calls=[];let body;
+ const map=new Map(),calls=[];let body,actionPath;
  const storage={getItem:k=>map.get(k)??null,setItem:(k,v)=>map.set(k,v),removeItem:k=>map.delete(k)};
  const fetchImpl=async(path,opt)=>{calls.push({path,opt});let result;
   if(path.endsWith('/state')){result=state(opt.headers['X-Recovery-State-Nonce']);if(options.mutate)options.mutate(result,calls.filter(c=>c.path.endsWith('/state')).length);}
-  else if(opt.method==='POST'){body=JSON.parse(opt.body);if(options.timeout)throw new Error('secret MUST NEVER ESCAPE');result={accepted:true};}
-  else {let payload={...body,kind:'ranges'};delete payload.request_id;result={context_id:'fixture-context',command:{request_id:body.request_id,phase:'completed',outcome:'confirmed',payload}};if(options.receipt)options.receipt(result);}
+  else if(opt.method==='POST'){body=JSON.parse(opt.body);actionPath=path;if(options.timeout)throw new Error('secret MUST NEVER ESCAPE');result={accepted:true};}
+  else {let payload={...body,kind:actionPath.endsWith('/lot-schedule')?'lot_schedule':'ranges'};delete payload.request_id;result={context_id:'fixture-context',command:{request_id:body.request_id,phase:'completed',outcome:'confirmed',payload}};if(options.receipt)options.receipt(result);}
   return {ok:true,status:200,text:async()=>JSON.stringify(result)};
  };
  const core=new RecoveryActions({fetchImpl,cryptoImpl:webcrypto,storage,token:async()=>'fixture-token',confirm:async()=>options.confirm!==false,allowTrading:options.allow!==false,locks:{request:async(_n,_o,fn)=>fn()}});
@@ -52,3 +52,38 @@ test('corrupt persisted journal blocks dispatch',async()=>{const h=harness();h.s
 test('server web_trading must be exact true at both reads',async()=>{for(const flag of [false,undefined,'true',1]){const h=harness({mutate:r=>{r.web_trading=flag;}});await assert.rejects(h.core.execute('ranges',values));assert(!h.calls.some(c=>c.opt.method==='POST'));}const h=harness({mutate:(r,n)=>{if(n===2)r.web_trading=false;}});await assert.rejects(h.core.execute('ranges',values));assert(!h.calls.some(c=>c.opt.method==='POST'));});
 test('SL minimum and fixed starting volume cannot be bypassed',async()=>{for(const v of [{...values,initial_sl_distance:.59},{...values,ranges:[{...values.ranges[0],volume:.02}]}]){const h=harness();await assert.rejects(h.core.execute('ranges',v));assert.equal(h.calls.length,0);}});
 test('reconcile explicitly unavailable even in armed session',async()=>{const h=harness();await assert.rejects(h.core.execute('reconcile'));assert.equal(h.calls.length,0);});
+
+const defaultLots=['0.01',...Array(23).fill('0.02')];
+const changedLots=['0.01','0,03',...Array(22).fill('0.02')];
+const lots=(opts={})=>harness({...opts,mutate:(r,n)=>{
+ r.widget.lot_schedule=[...defaultLots];r.widget.capabilities.set_lot_schedule=true;
+ opts.mutate?.(r,n);
+}});
+const lotPayload={lot_schedule:changedLots,expected_lot_schedule:defaultLots};
+test('lot schedule uses authenticated exact-decimal command and unchanged slot one',async()=>{
+ const h=lots();
+ assert.equal((await h.core.execute('lotSchedule',lotPayload)).status,'confirmed');
+ const post=h.calls.find(c=>c.opt.method==='POST');
+ assert.equal(post.path,'/api/recovery/lot-schedule');
+ const body=JSON.parse(post.opt.body);
+ assert.deepEqual(body.expected_lot_schedule,defaultLots);
+ assert.equal(body.lot_schedule[0],'0.01');
+ assert.equal(body.lot_schedule[1],'0.03');
+ assert.equal(h.map.size,0);
+});
+test('lot schedule rejects invalid initial lot and does not coerce numeric payloads',async()=>{
+ for(const table of [[...changedLots.slice(1)],['0.02',...changedLots.slice(1)],['0.01',0.03,...changedLots.slice(2)]]){
+  const h=lots();await assert.rejects(h.core.execute('lotSchedule',{...lotPayload,lot_schedule:table}));
+  assert.equal(h.calls.length,0);
+ }
+});
+test('lot schedule refuses open, active, permission-lost or concurrently edited settings',async()=>{
+ const blockers=[r=>{r.widget.recovery_cycle_active=true;},r=>{r.widget.capabilities.set_lot_schedule=false;},r=>{
+  r.widget.positions=[{}];r.widget.capabilities.set_ranges=false;r.widget.capabilities.cancel_ranges=false;
+ },r=>{r.widget.lot_schedule[1]='0.04';}];
+ for(const block of blockers){
+  const h=lots({mutate:(r,n)=>{if(n===2)block(r);}});
+  await assert.rejects(h.core.execute('lotSchedule',lotPayload),/STATE_CHANGED/);
+  assert(!h.calls.some(c=>c.opt.method==='POST'));
+ }
+});

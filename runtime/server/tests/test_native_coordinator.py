@@ -57,6 +57,27 @@ class CoordinatorTests(unittest.TestCase):
                 pending = [o.ticket for o in a.orders]; n.tick()
                 self.assertEqual([o.ticket for o in a.orders], pending)
 
+    def test_confirmed_reverse_fill_arms_next_opposite_before_support_move(self):
+        with tempfile.TemporaryDirectory() as d:
+            a, session = self.setup_native(d)
+            with session as s:
+                n = self.start(s); a.fill_order(51, 88); a.ask = 4000.21
+                self.assertEqual(n.tick()['tick']['status'], 'ok')
+                opposite = next(iter(n.control._read()['reverse_commands'].values()))
+                a.close(88); a.fill_order(opposite['broker_order'], 89); a.ask = 3999.10
+                self.assertEqual(n.tick()['tick']['status'], 'waiting_evidence')
+                self.assertEqual(a.positions[0].sl, 4000.0)
+                ea_response(n.ledger, 51, 602, d, '3999.30')
+                a.ask = 3999.04  # SELL already eligible for the first support move.
+                count = len(a.sent)
+                self.assertEqual(n.tick()['tick']['status'], 'ok')
+                reverse, support = a.sent[count:]
+                self.assertEqual(reverse['action'], a.TRADE_ACTION_PENDING)
+                self.assertEqual(reverse['type'], a.ORDER_TYPE_BUY_STOP)
+                self.assertEqual(reverse['price'], 4000.0)
+                self.assertEqual(support['action'], a.TRADE_ACTION_SLTP)
+                self.assertEqual(support['sl'], 3999.55)
+
     def test_unknown_checkpoint_never_replayed(self):
         with tempfile.TemporaryDirectory() as d:
             a, session = self.setup_native(d)
