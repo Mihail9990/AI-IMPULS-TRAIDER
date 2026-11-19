@@ -116,7 +116,7 @@ def native_settings(installation):
         fields[field]=tk.StringVar(value=default)
         ttk.Entry(line,textvariable=fields[field]).pack(side='left',fill='x',expand=True)
     attached=tk.BooleanVar();resume=tk.BooleanVar()
-    ttk.Checkbutton(panel,text='Проверил HTTPS с телефона и подключил RecoveryEvidenceBridge к нужному графику',variable=attached).pack(anchor='w',pady=3)
+    ttk.Checkbutton(panel,text='Проверил доступ к панели по HTTPS и подключил RecoveryEvidenceBridge к нужному графику',variable=attached).pack(anchor='w',pady=3)
     ttk.Checkbutton(panel,text='Разрешаю продолжение ранее сохранённых диапазонов данного счёта',variable=resume).pack(anchor='w',pady=3)
     result=[]
     def accept():

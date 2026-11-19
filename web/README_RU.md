@@ -1,7 +1,7 @@
 # RECOVERY web action fork · offline draft
 
 Основа: actual old MAIN `trader-analysis-controls/web/local-panel`, не basket.
-Сохранены CSS, shell/sidebar/nav, header,4summary, tabs/cards/lower-grid.
+Разделы панели: «Основная система», «Настройки» и «История».
 Прежние API, торговые обработчики и синтетический график не переносились.
 Исходная phase1-панель в recovery-web-work/web не изменена этой работой.
 
@@ -29,10 +29,8 @@ submit/click, status-only pending resolution. Timer вызывает тольк�
 Все условия одновременно:
 1. Подтверждённый native snapshot/proof/schema, top-level web_trading строго true.
    Это backend обязан возвращать только в специально armed native process.
-2. Пользователь лично подтвердил проверку исхода прежней команды Android.
-   Это его утверждение, НЕ факт, выведенный из server flag. Журнал Android
-   не читается, не переносится, не очищается. При неизвестном исходе нельзя
-   отмечать checkbox; требуется внешний pre-cutover handoff.
+2. Пользователь лично проверил исход прежних команд. При неизвестном исходе
+   флажок не отмечают. Флаг сервера не заменяет эту проверку.
 3. Пользователь включил кнопки в этой вкладке. Оба checkbox изначально false,
    не сохраняются; logout/context-change сбрасывает их.
 4. Соответствующая server capability, отсутствие unresolved веб-pending,
@@ -56,9 +54,9 @@ context и digest; partial additionally exactmixed range statuses. POST200 са�
 
 ## Backend requirements
 
-GET /api/recovery/state:state_freshness nonce-bound +widget schema1 +top-level
-web_trading:boolean. Это флаг разрешения web-контроля, не доказательство исхода
-прежней Android-команды.
+GET /api/recovery/state: привязанный к nonce state_freshness, объект
+состояния схемы 1 и флаг web_trading. Флаг разрешает веб-управление,
+но не подтверждает исход прежних команд.
 POST /ranges,/cancel,/ranges/{1|2}/close-cancel:совместимый native schema,
 expected_context/expected_generation,UUID durable idempotency.
 GET /commands/{UUID}:persisted canonical payload/context/phase/outcome.
@@ -68,7 +66,7 @@ JS-условия не заменяют серверную авторизаци�
 
 ## Tests / limits
 
-`node --test tests/*.test.* recovery-actions.test.mjs`:34PASS (offline mocks).
+`node --test tests/*.test.* recovery-actions.test.mjs` (офлайн).
 `node --check panel.js`; `node --check controls.js`.
 Проверены pure UI policy/DOM contract, proof/gates, UUIDjournal, partial/rejected,
 timeout/no retry, changed context/generation/capability, serverflag downgrade,

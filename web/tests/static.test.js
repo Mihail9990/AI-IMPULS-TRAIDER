@@ -19,7 +19,7 @@ test('DOM ids unique and script references resolve',()=>{const html=read('index.
 test('local assets, no inline JS/CSS, no external sources',()=>{const html=read('index.html');assert.deepEqual([...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map(x=>x[1]),['model.js','panel.js','controls.js']);assert.match(html,/href="panel.css"/);assert.ok(!/\s(?:style|onclick|onload)=/i.test(html));assert.ok(!/(?:src|href)="(?:https?:|\/\/)/i.test(html));});
 test('no credentials storage, HTML injection or trade transport',()=>{const code=read('panel.js')+read('model.js');for(const banned of ['localStorage','sessionStorage','document.cookie','innerHTML','insertAdjacentHTML','sendBeacon','console.log','method: \'POST\'','serviceWorker'])assert.ok(!code.includes(banned),banned);assert.match(code,/textContent/);assert.match(code,/redirect: 'error'/);assert.match(code,/pagehide/);});
 
-test('actions are explicit and old Android journal never touched',()=>{const controls=read('controls.js'),core=read('recovery-actions.mjs'),html=read('index.html');assert.match(html,/id="migration-ack"/);assert.match(html,/id="operator-enable"/);assert.match(html,/id="confirm-action"/);assert.match(controls,/addEventListener\('submit'/);assert.ok(!controls.includes("execute('reconcile'"));assert.ok(!controls.includes('setInterval'));assert.match(core,/response.web_trading===true/);assert.match(core,/recovery.native.pending.v1/);assert.ok(!core.includes('recovery-pending-command'));});
+test('actions are explicit and previous command records are not altered',()=>{const controls=read('controls.js'),core=read('recovery-actions.mjs'),html=read('index.html');assert.match(html,/id="migration-ack"/);assert.match(html,/id="operator-enable"/);assert.match(html,/id="confirm-action"/);assert.match(controls,/addEventListener\('submit'/);assert.ok(!controls.includes("execute('reconcile'"));assert.ok(!controls.includes('setInterval'));assert.match(core,/response.web_trading===true/);assert.match(core,/recovery.native.pending.v1/);assert.ok(!core.includes('recovery-pending-command'));});
 
 
 test('navigation clicks, shortcut and keyboard update selection, visibility and focus',()=>{
@@ -51,4 +51,28 @@ test('navigation clicks, shortcut and keyboard update selection, visibility and 
  press(tabs[2],'Home');assertSelection('main');
  ids['open-settings'].handlers.click();assertSelection('settings');assert.equal(state.focused,'key');
  assert.equal(state.scrolls,6);
+});
+
+
+test('diagnostics are accessible and copy only the in-memory log',()=>{
+ const html=read('index.html'), code=read('controls.js');
+ assert.match(html, /id="view-history"[\s\S]*id="diagnostic-log"[^>]*readonly/);
+ assert.match(html, /id="diagnostic-status" role="status"/);
+ assert.match(code, /navigator\.clipboard\.writeText\(log\.value\)/);
+ assert.doesNotMatch(code, /sessionStorage|sendBeacon|navigator\.share/);
+});
+
+
+test('management checkboxes appear only in Settings; Main keeps guarded order controls',()=>{
+ const html=read('index.html'),main=html.indexOf('id="view-main"'),settings=html.indexOf('id="view-settings"'),history=html.indexOf('id="view-history"');
+ for(const id of ['cutover','migration-ack','operator-enable']){
+  const at=html.indexOf('id="'+id+'"');assert.ok(at>settings&&at<history,id);
+ }
+ const gate=html.indexOf('id="trade-controls"');assert.ok(gate>main&&gate<settings);
+ assert.match(read('controls.js'),/core\.enable\(\{operatorEnabled:dispatchGate\.enabled,migrationAcknowledged:\$\('migration-ack'\)\.checked/);
+});
+
+test('web copy has no references to external client platforms',()=>{
+ for(const name of ['index.html','controls.js','panel.js','README_RU.md'])
+  assert.doesNotMatch(read(name), /Android|телефон|смартфон|виджет/iu,name);
 });

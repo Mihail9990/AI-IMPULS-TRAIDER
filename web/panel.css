@@ -322,3 +322,20 @@ footer { font-size: .8rem; }
   .bottom-nav [role=tab] { font-size: .75rem; }
 }
 #control-gate:empty { margin: 0; }
+
+.diagnostic-card { margin-top: .85rem; }
+#diagnostic-log {
+  display: block;
+  width: 100%;
+  min-height: 12rem;
+  max-height: 60vh;
+  resize: vertical;
+  background: var(--surface-inset);
+  color: var(--text);
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  padding: .75rem;
+  overflow-wrap: anywhere;
+  font: .82rem/1.5 var(--mono);
+}
+#diagnostic-status:empty { margin: 0; }

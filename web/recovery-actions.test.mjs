@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
-import {RecoveryActions,nativeState} from './recovery-actions.mjs';
+import {RecoveryActions,nativeState,createCommandDiagnostics,DIAGNOSTIC_LABELS} from './recovery-actions.mjs';
 const nonce='a'.repeat(32),values={ranges:[{id:'1',side:'BUY',price:100,volume:0.01}],initial_sl_distance:0.7,reentry_distance:0.7};
 function state(n=nonce){return {web_trading:true,state_freshness:{version:1,nonce:n,age_ms:null},widget:{schema_version:1,mode:'native',account_trade_mode:'demo',snapshot:{status:'fresh',context_id:'fixture-context',generation:'fixture-gen'},positions:[],orders:[],ranges:[],executor_ready:true,reconciliation_required:false,capabilities:{set_ranges:true,cancel_ranges:true,close_cancel_range_ids:[]}}};}
 function harness(options={}){
@@ -11,9 +11,10 @@ function harness(options={}){
   if(path.endsWith('/state')){result=state(opt.headers['X-Recovery-State-Nonce']);if(options.mutate)options.mutate(result,calls.filter(c=>c.path.endsWith('/state')).length);}
   else if(opt.method==='POST'){body=JSON.parse(opt.body);actionPath=path;if(options.timeout)throw new Error('secret MUST NEVER ESCAPE');result={accepted:true};}
   else {let payload={...body,kind:actionPath.endsWith('/lot-schedule')?'lot_schedule':'ranges'};delete payload.request_id;result={context_id:'fixture-context',command:{request_id:body.request_id,phase:'completed',outcome:'confirmed',payload}};if(options.receipt)options.receipt(result);}
+  if(options.response){const override=options.response(path,opt,result,calls);if(override)return override;}
   return {ok:true,status:200,text:async()=>JSON.stringify(result)};
  };
- const core=new RecoveryActions({fetchImpl,cryptoImpl:webcrypto,storage,token:async()=>'fixture-token',confirm:async()=>options.confirm!==false,allowTrading:options.allow!==false,locks:{request:async(_n,_o,fn)=>fn()}});
+ const core=new RecoveryActions({fetchImpl,cryptoImpl:webcrypto,storage,token:async()=>'fixture-token',confirm:async()=>options.confirm!==false,allowTrading:options.allow!==false,onDiagnostic:options.onDiagnostic,locks:{request:async(_n,_o,fn)=>fn()}});
  core.enable({operatorEnabled:true,migrationAcknowledged:true,priorOutcomeResolved:options.resolved!==false});
  return {core,calls,map,storage};
 }
@@ -86,4 +87,77 @@ test('lot schedule refuses open, active, permission-lost or concurrently edited 
   await assert.rejects(h.core.execute('lotSchedule',lotPayload),/STATE_CHANGED/);
   assert(!h.calls.some(c=>c.opt.method==='POST'));
  }
+});
+
+
+test('diagnostics prove a pre-POST failure after confirmation without exposing state values',async()=>{
+ const diag=createCommandDiagnostics();
+ let eventKeys;
+ const h=harness({onDiagnostic:e=>{eventKeys=Object.keys(e);diag.append(e);},mutate:(r,n)=>{if(n===2)r.widget.snapshot.context_id='private-context';}});
+ await assert.rejects(()=>h.core.execute('ranges',values),/STATE_CHANGED/);
+ assert.equal(h.calls.filter(c=>c.opt.method==='POST').length,0);
+ assert.deepEqual(diag.read().map(row=>row.code),['ACTION_BEGIN','FIRST_GET_START','FIRST_GET_OK','CONFIRM_WAIT','CONFIRM_OK','SECOND_GET_START','SECOND_GET_OK','CONTEXT_CHANGED','NOT_SENT']);
+ assert.deepEqual(eventKeys,['code','request_id']);
+ const rows=diag.read();
+ assert.ok(rows[3].request_id&&rows[3].request_id===rows.at(-1).request_id);
+ assert.ok(rows.every(row=>!JSON.stringify(row).includes('private-context')&&!JSON.stringify(row).includes('fixture-token')));
+ assert.ok(rows.every(row=>Object.hasOwn(DIAGNOSTIC_LABELS,row.code)&&!Number.isNaN(Date.parse(row.time))));
+});
+test('diagnostics distinguish rejected first/second GET, malformed proof and local journal failures before dispatch',async()=>{
+ const variants=[
+  [{response:(p,o,r,c)=>c.length===1?{ok:false,status:401}:null},'FIRST_GET_ACCESS'],
+  [{response:(p,o,r,c)=>c.length===2?{ok:false,status:502}:null},'SECOND_GET_HTTP'],
+  [{mutate:(result,n)=>{if(n===2)result.state_freshness.nonce='not-the-nonce';}},'SECOND_GET_PROOF'],
+  [{mutate:(result,n)=>{if(n===2)result.widget.capabilities.set_ranges=false;}},'SECOND_CAPABILITY']
+ ];
+ for(const [options,code]of variants){
+  const d=createCommandDiagnostics(),h=harness({...options,onDiagnostic:d.append});
+  await assert.rejects(()=>h.core.execute('ranges',values));
+  assert.ok(d.read().some(row=>row.code===code));
+  assert.equal(d.read().at(-1).code,'NOT_SENT');
+  assert.ok(!h.calls.some(call=>call.opt.method==='POST'));
+ }
+ const d=createCommandDiagnostics(),h=harness({onDiagnostic:d.append});
+ h.storage.setItem=()=>{throw Error('do not log this')};
+ await assert.rejects(()=>h.core.execute('ranges',values),/STORAGE_UNAVAILABLE/);
+ assert.deepEqual(d.read().slice(-3).map(row=>row.code),['JOURNAL_START','JOURNAL_FAILED','NOT_SENT']);
+ assert.ok(!JSON.stringify(d.read()).includes('do not log this'));
+});
+test('only the fetch boundary counts as POST started and a failure after it is unknown',async()=>{
+ const uncertain=createCommandDiagnostics(), h=harness({timeout:true,onDiagnostic:uncertain.append});
+ assert.equal((await h.core.execute('ranges',values)).status,'unknown');
+ assert.equal(h.calls.filter(c=>c.opt.method==='POST').length,1);
+ assert.equal(uncertain.read().at(-1).code,'POST_OUTCOME_UNKNOWN');
+ assert.ok(uncertain.read().some(row=>row.code==='POST_START'));
+ assert.ok(!JSON.stringify(uncertain.read()).includes('secret MUST NEVER ESCAPE'));
+ const blocked=createCommandDiagnostics(), h2=harness({onDiagnostic:blocked.append});
+ let tokenRequests=0;
+ h2.core.token=async()=>++tokenRequests===3?null:'fixture-token';
+ assert.equal((await h2.core.execute('ranges',values)).status,'unknown');
+ assert.deepEqual(blocked.read().slice(-3).map(row=>row.code),['JOURNAL_SAVED','POST_LOCAL','NOT_SENT']);
+ assert.ok(!h2.calls.some(c=>c.opt.method==='POST'));
+});
+test('receipt diagnostics remain read-only and differentiate not recorded from confirmed',async()=>{
+ const d=createCommandDiagnostics(),h=harness({onDiagnostic:d.append,receipt:r=>{r.command.phase='not_recorded';r.command.payload=null;}});
+ assert.equal((await h.core.execute('ranges',values)).status,'unknown');
+ assert.ok(d.read().some(row=>row.code==='RECEIPT_NOT_FOUND'));
+ assert.equal(d.read().at(-1).code,'POST_OUTCOME_UNKNOWN');
+ const r=await h.core.resolve();assert.equal(r.status,'unknown');
+ assert.equal(h.calls.filter(c=>c.opt.method==='POST').length,1);
+ assert.equal(h.calls.at(-1).opt.method,'GET');
+ const t=createCommandDiagnostics(),h2=harness({onDiagnostic:t.append});
+ h2.storage.removeItem=()=>{throw Error('local error');};
+ await assert.rejects(()=>h2.core.execute('ranges',values),/local error/);
+ assert.deepEqual(t.read().slice(-2).map(row=>row.code),['RECEIPT_CONFIRMED','JOURNAL_CLEANUP_FAILED']);
+});
+test('diagnostic buffer is bounded, sanitizes arbitrary data and is independent of dispatch',async()=>{
+ const d=createCommandDiagnostics();
+ assert.equal(d.append({code:'raw secret',request_id:null}),false);
+ assert.equal(d.append({code:'NOT_SENT',request_id:'Bearer key'}),false);
+ for(let i=0;i<81;i++)assert.ok(d.append({code:'NOT_SENT',request_id:null,secret:'should be dropped'}));
+ assert.equal(d.read().length,80);
+ assert.ok(d.read().every(row=>Object.keys(row).length===3&&row.request_id===null));
+ d.clear();assert.equal(d.read().length,0);
+ const h=harness({onDiagnostic:()=>{throw Error('optional logger failed');}});
+ assert.equal((await h.core.execute('ranges',values)).status,'confirmed');
 });
