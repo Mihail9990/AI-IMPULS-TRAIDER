@@ -26,10 +26,34 @@ class Integration(unittest.TestCase):
     r=client.get('/api/recovery/state',headers=headers)
     self.assertEqual(r.status_code,200);self.assertEqual(r.json()['state_freshness']['nonce'],'b'*32)
     self.assertEqual(r.json()['widget']['snapshot']['status'],'fresh')
+    self.assertIs(r.json()['web_trading'],False)
     legacy=client.get('/api/recovery/state',headers={'Authorization':headers['Authorization']})
     self.assertEqual(legacy.status_code,200);self.assertNotIn('state_freshness',legacy.json())
     bad=client.get('/api/recovery/state',headers={'X-Recovery-State-Nonce':'b'*32})
     self.assertEqual(bad.status_code,401);self.assertNotIn('state_freshness',bad.json())
     self.assertEqual(s.executor.db.total_changes,changes);self.assertEqual(a.sent,[])
     self.assertEqual(r.headers['cache-control'],'no-store')
+ def test_web_trading_only_authenticated_live_native_arm_on_fresh_nonce_reply(self):
+  with tempfile.TemporaryDirectory() as d:
+   a=CycleFake(d)
+   with self.session(a,d+'/s.db') as s:
+    n=NativeCoordinator(NativeRecoveryControl(s,magic=123))
+    arm={'value':False}
+    def armed():
+     value=arm['value']
+     if isinstance(value,Exception):raise value
+     return value
+    app=StateFreshness(create_native_app('t'*32,n),RawAnchor(NS(time=123,time_msc=123456)), 't'*32,web_armed=armed)
+    client=TestClient(app)
+    auth='Bearer '+'t'*32; headers={'Authorization':auth,'X-Recovery-State-Nonce':'b'*32}
+    for value,expected in ((False,False),(1,False),('true',False),(RuntimeError(),False),(True,True),(False,False)):
+     arm['value']=value
+     r=client.get('/api/recovery/state',headers=headers);self.assertEqual(r.status_code,200)
+     self.assertIs(r.json()['web_trading'],expected)
+     self.assertEqual(r.json()['state_freshness']['nonce'],'b'*32)
+    arm['value']=True
+    for headers_ in ({'Authorization':auth},{'Authorization':auth,'X-Recovery-State-Nonce':'BAD'},
+                     {'Authorization':'wrong','X-Recovery-State-Nonce':'b'*32}):
+     self.assertNotIn('web_trading',client.get('/api/recovery/state',headers=headers_).json())
+    self.assertEqual(a.sent,[])
 if __name__=='__main__':unittest.main()

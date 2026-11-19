@@ -15,9 +15,10 @@ function init(){
    for(let i=1;i<24;i++)if(info.body.lot_schedule[i]!==info.body.expected_lot_schedule[i])lines.push('После '+i+' полных SL: '+info.body.expected_lot_schedule[i]+' → '+info.body.lot_schedule[i]+' лота');
    lines.push('Первый вход: 0,01. Изменение не меняет существующие ордера.');
   }
-  else if(info.action==='cancel')lines.push('Все действующие диапазоны будут отменены. Ожидание новых.');
-  else lines.push('Позиция выбранной стороны будет закрыта, её триггеры отменены. Другая сторона не отменяется.');
-  lines.push('Новый request_id: '+info.body.request_id,'Если результат неизвестен, команда не повторяется.');
+  else if(info.action==='cancel')lines.push('Все действующие диапазоны и их отложенные ордера будут отменены.');
+  else lines.push('Позиция выбранного диапазона будет закрыта, его триггеры отменены. Другой диапазон не изменится.');
+  lines.push('ID команды: '+info.body.request_id);
+  $('confirm-impact').textContent=info.action==='lotSchedule'?'Шкала применяется к будущим входам.':'Команда меняет ордера на счёте.';
   $('confirm-details').textContent=lines.join('\n');
   try{$('confirm-action').showModal();}catch{confirmAnswer=null;resolve(false);}
  });}
@@ -40,8 +41,8 @@ function init(){
   const dispatchGate=gate(state,$('migration-ack').checked,$('operator-enable').checked,hasLocks,active?error:(pending||error));
   core.enable({operatorEnabled:dispatchGate.enabled,migrationAcknowledged:$('migration-ack').checked,priorOutcomeResolved:$('migration-ack').checked});
   $('cutover').hidden=!g.armed;$('trade-controls').hidden=!g.armed;
-  $('control-mode').textContent=g.enabled?'Управление разрешено':'Просмотр';$('release-mode').textContent=g.enabled?'УПРАВЛЕНИЕ':'ПРОСМОТР';$('control-summary').textContent=g.enabled?'По подтверждению':'Просмотр';
-  $('control-gate').textContent=error?'Локальный журнал недоступен или повреждён. Новые команды запрещены.':pending?'Есть неподтверждённая веб-команда. Только проверка записи, без повтора.':!g.armed?'Сервер не разрешил торговое управление либо нет подтверждённого снимка.':!hasLocks?'Браузер не поддерживает защищённую межвкладочную блокировку. Доступен только просмотр.':!$('migration-ack').checked?'Сначала лично проверьте исход прежней команды Android.':!$('operator-enable').checked?'Включите кнопки для этой вкладки, если готовы управлять.':'Каждая команда требует отдельного подтверждения и повторной проверки VPS.';
+  $('control-mode').textContent=g.enabled?'Управление':'Просмотр';$('release-mode').textContent=g.enabled?'УПРАВЛЕНИЕ':'ПРОСМОТР';$('control-summary').textContent=g.enabled?'По подтверждению':'Просмотр';
+  $('control-gate').textContent=error?'Локальный журнал недоступен. Новые команды заблокированы.':pending?'Сначала проверьте исход веб-команды.':!g.armed?'Управление недоступно без разрешения VPS и свежего снимка.':!hasLocks?'Браузер не поддерживает безопасную отправку команд.':!$('migration-ack').checked?'Проверьте исход прежней команды Android во вкладке «История».':!$('operator-enable').checked?'Включите торговые кнопки.':'';
   for(const [id,allowed]of [['set-ranges',g.ranges],['cancel-ranges',g.cancel],['close-one',g.close1],['close-two',g.close2]])$(id).disabled=!allowed||active;
   const schedule=lotSchedule(state?.widget);
   const staleLot=lotDirty&&JSON.stringify(lotBase)!==JSON.stringify(schedule);
@@ -53,12 +54,12 @@ function init(){
   lotInputs.forEach(input=>{input.disabled=!lotEditable;});
   $('lot-schedule-save').disabled=!lotEditable||!lotDirty;
   $('lot-schedule-reset').disabled=active||!lotDirty;
-  $('lot-schedule-status').textContent=staleLot?'Шкала на VPS изменилась. Сбросьте правки и откройте актуальные значения.':!g.lotSchedule?'Редактирование разрешено только без открытых позиций и при неактивном RECOVERY.':'';
-  $('web-pending').hidden=!pending;$('web-pending').textContent=pending?'Неподтверждённая веб-команда: '+pending.request_id+'. Закрытие вкладки не стирает эту запись.':'';
+  $('lot-schedule-status').textContent=staleLot?'Шкала на VPS изменилась. Сбросьте правки.':!g.lotSchedule?'Изменение доступно без открытых позиций и активного RECOVERY.':'';
+  $('web-pending').hidden=!pending;$('web-pending').textContent=pending?'Исход веб-команды не подтверждён: '+pending.request_id+'. Не отправляйте её повторно.':'';
   $('resolve-web').hidden=!pending;$('resolve-web').disabled=active||!hasLocks;
  }
- function showResult(result){const labels={cancelled:'Отмена до отправки.',confirmed:'Результат команды подтверждён журналом VPS.',rejected:'Команда отклонена. Автоматического повтора нет.',partially_applied:'Применено частично. Автоматического повтора нет.',unknown:'Исход неизвестен. Не повторяйте команду; проверьте её запись.',none:'Ожидающей веб-команды нет.'};let message=labels[result.status]||'Результат требует проверки.';const status={confirmed:'первичная отправка подтверждена',rejected:'отклонён',not_dispatched:'не отправлен'};for(const r of result.range_outcomes??[])message+='\nДиапазон №'+r.range_id+': '+(Object.hasOwn(status,r.status)?status[r.status]:'не подтверждён');$('action-result').textContent=message;}
- async function run(action,input){if(active)return;active=true;view.setActionBusy(true);update();try{const result=action==='resolve'?await core.resolve():await core.execute(action,input);if(action==='lotSchedule'&&result.status==='confirmed'){lotDirty=false;lotBase=null;}showResult(result);}catch{ $('action-result').textContent='Действие не подтверждено или недоступно. Проверьте состояние и журнал; автоматического повтора нет.';}finally{active=false;view.setActionBusy(false);update();view.refresh();}}
+ function showResult(result){const labels={cancelled:'Команда не отправлена.',confirmed:'Подтверждено.',rejected:'Команда отклонена.',partially_applied:'Применено частично.',unknown:'Исход неизвестен.',none:'Ожидающей веб-команды нет.'};let message=labels[result.status]||'Результат требует проверки.';const status={confirmed:'первичная отправка подтверждена',rejected:'отклонён',not_dispatched:'не отправлен'};for(const r of result.range_outcomes??[])message+='\nДиапазон №'+r.range_id+': '+(Object.hasOwn(status,r.status)?status[r.status]:'не подтверждён');$('action-result').textContent=message;}
+ async function run(action,input){if(active)return;active=true;view.setActionBusy(true);update();try{const result=action==='resolve'?await core.resolve():await core.execute(action,input);if(action==='lotSchedule'&&result.status==='confirmed'){lotDirty=false;lotBase=null;}showResult(result);}catch{ $('action-result').textContent='Действие недоступно или не подтверждено. Проверьте журнал.';}finally{active=false;view.setActionBusy(false);update();view.refresh();}}
  $('lot-schedule-reset').addEventListener('click',()=>{lotDirty=false;lotBase=null;update();});
  $('lot-schedule-form').addEventListener('submit',e=>{
   e.preventDefault();if($('lot-schedule-save').disabled||!lotBase)return;

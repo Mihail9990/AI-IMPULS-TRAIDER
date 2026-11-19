@@ -77,6 +77,12 @@ class StateFreshness:
                     data=json.loads(body);widget=data.get('widget',{})
                     if (type(widget.get('schema_version')) is int and widget.get('schema_version')==1 and widget.get('mode')=='native'
                             and widget.get('snapshot',{}).get('status')=='fresh'):
+                        # Only the authenticated, nonce-bound native state can advertise
+                        # permission. The launcher still denies all API writes before arm.
+                        try:
+                            data['web_trading']=self.web_armed is not None and self.web_armed() is True
+                        except Exception:
+                            data['web_trading']=False
                         data['state_freshness']=dict(version=1,nonce=nonce.decode('ascii'),age_ms=age,mt5_now_ms=raw)
                         body=json.dumps(data,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode('utf-8')
                         response['headers']=[(k,v) for k,v in response['headers'] if k.lower() not in (b'content-length',b'etag',b'content-md5')]+[(b'content-length',str(len(body)).encode())]
