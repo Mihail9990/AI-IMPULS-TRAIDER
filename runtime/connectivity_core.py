@@ -136,7 +136,7 @@ class ConnectionSession:
                 child=self.popen(args,stdin=subprocess.PIPE if name=='api' else subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,creationflags=flags,shell=False,cwd=folder)
                 self.children.append(child)
                 if name=='api':
-                    nonce=secrets.token_hex(24);child.stdin.write((token+'\n'+nonce+'\n').encode('ascii'));child.stdin.close();self.readiness(child,token,nonce)
+                    nonce=secrets.token_hex(24);child.stdin.write((token+'\n'+nonce+'\n'+'https://'+ip+'\n').encode('ascii'));child.stdin.close();self.readiness(child,token,nonce)
         except BaseException:self.stop();raise
     def logs(self):
         if not self.temp:return ''

@@ -24,8 +24,10 @@ if __name__=='__main__':
     import sys,uvicorn
     key=sys.stdin.readline().strip()
     nonce=sys.stdin.readline().strip()
+    origin=sys.stdin.readline().strip()
     from pathlib import Path
     sys.path.insert(0,str(Path(__file__).resolve().parent))
     from native_web_panel import PanelAssets
-    app=PanelAssets(create_app(key,nonce),Path(__file__).resolve().parent.parent/'web')
-    uvicorn.run(app,host='127.0.0.1',port=8767,access_log=False,log_level='warning')
+    from web_session import BrowserSessions
+    app=PanelAssets(BrowserSessions(create_app(key,nonce),key,origin,mode='connectivity',context=lambda:nonce),Path(__file__).resolve().parent.parent/'web')
+    uvicorn.run(app,host='127.0.0.1',port=8767,access_log=False,log_level='warning',proxy_headers=True,forwarded_allow_ips='127.0.0.1')

@@ -1,18 +1,30 @@
 (() => {
   'use strict';
   const M = window.RecoveryModel, $ = id => document.getElementById(id);
-  let key = '', busy = false, timer = null, controller = null, epoch = 0, context = null, lastResult = null, actionBusy = false;
+  let key = '', busy = false, timer = null, controller = null, epoch = 0, context = null, lastResult = null, actionBusy = false, pendingAuth = null, loggingOut = false;
   const text = (id, value) => { $(id).textContent = value; };
   const node = (tag, value, cls) => { const e = document.createElement(tag); if (value !== undefined) e.textContent = value; if (cls) e.className = cls; return e; };
   const mode = { real:'Реальный счёт', demo:'Демо-счёт', contest:'Конкурсный счёт', unknown:'Тип счёта не подтверждён' };
   const secureOrigin = () => location.protocol === 'https:' || (location.protocol === 'http:' && ['localhost','127.0.0.1','[::1]'].includes(location.hostname));
   text('origin', location.protocol === 'file:' ? 'Локальный просмотр. Для подключения откройте HTTPS-адрес VPS.' : 'Сервер: ' + location.host);
-  function controls() { $('refresh').disabled = !key || busy; $('logout').disabled = !key; $('auto').disabled = !key; $('lookup-button').disabled = !key || busy || lastResult?.connectionOnly === true; $('connect').disabled = busy || actionBusy; $('dashboard').setAttribute('aria-busy', String(busy)); $('open-settings').hidden = lastResult!==null; }
+  function controls() { $('refresh').disabled = !key || busy; $('logout').disabled = loggingOut || (!key && !busy); $('auto').disabled = !key; $('lookup-button').disabled = !key || busy || lastResult?.connectionOnly === true; $('connect').disabled = busy || actionBusy; $('dashboard').setAttribute('aria-busy', String(busy)); $('open-settings').hidden = lastResult!==null; }
   function stopTimer() { clearTimeout(timer); timer = null; }
   function schedule() { stopTimer(); if (key && $('auto').checked && !document.hidden) timer = setTimeout(loadState, 5000); }
   function unavailable(message) { lastResult=null;context=null;window.dispatchEvent(new CustomEvent('recovery-state',{detail:null}));text('message',message); $('dashboard').classList.add('stale'); text('snapshot','Нет свежего снимка MT5. Показанные данные могут быть устаревшими.'); text('executor','Не подтверждено'); }
   function clearData() { context=null;lastResult=null;window.dispatchEvent(new Event('recovery-session-change')); for (const name of ['positions','orders','ranges']) { $(name).replaceChildren(node('p','Данные не подтверждены','empty')); } for (const name of ['positions-count','orders-count','symbol','account']) text(name,'—'); text('executor','Нет данных'); text('snapshot','Нет снимка MT5.'); text('timing',''); $('issues').replaceChildren(); $('settings').replaceChildren(); $('receipt-result').replaceChildren(); }
-  function logout() { ++epoch; key=''; if(controller)controller.abort(); stopTimer(); busy=false; $('key').value=''; $('key').type='password'; text('reveal','Показать'); $('reveal').setAttribute('aria-pressed','false'); $('auto').checked=false; $('request-id').value=''; clearData(); text('message','Ключ удалён из памяти.'); text('session-label','Ключ не сохранён'); controls(); }
+  function clearSession() { ++epoch; key=''; if(controller)controller.abort(); stopTimer(); busy=false; $('key').value=''; $('key').type='password'; text('reveal','Показать'); $('reveal').setAttribute('aria-pressed','false'); $('auto').checked=false; $('request-id').value=''; clearData(); text('message','Вход не активен.'); text('session-label','Ключ не сохранён'); controls(); }
+  async function logout() {
+    if(loggingOut)return;loggingOut=true;
+    clearSession();busy=true;controls();const turn=epoch;
+    // Wait for an already issued login so its late Set-Cookie is revoked too.
+    try {
+      if(pendingAuth)await pendingAuth.catch(()=>{});
+      const latest=await window.RecoverySession.restore();
+      await window.RecoverySession.logout(latest);
+      if(turn===epoch)text('message','Вы вышли. Сеанс отозван.');
+    } catch {if(turn===epoch)text('message','Выход на VPS не подтверждён. Сеанс браузера мог сохраниться до истечения срока.');}
+    finally {loggingOut=false;busy=false;controls();}
+  }
   async function read(kind, id) {
     if (!secureOrigin()) throw new Error('Для соединения откройте эту панель через HTTPS на вашем VPS.');
     const bytes = new Uint8Array(16); crypto.getRandomValues(bytes); const nonce = [...bytes].map(x=>x.toString(16).padStart(2,'0')).join('');
@@ -20,7 +32,7 @@
     const timeout = setTimeout(()=>requestController.abort(),15000);
     try {
       const response = await fetch(req.path,{...req.options,signal:requestController.signal});
-      if (response.status===401 || response.status===403) throw new Error('Доступ отклонён. Проверьте ключ доступа.');
+      if (response.status===401 || response.status===403) {clearSession();throw new Error('Доступ отклонён. Введите ключ повторно.');}
       if (!response.ok) throw new Error('VPS вернул ошибку HTTP '+response.status+'. Этот запрос был только чтением.');
       if (!response.headers.get('content-type')?.toLowerCase().includes('application/json')) throw new Error('VPS вернул не JSON. Проверьте адрес панели и настройку прокси.');
       const reader=response.body.getReader(), chunks=[];let size=0;
@@ -61,7 +73,14 @@
     text('message','Подключено.');
   }
   async function loadState() {if(busy||!key)return;stopTimer();busy=true;const turn=epoch;controls();text('message','Обновляю…');try{const result=await read('state');if(turn===epoch)render(result);}catch(e){if(turn===epoch)unavailable(e.name==='AbortError'?'VPS не ответил вовремя.':e instanceof SyntaxError?'Некорректный ответ VPS.':e.message);}finally{if(turn===epoch){busy=false;controls();schedule();}}}
-  $('login').addEventListener('submit',e=>{e.preventDefault();if(busy||actionBusy)return;const candidate=$('key').value.trim();try{M.spec('state',null,'0'.repeat(32),candidate);}catch(err){text('message',err.message);return;}++epoch;key=candidate;$('key').value='';$('key').type='password';text('reveal','Показать');$('reveal').setAttribute('aria-pressed','false');clearData();text('session-label','Ключ только в памяти');controls();loadState();});
+  $('login').addEventListener('submit',async e=>{
+    e.preventDefault();if(busy||actionBusy||loggingOut)return;const candidate=$('key').value.trim();
+    try{M.spec('state',null,'0'.repeat(32),candidate);}catch(err){text('message',err.message);return;}
+    clearSession();busy=true;controls();$('key').value='';const turn=epoch;
+    const operation=window.RecoverySession.login(candidate);pendingAuth=operation;
+    try{const result=await operation;if(turn===epoch){key=result;text('session-label','Вход сохранён в этом браузере, до 8 часов');}}
+    catch(err){if(turn===epoch)text('message',err.message);}finally{if(pendingAuth===operation)pendingAuth=null;if(turn===epoch){busy=false;controls();if(key)loadState();}}
+  });
   $('reveal').addEventListener('click',()=>{const show=$('key').type==='password';$('key').type=show?'text':'password';text('reveal',show?'Скрыть':'Показать');$('reveal').setAttribute('aria-pressed',String(show));});
   $('refresh').addEventListener('click',loadState);$('logout').addEventListener('click',logout);$('auto').addEventListener('change',schedule);
   $('lookup').addEventListener('submit',async e=>{e.preventDefault();if(busy||!key||lastResult?.connectionOnly===true)return;const id=$('request-id').value.trim().toLowerCase();if(!M.uuid.test(id)){text('receipt-result','Введите request_id в формате UUID.');return;}busy=true;stopTimer();const turn=epoch;controls();text('receipt-result','Читаю запись…');try{const result=await read('receipt',id);if(turn!==epoch)return;$('receipt-result').replaceChildren(node('p',result.message,'warning'));if(context!==null&&result.context!==context)$('receipt-result').append(node('p','Это запись другого контекста счёта. Обновите состояние.','warning'));const labels={confirmed:'первичная отправка подтверждена',not_dispatched:'не отправлен',rejected:'отклонён'};for(const r of result.outcomes.slice(0,100))$('receipt-result').append(node('p','Диапазон №'+M.text(r.range_id)+': '+(Object.hasOwn(labels,r.status)?labels[r.status]:'статус не подтверждён')));}catch(err){if(turn===epoch)text('receipt-result','Не удалось прочитать запись.');}finally{if(turn===epoch){busy=false;controls();schedule();}}});
@@ -91,5 +110,12 @@
   $('open-settings').addEventListener('click', () => selectTab($('tab-settings'), $('key')));
   window.RecoveryView=Object.freeze({getToken:async()=>key,getState:()=>lastResult,setActionBusy:value=>{actionBusy=value===true;controls();},refresh:loadState});
   window.dispatchEvent(new Event('recovery-ready'));
-  document.addEventListener('visibilitychange'  ,()=>{if(document.hidden)stopTimer();else schedule();});window.addEventListener('pagehide',logout);controls();
+  document.addEventListener('visibilitychange'  ,()=>{if(document.hidden)stopTimer();else schedule();});window.addEventListener('pagehide',()=>{++epoch;if(controller)controller.abort();stopTimer();key='';clearData();});controls();
+  function restoreSession(){
+    if(location.protocol!=='https:'||loggingOut)return;clearSession();
+    busy=true;controls();const turn=epoch;
+    window.RecoverySession.restore().then(session=>{if(turn!==epoch)return;key=session;clearData();text('session-label','Вход восстановлен. Торговые кнопки выключены.');}).catch(()=>{}).finally(()=>{if(turn===epoch){busy=false;controls();if(key)loadState();}});
+  }
+  window.addEventListener('pageshow',event=>{if(event.persisted)restoreSession();});
+  restoreSession();
 })();

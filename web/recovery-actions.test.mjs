@@ -161,3 +161,17 @@ test('diagnostic buffer is bounded, sanitizes arbitrary data and is independent 
  const h=harness({onDiagnostic:()=>{throw Error('optional logger failed');}});
  assert.equal((await h.core.execute('ranges',values)).status,'confirmed');
 });
+test('browser session uses scope and CSRF for one confirmed POST and never stores CSRF',async()=>{
+ const h=harness(),csrf='X'.repeat(43),saved=[];
+ h.core.token=async()=>({browserSession:true,csrf,mode:'native'});
+ const original=h.storage.setItem;h.storage.setItem=(k,v)=>{saved.push(v);original(k,v);};
+ assert.equal((await h.core.execute('ranges',values)).status,'confirmed');
+ assert.equal(h.calls.filter(c=>c.opt.method==='POST').length,1);
+ for(const {opt} of h.calls){
+  assert.equal(opt.credentials,'same-origin');
+  assert.equal(opt.headers.Authorization,undefined);
+  assert.equal(opt.headers['X-Recovery-Session'],'1');
+  assert.equal(opt.headers['X-Recovery-CSRF'],opt.method==='POST'?csrf:undefined);
+ }
+ assert(saved.every(s=>!s.includes(csrf)));
+});

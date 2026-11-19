@@ -9,6 +9,7 @@ ASSETS={
     '/panel/':('index.html','text/html; charset=utf-8'),
     '/panel/panel.css':('panel.css','text/css; charset=utf-8'),
     '/panel/model.js':('model.js','text/javascript; charset=utf-8'),
+    '/panel/session.js':('session.js','text/javascript; charset=utf-8'),
     '/panel/panel.js':('panel.js','text/javascript; charset=utf-8'),
     '/panel/controls.js':('controls.js','text/javascript; charset=utf-8'),
     '/panel/control-policy.mjs':('control-policy.mjs','text/javascript; charset=utf-8'),
@@ -56,17 +57,31 @@ class PanelAssets:
 
 
 def connectivity_panel_config(config):
-    """Add exact GET static assets to the no-trade proxy; no API POST routes."""
+    """Add exact static/session routes; no trading POST routes."""
     marker='\n @state {'
     if config.count(marker)!=1 or config.count(' handle @state {')!=1:
         raise ValueError('Unexpected connectivity Caddy template')
     config=config.replace(marker,'''
  @panel {
   method GET
-  path /panel/ /panel/panel.css /panel/model.js /panel/panel.js /panel/controls.js /panel/control-policy.mjs /panel/recovery-actions.mjs
+  path /panel/ /panel/panel.css /panel/model.js /panel/panel.js /panel/controls.js /panel/control-policy.mjs /panel/recovery-actions.mjs /panel/session.js
+ }
+ @sessionRead {
+  method GET
+  path /api/recovery/session/status
+ }
+ @sessionWrite {
+  method POST
+  path /api/recovery/session/login /api/recovery/session/logout
  }
  @state {''',1)
     return config.replace(' handle @state {',''' handle @panel {
+  reverse_proxy 127.0.0.1:8767
+ }
+ handle @sessionRead {
+  reverse_proxy 127.0.0.1:8767
+ }
+ handle @sessionWrite {
   reverse_proxy 127.0.0.1:8767
  }
  handle @state {''',1)

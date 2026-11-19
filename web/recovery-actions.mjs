@@ -130,11 +130,12 @@ export class RecoveryActions {
   const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),this.timeoutMs);
   let reason='LOCAL';
   try{
-   const key=await this.token();if(body&&!this.enabled)fail('TRADING_DISABLED');if(typeof key!=='string'||!key)fail('KEY_UNAVAILABLE');
-   const headers={'Authorization':`Bearer ${key}`,'Accept':'application/json','Cache-Control':'no-store'};
+   const key=await this.token();if(body&&!this.enabled)fail('TRADING_DISABLED');const session=key?.browserSession===true&&/^[A-Za-z0-9_-]{43}$/.test(key.csrf);if(!session&&(typeof key!=='string'||!key))fail('KEY_UNAVAILABLE');
+   const headers={'Accept':'application/json','Cache-Control':'no-store'};
+   if(session){headers['X-Recovery-Session']='1';if(body)headers['X-Recovery-CSRF']=key.csrf;}else headers.Authorization=`Bearer ${key}`;
    if(nonce)headers['X-Recovery-State-Nonce']=nonce;
    if(body)headers['Content-Type']='application/json';
-   const options={method:body?'POST':'GET',headers,body:body?JSON.stringify(body):undefined,cache:'no-store',credentials:'omit',redirect:'error',signal:controller.signal};
+   const options={method:body?'POST':'GET',headers,body:body?JSON.stringify(body):undefined,cache:'no-store',credentials:session?'same-origin':'omit',redirect:'error',signal:controller.signal};
    reason='NETWORK';if(onFetch)onFetch();
    const r=await this.fetch(path,options);
    if(!r.ok){reason=r.status===401||r.status===403?'ACCESS':'HTTP';fail('REQUEST_FAILED');}

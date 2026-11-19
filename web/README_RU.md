@@ -7,8 +7,8 @@
 
 ## Runtime assets
 
-Host должен явно сервить7файлов (не tests/README): index.html,panel.css,
-model.js,panel.js,controls.js,control-policy.mjs,recovery-actions.mjs.
+Host должен явно раздавать 8 файлов (без тестов и документации): index.html, panel.css,
+model.js, session.js, panel.js, controls.js, control-policy.mjs, recovery-actions.mjs.
 ESmodules нужны JavaScript MIME и CSP script-src self; всё same-origin,
 без внешних ресурсов/inlineJS/inlineCSS. Production HTTPS, WebLocks и
 SubtleCrypto обязательны для управления; без них остаётся просмотр.
@@ -16,7 +16,10 @@ SubtleCrypto обязательны для управления; без них �
 ## Разделение
 
 model.js/panel.js: только GET state и произвольного существующего UUID receipt,
-masked-key в памяти, request nonce/no-store, textContent.
+nonce, no-store, безопасный вывод через textContent.
+session.js: вход, восстановление и выход по HTTPS. Ключ отправляется только
+при входе и не сохраняется. Вход живёт до 8 часов через защищённый cookie;
+выход отзывает сеанс. Перезагрузка не восстанавливает разрешение управления.
 control-policy.mjs: pure input validation и UI capability projection.
 recovery-actions.mjs: изолированный перенесённый safe transport draft,
 добавлены обязательный top-level web_trading===true на обоих GET preflight,

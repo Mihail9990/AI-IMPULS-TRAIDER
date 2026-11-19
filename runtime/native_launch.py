@@ -80,7 +80,21 @@ def native_caddy_config(ip, storage):
     start = base.index(' @state {')
     return base[:start] + ''' @panel {
   method GET
-  path /panel/ /panel/panel.css /panel/model.js /panel/panel.js /panel/controls.js /panel/control-policy.mjs /panel/recovery-actions.mjs
+  path /panel/ /panel/panel.css /panel/model.js /panel/panel.js /panel/controls.js /panel/control-policy.mjs /panel/recovery-actions.mjs /panel/session.js
+ }
+ @sessionRead {
+  method GET
+  path /api/recovery/session/status
+ }
+ @sessionWrite {
+  method POST
+  path /api/recovery/session/login /api/recovery/session/logout
+ }
+ handle @sessionRead {
+  reverse_proxy 127.0.0.1:8767
+ }
+ handle @sessionWrite {
+  reverse_proxy 127.0.0.1:8767
  }
  @read {
   method GET
@@ -242,7 +256,7 @@ class NativeLaunchSession(ConnectionSession):
             log=(folder/'native.log').open('w',encoding='utf-8');self.files.append(log)
             child=self.popen([str(python),'-I',str(Path(__file__).absolute()),'--child'],stdin=subprocess.PIPE,stdout=log,stderr=subprocess.STDOUT,creationflags=flags,shell=False,cwd=folder)
             self.children.append(child);self._native_child=child;self._nonce=nonce
-            child.stdin.write((json.dumps(dict(scope=scope,database=str(db),server_root=str(self.server.absolute()),token=token,nonce=nonce))+'\n').encode());child.stdin.flush()
+            child.stdin.write((json.dumps(dict(scope=scope,database=str(db),server_root=str(self.server.absolute()),token=token,nonce=nonce,public_origin='https://'+ip))+'\n').encode());child.stdin.flush()
             self.readiness(child,token,nonce,ip,scope,'local')
             log=(folder/'caddy.log').open('w',encoding='utf-8');self.files.append(log)
             proxy=self.popen([str(exe),'run','--config',str(cfg),'--adapter','caddyfile'],stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,creationflags=flags,shell=False,cwd=folder);self.children.append(proxy)
@@ -359,9 +373,15 @@ def child_main():
                 runtime.scheduler.start();armed=True;result['armed']=True
                 return result
         app=StateFreshness(app,state_clock,token,web_armed=lambda:armed)
+        from web_session import BrowserSessions
+        def browser_context():
+            with runtime.session._lock:
+                verify_real(mt5,scope)
+                return runtime.coordinator.context_id()
+        app=BrowserSessions(app,token,config['public_origin'],mode='native',context=browser_context)
         from native_web_panel import PanelAssets
         app=PanelAssets(app,Path(__file__).resolve().parent.parent/"web")
-        server=uvicorn.Server(uvicorn.Config(app,host='127.0.0.1',port=8767,workers=1,access_log=False))
+        server=uvicorn.Server(uvicorn.Config(app,host='127.0.0.1',port=8767,workers=1,access_log=False,proxy_headers=True,forwarded_allow_ips='127.0.0.1'))
         def stop_reader():
             try:
                 line=sys.stdin.readline(65537)

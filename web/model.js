@@ -25,14 +25,16 @@
     return { widget: w, age: proof.age_ms, webTrading: envelope.web_trading === true }; // Age is diagnostic only. No wall-clock inference.
   }
   function spec(kind, id, nonce, key) {
-    if (typeof key !== 'string' || key.length < 32 || !/^[\x20-\x7e]+$/.test(key)) throw new Error('Проверьте ключ доступа.');
+    const session=key?.browserSession===true && /^[A-Za-z0-9_-]{43}$/.test(key.csrf);
+    if (!session && (typeof key !== 'string' || key.length < 32 || !/^[\x20-\x7e]+$/.test(key))) throw new Error('Проверьте ключ доступа.');
     let path;
     if (kind === 'state') { if (!/^[a-f0-9]{32}$/.test(nonce)) fail(); path = '/api/recovery/state'; }
     else if (kind === 'receipt' && typeof id === 'string' && uuid.test(id)) path = '/api/recovery/commands/' + id;
     else throw new Error('Нужен существующий request_id в формате UUID.');
-    const headers = { Authorization: 'Bearer ' + key, Accept: 'application/json', 'Cache-Control': 'no-store' };
+    const headers = { Accept: 'application/json', 'Cache-Control': 'no-store' };
+    if(session)headers['X-Recovery-Session']='1';else headers.Authorization='Bearer '+key;
     if (kind === 'state') headers['X-Recovery-State-Nonce'] = nonce;
-    return { path, options: { method: 'GET', headers, cache: 'no-store', redirect: 'error', credentials: 'omit', referrerPolicy: 'no-referrer' } };
+    return { path, options: { method: 'GET', headers, cache: 'no-store', redirect: 'error', credentials: session?'same-origin':'omit', referrerPolicy: 'no-referrer' } };
   }
   function receipt(data, id) {
     if (!object(data) || !object(data.command) || typeof data.context_id !== 'string' || data.command.request_id !== id) fail();
