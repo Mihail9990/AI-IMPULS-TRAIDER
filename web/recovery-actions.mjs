@@ -115,7 +115,7 @@ function emit(sink,code,id){
  try{sink({code,request_id:typeof id==='string'&&diagnosticUUID.test(id)?id:null});}catch{}
 }
 export class RecoveryActions {
- constructor({fetchImpl=globalThis.fetch,cryptoImpl=globalThis.crypto,storage,token,confirm,allowTrading=false,timeoutMs=12000,locks=globalThis.navigator?.locks,onDiagnostic}){
+ constructor({fetchImpl=globalThis.fetch.bind(globalThis),cryptoImpl=globalThis.crypto,storage,token,confirm,allowTrading=false,timeoutMs=12000,locks=globalThis.navigator?.locks,onDiagnostic}){
   this.locks=locks;this.fetch=fetchImpl;this.crypto=cryptoImpl;this.storage=storage;this.token=token;this.confirm=confirm;this.allowTrading=allowTrading===true;this.enabled=false;this.busy=false;this.timeoutMs=timeoutMs;this.onDiagnostic=onDiagnostic;
  }
  enable({operatorEnabled,migrationAcknowledged,priorOutcomeResolved}={}){

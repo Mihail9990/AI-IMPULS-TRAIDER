@@ -175,3 +175,17 @@ test('browser session uses scope and CSRF for one confirmed POST and never store
  }
  assert(saved.every(s=>!s.includes(csrf)));
 });
+test('default fetch keeps the native browser receiver for state preflight',async()=>{
+ const saved=globalThis.fetch;let requests=0;
+ try{
+  globalThis.fetch=function(path,opt){
+   if(this!==globalThis)throw new TypeError('Illegal invocation');
+   assert.equal(path,'/api/recovery/state');
+   assert.equal(opt.method,'GET');requests++;
+   return Promise.resolve({ok:true,status:200,text:async()=>JSON.stringify(state(opt.headers['X-Recovery-State-Nonce']))});
+  };
+  const core=new RecoveryActions({token:async()=>'fixture-token',cryptoImpl:webcrypto});
+  assert.equal((await core.getState()).account_trade_mode,'demo');
+  assert.equal(requests,1);
+ }finally{globalThis.fetch=saved;}
+});
