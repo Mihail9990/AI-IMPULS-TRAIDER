@@ -1,5 +1,5 @@
 #property strict
-#property version "0.10"
+#property version "0.11"
 // Offline integration source. Terminal and broker reads only.
 input long ExpectedLogin=0;
 input string ExpectedServer="";
@@ -15,6 +15,8 @@ const ulong MaxResponse=65536;
 long SearchHandle=INVALID_HANDLE;
 string SearchFilename="";
 long Sequence=0;
+long HistorySearchHandle=INVALID_HANDLE;
+string HistorySearchFilename="";
 
 bool SafeText(const string value) {
    if(StringLen(value)<1 || StringLen(value)>100) return false;
@@ -49,14 +51,35 @@ int OnInit() {
       ExpectedSymbol!=_Symbol || !HexToken(VerifierEpoch) || !HexToken(ExecutorEpoch) ||
       VerifierEpoch==ExecutorEpoch || ChartID()<=0) return INIT_PARAMETERS_INCORRECT;
    FolderCreate(Mailbox);
-   return EventSetTimer(1) ? INIT_SUCCEEDED : INIT_FAILED;
+   if(!EventSetTimer(1)) return INIT_FAILED;
+   PrintFormat("RECOVERY verifier ready to observe; chart ID %I64d",ChartID());
+   return INIT_SUCCEEDED;
 }
-void OnDeinit(const int reason) { EventKillTimer(); CloseSearch(); }
+void OnDeinit(const int reason) {
+   EventKillTimer();
+   CloseSearch();
+   CloseCursor(HistorySearchHandle,HistorySearchFilename);
+}
 
-bool LoadRequest(const string filename,string &nonce,string &generation) {
-   if(StringLen(filename)!=36) return false;
+bool RecoveryHistoryId(const string value,ulong &number) {
+   int n=StringLen(value);
+   const string max="18446744073709551615";
+   number=0;
+   if(n<1 || n>20 || StringGetCharacter(value,0)==48 ||
+      (n==20 && StringCompare(value,max)>0)) return false;
+   for(int i=0;i<n;i++) {
+      ushort c=StringGetCharacter(value,i);
+      if(c<48 || c>57) return false;
+      number=number*10+(ulong)(c-48);
+   }
+   return true;
+}
+bool LoadRequest(const string filename,string &nonce,string &generation,
+                 bool &history,ulong &position,ulong &anchor) {
    nonce=StringSubstr(filename,0,32);
-   if(!HexToken(nonce) || filename!=nonce+".inv") return false;
+   history=filename==nonce+".hist";
+   if(!HexToken(nonce) || (!history && filename!=nonce+".inv")) return false;
+   position=0; anchor=0;
    int h=FileOpen(Mailbox+"\\"+filename,FILE_READ|FILE_BIN);
    if(h==INVALID_HANDLE) return false;
    ulong size=FileSize(h);
@@ -73,10 +96,12 @@ bool LoadRequest(const string filename,string &nonce,string &generation) {
    if(StringToCharArray(line,canonical,0,WHOLE_ARRAY,CP_UTF8)!=end+1) return false;
    for(int i=0;i<end;i++) if(canonical[i]!=bytes[i]) return false;
    string f[];
-   if(StringSplit(line,9,f)!=10) return false;
-   if(f[0]!="RECOVERY_INVENTORY_REQUEST_V1" || f[1]!=nonce || f[2]!=ExecutorEpoch ||
+   const int count=history ? 12 : 10;
+   if(StringSplit(line,9,f)!=count) return false;
+   if(f[0]!=(history ? "RECOVERY_HISTORY_REQUEST_V1" : "RECOVERY_INVENTORY_REQUEST_V1") || f[1]!=nonce || f[2]!=ExecutorEpoch ||
       f[3]!=VerifierEpoch || f[5]!=(string)ExpectedLogin || f[6]!=ExpectedServer ||
-      f[7]!=ExpectedSymbol || f[8]!=(string)StrategyMagic || f[9]!="END") return false;
+      f[7]!=ExpectedSymbol || f[8]!=(string)StrategyMagic || f[count-1]!="END") return false;
+   if(history && (!RecoveryHistoryId(f[9],position) || !RecoveryHistoryId(f[10],anchor))) return false;
    long gen=StringToInteger(f[4]);
    if(gen<0 || f[4]!=(string)gen) return false;
    generation=f[4];
@@ -176,13 +201,20 @@ void Publish(const string nonce,const string generation) {
    }
    if(!SessionOK()) return;
    if(result!="ok") { first=""; positions=0; orders=0; }
-   const string prefix=Mailbox+"\\"+nonce;
-   const string temp=prefix+"."+VerifierEpoch+"."+(string)ChartID()+".tmp";
-   string payload="RECOVERY_INVENTORY_V1\t"+nonce+"\t"+ExecutorEpoch+"\t"+VerifierEpoch+"\t"+
-      generation+"\t"+(string)ExpectedLogin+"\t"+ExpectedServer+"\t"+ExpectedSymbol+"\t"+
-      (string)StrategyMagic+"\t"+(string)ChartID()+"\t"+(string)(++Sequence)+"\t"+
+   string payload=ReportPrefix("RECOVERY_INVENTORY_V1",nonce,generation)+
       (result=="ok" ? "complete" : "unavailable")+"\t"+result+"\t"+
       (string)positions+"\t"+(string)orders+"\n"+first+"END\n";
+   WriteReport(nonce,".snapshot",payload);
+}
+#include "RecoveryHistory.mqh"
+string ReportPrefix(const string schema,const string nonce,const string generation) {
+   return schema+"\t"+nonce+"\t"+ExecutorEpoch+"\t"+VerifierEpoch+"\t"+
+      generation+"\t"+(string)ExpectedLogin+"\t"+ExpectedServer+"\t"+ExpectedSymbol+"\t"+
+      (string)StrategyMagic+"\t"+(string)ChartID()+"\t"+(string)(++Sequence)+"\t";
+}
+void WriteReport(const string nonce,const string suffix,const string payload) {
+   const string prefix=Mailbox+"\\"+nonce;
+   const string temp=prefix+suffix+"."+VerifierEpoch+"."+(string)ChartID()+".tmp";
    uchar bytes[];
    int count=StringToCharArray(payload,bytes,0,WHOLE_ARRAY,CP_UTF8)-1; // exclude terminating NUL
    if(count<=0 || (ulong)count>MaxResponse) return;
@@ -192,19 +224,49 @@ void Publish(const string nonce,const string generation) {
    FileFlush(h);
    FileClose(h);
    // Neither replacement nor atomicity is assumed. Verifying reader checks END and row counts.
-   if(written!=(uint)count || !SessionOK() || !FileMove(temp,0,prefix+".snapshot",0)) FileDelete(temp);
+   if(written!=(uint)count || !SessionOK() || !FileMove(temp,0,prefix+suffix,0)) FileDelete(temp);
 }
-void OnTimer() {
-   if(!SessionOK()) { CloseSearch(); return; }
-   if(SearchHandle==INVALID_HANDLE) {
-      SearchHandle=FileFindFirst(Mailbox+"\\*.inv",SearchFilename);
-      if(SearchHandle==INVALID_HANDLE) return;
+void PublishHistory(const string nonce,const string generation,const ulong position,const ulong anchor) {
+   string rows;
+   int orders,deals;
+   string result=RecoveryHistoryObserve(position,anchor,ExpectedSymbol,rows,orders,deals);
+   if(!SessionOK()) return;
+   string payload=ReportPrefix("RECOVERY_HISTORY_V1",nonce,generation)+(string)position+"\t"+(string)anchor+"\t"+
+      (result=="ok" ? "observed" : "unavailable")+"\t"+result+"\t"+
+      (string)orders+"\t"+(string)deals+"\n"+rows+"END\n";
+   WriteReport(nonce,".history",payload);
+}
+
+void CloseCursor(long &handle,string &filename) {
+   if(handle!=INVALID_HANDLE) FileFindClose(handle);
+   handle=INVALID_HANDLE;
+   filename="";
+}
+void ScanChannel(long &handle,string &filename,const bool expected_history) {
+   if(handle==INVALID_HANDLE) {
+      handle=FileFindFirst(Mailbox+(expected_history ? "\\*.hist" : "\\*.inv"),filename);
+      if(handle==INVALID_HANDLE) return;
    }
    for(int visited=0;visited<32;visited++) {
       string nonce,generation;
-      bool new_work=LoadRequest(SearchFilename,nonce,generation) && !FileIsExist(Mailbox+"\\"+nonce+".snapshot");
-      if(new_work) Publish(nonce,generation);
-      if(!FileFindNext(SearchHandle,SearchFilename)) { CloseSearch(); return; }
-      if(new_work) return; // One full snapshot max per timer event.
+      bool history;
+      ulong position,anchor;
+      bool new_work=LoadRequest(filename,nonce,generation,history,position,anchor) && history==expected_history &&
+                    !FileIsExist(Mailbox+"\\"+nonce+(history ? ".history" : ".snapshot"));
+      if(new_work) {
+         if(history) PublishHistory(nonce,generation,position,anchor);
+         else Publish(nonce,generation);
+      }
+      if(!FileFindNext(handle,filename)) { CloseCursor(handle,filename); return; }
+      if(new_work) return; // One full probe max per channel per timer event.
    }
+}
+void OnTimer() {
+   if(!SessionOK()) {
+      CloseSearch();
+      CloseCursor(HistorySearchHandle,HistorySearchFilename);
+      return;
+   }
+   ScanChannel(HistorySearchHandle,HistorySearchFilename,true);
+   ScanChannel(SearchHandle,SearchFilename,false);
 }
