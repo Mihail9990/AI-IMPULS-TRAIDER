@@ -10,9 +10,9 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 if __package__:
-    from .channel import Channel, ProtocolError, VERSION, digest, ident, read_json
+    from .channel import Channel, ProtocolError, VERSION, digest, ident
 else:
-    from channel import Channel, ProtocolError, VERSION, digest, ident, read_json
+    from channel import Channel, ProtocolError, VERSION, digest, ident
 
 
 _PUBLIC = {'manual_wait', 'manual_cancel'}
@@ -58,16 +58,17 @@ async def _post(request: Request):
         raise HTTPException(422, 'Invalid EA command or missing confirmation') from exc
 
 
-def _stored(channel: Channel, request_id: str):
+def _stored(channel: Channel, request_id: str, boot: str):
     """An immutable command is the durable correlation for a later receipt."""
     try:
-        command = read_json(channel.root / 'commands' / f'{request_id}.json')
+        command = channel.command_record(request_id, boot_id=boot)
     except FileNotFoundError:
         return None
     if command.keys() != _DURABLE_FIELDS:
         raise ProtocolError('invalid durable command keys')
     if type(command['version']) is not int or command['version'] != VERSION or (
-            command['scope_id'] != channel.scope_id or command['command_id'] != request_id):
+            command['scope_id'] != channel.scope_id or command['command_id'] != request_id
+            or command['boot_id'] != boot):
         raise ProtocolError('invalid durable command identity')
     if (not isinstance(command['operation'], str) or command['operation'] not in _PUBLIC
             or command['payload'] != {} or type(command['created_at']) is not int):
@@ -101,13 +102,12 @@ def _result(channel, request_id, command=None):
                     reason='receipt_unverified', retry_allowed=False)
 
 
-def _projection(channel, request_id, command=None):
-    if command is None:
-        try:
-            command = _stored(channel, request_id)
-        except (OSError, ValueError, TypeError):
-            return dict(request_id=request_id, dispatch='unknown', status='unknown',
-                        reason='command_unverified', retry_allowed=False)
+def _projection(channel, request_id, boot):
+    try:
+        command = _stored(channel, request_id, boot)
+    except (OSError, ValueError, TypeError):
+        return dict(request_id=request_id, dispatch='unknown', status='unknown',
+                    reason='command_unverified', retry_allowed=False)
     return _result(channel, request_id, command)
 
 
@@ -140,12 +140,13 @@ def create_handoff_app(token: str, channel: Channel) -> FastAPI:
             raise HTTPException(503, 'EA state unavailable') from None
 
     @app.get('/api/recovery/ea/commands/{request_id}')
-    def status(request_id: str):
+    def status(request_id: str, expected_boot: str):
         try:
             _uuid(request_id)
+            _uuid(expected_boot)
         except ProtocolError:
             raise HTTPException(422, 'Invalid request ID') from None
-        return _projection(channel, request_id)
+        return _projection(channel, request_id, expected_boot)
 
     @app.post('/api/recovery/ea/{operation}', status_code=202)
     async def publish(operation: str, request: Request):
@@ -162,7 +163,7 @@ def create_handoff_app(token: str, channel: Channel) -> FastAPI:
                     and tuple(command[field] for field in _BOUND) == expected_binding)
 
         try:
-            existing = _stored(channel, request_id)
+            existing = _stored(channel, request_id, boot)
         except (OSError, ValueError, TypeError):
             # Do not dispatch if status of this ID cannot be read.
             return dict(request_id=request_id, dispatch='unknown', status='unknown',
@@ -180,13 +181,13 @@ def create_handoff_app(token: str, channel: Channel) -> FastAPI:
             # The hard-link may already have succeeded, or another request may
             # have won the same ID. Read once, never publish twice here.
             try:
-                existing = _stored(channel, request_id)
+                existing = _stored(channel, request_id, boot)
             except (OSError, ValueError, TypeError):
                 return dict(request_id=request_id, dispatch='unknown', status='unknown',
                             reason='command_unverified', retry_allowed=False)
             if existing is not None and not same(existing):
                 raise HTTPException(409, 'Request ID belongs to another command') from None
             return _result(channel, request_id, existing)
-        return _projection(channel, request_id)
+        return _projection(channel, request_id, boot)
 
     return app

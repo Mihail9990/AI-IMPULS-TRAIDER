@@ -82,17 +82,31 @@ class Channel:
         self.scope_id = ident(scope_id)
         self.clock = clock
         # Never auto-create or change ACLs; installer must provision private root.
-        for folder in (self.root, self.root/'commands', self.root/'receipts'):
+        for folder in (self.root, self.root/'sessions'):
             if folder.is_symlink() or not folder.is_dir(): raise ProtocolError('private channel folders required')
 
     def state(self):
         value = read_json(self.root/'state.json')
-        if value.get('version') != VERSION or value.get('scope_id') != self.scope_id:
+        if type(value.get('version')) is not int or value['version'] != VERSION or value.get('scope_id') != self.scope_id:
             raise ProtocolError('state scope/version mismatch')
         ident(value.get('boot_id')); ident(value.get('context_id')); ident(value.get('generation_id'))
-        if value.get('mode') not in {'ready', 'manual_wait', 'manual_cancel', 'reconciling', 'unknown'}:
+        if value.get('mode') not in {'ready', 'manual_wait', 'manual_cancel', 'unknown'}:
             raise ProtocolError('bad mode')
         return value
+
+    def _session_file(self, boot_id, category, command_id):
+        """Resolve only an explicit session, never the former flat queue."""
+        if category not in {'commands', 'receipts'}: raise ProtocolError('bad session category')
+        session = self.root/'sessions'/ident(boot_id)
+        bucket = session/category
+        for folder in (self.root, self.root/'sessions', session, bucket):
+            if folder.is_symlink() or not folder.is_dir():
+                raise ProtocolError('private session folders required')
+        return bucket/f'{ident(command_id)}.json'
+
+    def command_record(self, command_id, *, boot_id):
+        if self.state()['boot_id'] != boot_id: raise ProtocolError('session changed')
+        return read_json(self._session_file(boot_id, 'commands', command_id))
 
     def publish(self, operation, payload, *, command_id, expected_boot, expected_context, expected_generation,
                 confirmed=False):
@@ -105,24 +119,28 @@ class Channel:
         state = self.state()
         if (state['boot_id'], state['context_id'], state['generation_id']) != (expected_boot, expected_context, expected_generation):
             raise ProtocolError('context changed; new confirmation required')
-        if state['mode'] in {'reconciling', 'unknown'}: raise ProtocolError('status-only state')
+        if state['mode'] == 'unknown': raise ProtocolError('status-only state')
         now = int(self.clock())
         cmd = dict(version=VERSION, scope_id=self.scope_id, boot_id=expected_boot,
                    context_id=expected_context, generation_id=expected_generation,
                    command_id=command_id, created_at=now, operation=operation, payload=payload)
         cmd['content_sha256'] = digest(cmd)
         # Existing ID always errors, even identical. Read status instead of resubmission.
-        atomic_new(self.root/'commands'/f'{command_id}.json', cmd)
+        atomic_new(self._session_file(expected_boot, 'commands', command_id), cmd)
         return cmd
 
     def receipt(self, command):
-        ident(command['command_id'])
-        path = self.root/'receipts'/f"{command['command_id']}.json"
+        if command.get('scope_id') != self.scope_id:
+            raise ProtocolError('receipt scope mismatch')
+        boot_id = ident(command['boot_id'])
+        if self.state()['boot_id'] != boot_id: raise ProtocolError('session changed')
+        path = self._session_file(boot_id, 'receipts', command['command_id'])
         try: value = read_json(path)
         except FileNotFoundError:
             return {'status': 'unknown', 'reason': 'no_receipt', 'retry_allowed': False}
         for field in ('version','scope_id','boot_id','context_id','generation_id','command_id','content_sha256'):
             if value.get(field) != command.get(field): raise ProtocolError('receipt binding mismatch')
         if value.get('status') not in STATES: raise ProtocolError('invalid receipt state')
+        if self.state()['boot_id'] != boot_id: raise ProtocolError('session changed')
         # Never translate accepted into applied or unknown into safe-to-retry.
         return dict(value, retry_allowed=False)
