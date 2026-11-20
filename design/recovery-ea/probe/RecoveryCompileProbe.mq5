@@ -11,6 +11,8 @@
 #include "../execution/RecoveryWatchedSupport.mqh"
 #include "../cycle/RecoveryCompletedReverse.mqh"
 #include "../cycle/RecoveryRejectedSupportMove.mqh"
+#include "../cycle/RecoveryAlternatingFill.mqh"
+#include "../verifier/RecoveryClosedMoney.mqh"
 #include "../execution/RecoveryAdoptionInventory.mqh"
 #include "../execution/RecoveryIntentRestart.mqh"
 #include "../verifier/RecoveryExactOrderReader.mqh"
