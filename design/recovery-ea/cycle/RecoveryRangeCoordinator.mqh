@@ -194,7 +194,9 @@ bool RRConfirm(RRRangeState &s,const RREffect &e) {
 
 // Accept one owned fill only after confirmed remainder, exact position/proof,
 // and the preceding close transition. Concurrent/racing fills are not guessed.
-bool RRObserveFill(RRRangeState &s,const RRSettings &cfg,const RRFilled &f) {
+// Internal normalized application; public legacy path must not consume two
+// support alternatives. They need an independently observed surviving ticket.
+bool RRObserveFillCore(RRRangeState &s,const RRSettings &cfg,const RRFilled &f) {
  if(!RRValid(s,cfg) || s.pending.kind!=RR_NONE ||
     (s.phase!=RR_WAIT && s.phase!=RR_ARM_REENTRY) || s.retire.ticket!=0 ||
     s.cycle.position_id!=0 || !f.independently_verified ||
@@ -217,6 +219,15 @@ bool RRObserveFill(RRRangeState &s,const RRSettings &cfg,const RRFilled &f) {
  if(sl==s.live_sl)RRAfterProtection(s);
  else s.phase=RR_PROTECT;
  return true;
+}
+
+bool RRHasSupportAlternatives(const RRRangeState &s) {
+ return s.phase==RR_WAIT && s.reentry_slot>0 && s.entry.ticket!=0 && s.opposite.ticket!=0;
+}
+
+bool RRObserveFill(RRRangeState &s,const RRSettings &cfg,const RRFilled &f) {
+ if(RRHasSupportAlternatives(s))return false;
+ return RRObserveFillCore(s,cfg,f);
 }
 
 bool RRApplyDurableClose(RRRangeState &s,const RCCloseCheckpoint &close) {

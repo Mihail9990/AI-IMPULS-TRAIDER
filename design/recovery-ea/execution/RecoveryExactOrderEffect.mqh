@@ -1,6 +1,6 @@
 #ifndef RECOVERY_EXACT_ORDER_EFFECT_MQH
 #define RECOVERY_EXACT_ORDER_EFFECT_MQH
-#include "../cycle/RecoveryRangeCoordinator.mqh"
+#include "../cycle/RecoverySupportRotation.mqh"
 #include "../verifier/RecoveryExactOrderReader.mqh"
 #include "RecoveryAdoptionInventory.mqh" // shared non-lossy fixed-point and ticket decoders
 
@@ -23,12 +23,16 @@ void RecoveryExactEffectClear(RREffect &effect) {
 bool RecoveryExactEffectBound(const RRRangeState &range,const RecoveryExactEffectBinding &binding) {
    const RRAction a=binding.action;
    const bool create=a.kind==RR_PRIMARY || a.kind==RR_REVERSE || a.kind==RR_REENTRY;
-   return (create || a.kind==RR_CANCEL) && a.serial>0 && a.scope>0 && a.scope==range.scope &&
+   const bool move=a.kind==RR_MOVE_SUPPORT_OPPOSITE;
+   return (create || move || a.kind==RR_CANCEL) && a.serial>0 && a.scope>0 && a.scope==range.scope &&
           a.generation>0 && a.generation==range.cycle.generation &&
           a.generation==(ulong)binding.request.binding.generation &&
           a.range_id==range.cycle.range_id && RRActionEqual(range.pending,a) &&
           RecoveryInvScopeOK(binding.request.binding) && binding.request.order_ticket>0 &&
           (create ? a.order_ticket==0 : a.order_ticket==binding.request.order_ticket) &&
+          (!move || (range.retire.ticket==a.order_ticket && range.retire.side==a.side &&
+                     range.retire.volume_steps==a.volume_steps &&
+                     (range.retire.entry_ticks!=a.entry_ticks || range.retire.sl_ticks!=a.sl_ticks))) &&
           a.position_id==0 && a.position_ticket==0 && (a.side==1 || a.side==-1) &&
           a.entry_ticks>0 && a.sl_ticks>0 && a.tp_ticks>=0 && a.volume_steps>0 &&
           MathIsValidNumber(binding.price_tick) && binding.price_tick>0 &&
@@ -44,6 +48,7 @@ bool RecoveryExactEffectFold(const RecoveryExactReport &report,const RecoveryExa
       (ulong)report.sequence<=binding.verify_after || report.position_identifier!="0") return false;
    const RRAction a=binding.action;
    const bool cancel=a.kind==RR_CANCEL;
+   const bool create=a.kind==RR_PRIMARY || a.kind==RR_REVERSE || a.kind==RR_REENTRY;
    if(report.source!=(cancel ? "history" : "current")) return false;
    string f[];
    ulong type,state;
@@ -61,7 +66,8 @@ bool RecoveryExactEffectFold(const RecoveryExactReport &report,const RecoveryExa
       !RecoveryAdoptionUnits(f[10],binding.price_tick,true,tp) || tp!=a.tp_ticks ||
       f[11]!="0.0000000000000000") return false;
    effect.action=a;
-   effect.created_order=cancel ? 0 : binding.request.order_ticket;
+   // A move only confirms an update to the already-owned ticket.
+   effect.created_order=create ? binding.request.order_ticket : 0;
    effect.terminal_verified=true;
    return true;
 }

@@ -47,13 +47,20 @@ int main(){
     assert(request.action==TRADE_ACTION_REMOVE && request.order==77);
     range.pending.entry_ticks++;
     assert(!RecoveryBuildStagedRequest(range,range.pending,"XAUUSD.s",18,.01,.01,request));
+    range.retire={77,-1,399930,400000,2};
+    range.pending={9,5,4,1,RR_MOVE_SUPPORT_OPPOSITE,-1,0,77,0,0,399940,400020,0,2};
+    assert(RecoveryBuildStagedRequest(range,range.pending,"XAUUSD.s",18,.01,.01,request));
+    assert(request.action==TRADE_ACTION_MODIFY && request.order==77 && request.volume==0 &&
+           near(request.price,3999.4) && near(request.sl,4000.2));
+    range.pending.volume_steps=3;
+    assert(!RecoveryBuildStagedRequest(range,range.pending,"XAUUSD.s",18,.01,.01,request));
 }
 """
         with tempfile.TemporaryDirectory() as d:
             cpp = Path(d) / "action.cpp"
             exe = cpp.with_suffix("")
             cpp.write_text(MOCK+'\n#include "'+str(cycle/'RecoveryCycle.mqh')+'"\n'+
-                           "template<class T> void ZeroMemory(T &x){x=T{};}\n"+structs+equality+build+test)
+                           "template<class T> void ZeroMemory(T &x){x=T{};}\n"+structs+"\nconstexpr int RR_MOVE_SUPPORT_OPPOSITE=7;\n"+equality+build+test)
             subprocess.run([gxx,"-std=c++17","-Wall","-Wextra","-Werror","-fsanitize=undefined",
                             str(cpp),"-o",str(exe)],check=True)
             subprocess.run([str(exe)],check=True)

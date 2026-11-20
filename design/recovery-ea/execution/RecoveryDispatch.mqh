@@ -22,6 +22,7 @@ struct RecoveryDispatchResult
    uint send_retcode;
    bool synchronous_sl_ack; // Diagnostic only; never proves observed SL.
    bool async_sl_submitted;  // Local accepted send, not broker acceptance.
+   bool synchronous_move_rejected; // Exact matched response only, never a timeout.
    ulong order;
   };
 
@@ -55,8 +56,16 @@ bool RecoveryDispatchTarget(const RecoveryIntentKey &key,const RRRangeState &ran
          !RecoveryDispatchUnits(tp,tick,true,action.tp_ticks)) return false;
       return RecoveryIntentContextOK(key);
      }
-   if(action.kind==RR_CANCEL)
+   if(action.kind==RR_CANCEL || action.kind==RR_MOVE_SUPPORT_OPPOSITE)
      {
+      long expected_entry=action.entry_ticks,expected_sl=action.sl_ticks,expected_volume=action.volume_steps;
+      if(action.kind==RR_MOVE_SUPPORT_OPPOSITE)
+        {
+         const RRKnownOrder old=range.retire;
+         if(old.ticket!=action.order_ticket || old.side!=action.side || old.volume_steps!=action.volume_steps)
+            return false;
+         expected_entry=old.entry_ticks;expected_sl=old.sl_ticks;expected_volume=old.volume_steps;
+        }
       RecoveryExactOrderScope scope;
       scope.login=key.login;scope.server=key.server;scope.symbol=key.symbol;
       scope.magic=(ulong)key.magic;scope.ticket=action.order_ticket;
@@ -66,10 +75,10 @@ bool RecoveryDispatchTarget(const RecoveryIntentKey &key,const RRRangeState &ran
          row.state!=ORDER_STATE_PLACED || row.position_identifier!=0 ||
          row.type!=(action.side==1 ? ORDER_TYPE_BUY_STOP : ORDER_TYPE_SELL_STOP) ||
          row.tp!=0.0 || row.stop_limit!=0.0 ||
-         !RecoveryDispatchUnits(row.price,tick,false,action.entry_ticks) ||
-         !RecoveryDispatchUnits(row.sl,tick,false,action.sl_ticks) ||
-         !RecoveryDispatchUnits(row.initial_volume,step,false,action.volume_steps) ||
-         !RecoveryDispatchUnits(row.remaining_volume,step,false,action.volume_steps)) return false;
+         !RecoveryDispatchUnits(row.price,tick,false,expected_entry) ||
+         !RecoveryDispatchUnits(row.sl,tick,false,expected_sl) ||
+         !RecoveryDispatchUnits(row.initial_volume,step,false,expected_volume) ||
+         !RecoveryDispatchUnits(row.remaining_volume,step,false,expected_volume)) return false;
       return RecoveryIntentContextOK(key);
      }
    return action.kind==RR_PRIMARY || action.kind==RR_REVERSE || action.kind==RR_REENTRY;
@@ -131,6 +140,10 @@ RecoveryDispatchState RecoveryDispatchImpl(const RRRangeState &range,const RRAct
    out.send_retcode=result.retcode;
    out.synchronous_sl_ack=(submitted && request.action==TRADE_ACTION_SLTP &&
                            result.retcode==TRADE_RETCODE_DONE);
+   out.synchronous_move_rejected=(submitted && action.kind==RR_MOVE_SUPPORT_OPPOSITE &&
+      request.action==TRADE_ACTION_MODIFY &&
+      (result.retcode==TRADE_RETCODE_REJECT || result.retcode==TRADE_RETCODE_INVALID_PRICE ||
+       result.retcode==TRADE_RETCODE_INVALID_STOPS || result.retcode==TRADE_RETCODE_FROZEN));
    // This ACK binds a ticket only; the independent verifier still proves the
    // effect. No return code here advances strategy state or authorizes retry.
    if(submitted && request.action==TRADE_ACTION_PENDING && result.order!=0 &&

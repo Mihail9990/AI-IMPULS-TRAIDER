@@ -60,7 +60,8 @@ int main() {
  assert(RRConfirm(s,{a,true,52})&&s.phase==RR_WAIT&&s.opposite.ticket==51);
  f=fill(s,s.entry,101,301080,99);
  assert(!RRObserveFill(s,c,f));f.working_other_ticket=51;
- assert(RRObserveFill(s,c,f)&&s.phase==RR_PROTECT&&s.retire.ticket==51);
+ assert(!RRObserveFill(s,c,f)); // public path must route support alternatives to same-ticket rotation
+ assert(RRObserveFillCore(s,c,f)&&s.phase==RR_PROTECT&&s.retire.ticket==51); // internal reducer only
  assert(RRStage(s,c,0,0,a)&&a.kind==RR_INITIAL_SL);
  assert(RRConfirm(s,{a,true,0})&&s.retire.ticket==51);
  assert(RRStage(s,c,0,0,a)&&a.kind==RR_CANCEL&&a.order_ticket==51);

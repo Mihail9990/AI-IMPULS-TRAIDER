@@ -13,14 +13,16 @@ MOCK = r"""
 using string=std::string;
 using ulong=std::uint64_t;
 using uint=unsigned;
-enum {RR_INITIAL_SL=1,RR_SUPPORT_SL,RR_CANCEL,RR_PRIMARY,RR_REVERSE,RR_REENTRY,
+enum {RR_INITIAL_SL=1,RR_SUPPORT_SL,RR_CANCEL,RR_PRIMARY,RR_REVERSE,RR_REENTRY,RR_MOVE_SUPPORT_OPPOSITE,
       POSITION_IDENTIFIER,POSITION_TICKET,POSITION_TYPE,POSITION_TYPE_BUY,POSITION_TYPE_SELL,
       POSITION_SYMBOL,POSITION_SL,POSITION_TP,ORDER_STATE_PLACED,ORDER_TYPE_BUY_STOP,
-      ORDER_TYPE_SELL_STOP,TRADE_ACTION_PENDING,TRADE_ACTION_SLTP,TRADE_ACTION_REMOVE,
-      TRADE_RETCODE_DONE,TRADE_RETCODE_DONE_PARTIAL,TRADE_RETCODE_PLACED};
+      ORDER_TYPE_SELL_STOP,TRADE_ACTION_PENDING,TRADE_ACTION_SLTP,TRADE_ACTION_REMOVE,TRADE_ACTION_MODIFY,
+      TRADE_RETCODE_DONE,TRADE_RETCODE_DONE_PARTIAL,TRADE_RETCODE_PLACED,
+      TRADE_RETCODE_REJECT,TRADE_RETCODE_INVALID_PRICE,TRADE_RETCODE_INVALID_STOPS,TRADE_RETCODE_FROZEN};
 struct RRAction {int kind,side;ulong position_ticket,position_id,order_ticket,generation;long
                  tp_ticks,entry_ticks,sl_ticks,volume_steps;};
-struct RRRangeState {long live_sl;};
+struct RRKnownOrder {ulong ticket{}; int side{}; long entry_ticks{},sl_ticks{},volume_steps{};};
+struct RRRangeState {long live_sl; RRKnownOrder retire{};};
 struct RecoveryIntentKey {long login,magic,generation; string server,symbol;};
 enum {RI_NO_RECORD,RI_UNRESOLVED,RI_TICKET,RI_UNAVAILABLE};
 struct MqlTradeRequest {int action;};
@@ -45,7 +47,7 @@ bool RecoveryIntentRecordTicket(const RecoveryIntentKey&,ulong ticket){
     return can_record;}
 bool RecoveryBuildStagedRequest(const RRRangeState&,const RRAction& a,const string&,ulong,double,double,
     MqlTradeRequest &r){ r.action=a.kind==RR_SUPPORT_SL?TRADE_ACTION_SLTP:
-        (a.kind==RR_CANCEL?TRADE_ACTION_REMOVE:TRADE_ACTION_PENDING);return valid_build; }
+        (a.kind==RR_CANCEL?TRADE_ACTION_REMOVE:a.kind==RR_MOVE_SUPPORT_OPPOSITE?TRADE_ACTION_MODIFY:TRADE_ACTION_PENDING);return valid_build; }
 bool MathIsValidNumber(double x){return std::isfinite(x);}
 string DoubleToString(double x,int){return std::to_string(x);}
 bool RecoveryAdoptionUnits(const string& s,double step,bool allow_zero,long &n){
@@ -108,6 +110,17 @@ int main(){
     reset();a={RR_CANCEL,-1,0,0,77,8,0,399930,400000,2};
     own_order=false;assert(call()==RD_NOT_SENT && check_calls==0);
     reset();assert(call()==RD_OUTCOME_UNRESOLVED && send_calls==1);
+    reset();a={RR_MOVE_SUPPORT_OPPOSITE,-1,0,0,77,8,0,399950,400030,2};
+    s.retire={77,-1,399930,400000,2};
+    assert(call()==RD_OUTCOME_UNRESOLVED && send_calls==1);
+    reset();send_code=TRADE_RETCODE_REJECT;
+    assert(call()==RD_OUTCOME_UNRESOLVED && r.synchronous_move_rejected);
+    reset();send_code=TRADE_RETCODE_REJECT;acked=false;
+    assert(call()==RD_OUTCOME_UNRESOLVED && !r.synchronous_move_rejected);
+    reset();send_code=9999;
+    assert(call()==RD_OUTCOME_UNRESOLVED && !r.synchronous_move_rejected);
+    reset();s.retire.entry_ticks=399931;
+    assert(call()==RD_NOT_SENT && send_calls==0 && check_calls==0);
 }
 """
 class DispatchCompat(unittest.TestCase):

@@ -1,0 +1,115 @@
+#include <cassert>
+#include <cstdint>
+#include <limits>
+#include <initializer_list>
+using ulong=std::uint64_t;
+constexpr auto ULONG_MAX=std::numeric_limits<ulong>::max();
+#include "RecoverySupportRotation.mqh"
+
+static RRSettings config() {
+ RRSettings cfg{};cfg.scope=1;cfg.generation=7;
+ cfg.initial_sl_ticks=80;cfg.support_first_ticks=25;cfg.support_second_ticks=40;cfg.support_offset_ticks=25;
+ for(int n=1;n<=24;n++)cfg.lot_steps[n-1]=RCDefaultLotHundredths(n);
+ return cfg;
+}
+static RRRangeState wait(const RRSettings &cfg,int side) {
+ RRRangeState s{};
+ assert(RRNewRange(s,cfg,1,side,400000));
+ s.phase=RR_WAIT;s.action_serial=31;
+ s.cycle.full_sl_count=4;
+ s.cycle.last_closed_order=200;s.cycle.last_closed_position=500;
+ // At lot schedule boundary, roles have intentionally different lot sizes.
+ s.reentry_side=side;s.reentry_slot=5;s.reentry_ticks=400000+side*80;
+ s.entry={201,side,s.reentry_ticks,400000,cfg.lot_steps[4]};
+ s.opposite={202,-side,400000-side*80,400000,cfg.lot_steps[5]};
+ return s;
+}
+static RRFilled fill(const RRRangeState &s,const RRKnownOrder &order,long actual,ulong other) {
+ return {{s.cycle.generation,s.cycle.range_id,order.ticket,order.ticket,9007199254740993ULL,
+          order.side,order.volume_steps,order.volume_steps,order.volume_steps,actual,true,true,true},
+          700,other,order.sl_ticks,0,true};
+}
+
+int main() {
+ const auto cfg=config();
+ RRRangeState shadow{};
+ for(int original_side : {1,-1}) {
+   for(bool reentry_wins : {false,true}) {
+     auto s=wait(cfg,original_side);
+     assert(RRHasSupportAlternatives(s));
+     const RRKnownOrder winner=reentry_wins?s.entry:s.opposite;
+     const RRKnownOrder other=reentry_wins?s.opposite:s.entry;
+     const long price=winner.entry_ticks+winner.side*5;
+     auto f=fill(s,winner,price,other.ticket);
+     auto wrong=other;wrong.volume_steps--;
+     RRSupportRotation p{};
+     assert(!RRStageSupportRotation(s,cfg,f,wrong,p));
+     wrong=other;wrong.ticket++;
+     assert(!RRStageSupportRotation(s,cfg,f,wrong,p));
+     wrong=other;wrong.entry_ticks++;
+     assert(!RRStageSupportRotation(s,cfg,f,wrong,p));
+     f.working_other_ticket++;
+     assert(!RRStageSupportRotation(s,cfg,f,other,p));
+     f.working_other_ticket=other.ticket;
+     f.entry.remainder_reconciled=false;
+     assert(!RRStageSupportRotation(s,cfg,f,other,p));
+     f.entry.remainder_reconciled=true;
+     s.pending.kind=RR_CANCEL;
+     assert(!RRStageSupportRotation(s,cfg,f,other,p));
+     s.pending.kind=RR_NONE;
+     assert(RRStageSupportRotation(s,cfg,f,other,p));
+     assert(RRSupportRotationBound(s,p)&&p.reserved&&p.sl_required&&p.move_required);
+     assert(!RRHasSupportAlternatives(s));
+     assert(!RRStageSupportRotation(s,cfg,f,other,p));
+     assert(p.sl.sl_ticks==price-winner.side*80);
+     assert(p.move.kind==RR_MOVE_SUPPORT_OPPOSITE&&p.move.order_ticket==other.ticket);
+     assert(p.move.entry_ticks==p.sl.sl_ticks&&p.move.sl_ticks==price&&p.move.volume_steps==other.volume_steps);
+     assert(p.move.position_id==0&&p.move.position_ticket==0&&p.move.serial==p.sl.serial+1);
+     assert(p.position_id==f.entry.position_id&&RRKnownEqual(p.previous,other));
+     assert(RRSupportRotationRequestState(s,p,p.move,shadow)&&RRKnownEqual(shadow.retire,other));
+     assert(RRActionEqual(shadow.pending,p.move)&&RRActionEqual(s.pending,p.sl));
+     assert(RRConfirmSupportRotation(s,p,{p.move,true,other.ticket})==RR_PAIR_CONFLICT); // not a create
+     auto wrong_action=p.move;wrong_action.entry_ticks++;
+     assert(RRConfirmSupportRotation(s,p,{wrong_action,true,0})==RR_PAIR_CONFLICT);
+     assert(RRConfirmSupportRotation(s,p,{p.move,false,0})==RR_PAIR_WAITING);
+     assert(!p.move_verified);
+     assert(RRConfirmSupportRotation(s,p,{p.move,true,0})==RR_PAIR_WAITING);
+     assert(!RRSupportRotationRequestState(s,p,p.move,shadow));
+     assert(RRConfirmSupportRotation(s,p,{p.move,true,0})==RR_PAIR_WAITING);
+     assert(s.opposite.ticket==0&&s.pending.kind==RR_INITIAL_SL);
+     assert(RRConfirmSupportRotation(s,p,{p.sl,true,0})==RR_PAIR_CONFIRMED);
+     assert(s.phase==RR_ACTIVE&&!p.reserved&&s.pending.kind==RR_NONE&&s.retire.ticket==0);
+     assert(s.opposite.ticket==other.ticket&&s.opposite.volume_steps==other.volume_steps);
+     assert(s.opposite.entry_ticks==price-winner.side*80&&s.opposite.sl_ticks==price);
+     assert(s.cycle.full_sl_count==4);
+   }
+ }
+ auto s=wait(cfg,1);
+ RRSupportRotation p{};
+ auto f=fill(s,s.entry,s.entry.entry_ticks,s.opposite.ticket);
+ const auto other=s.opposite;
+ assert(RRStageSupportRotation(s,cfg,f,other,p)&&!p.sl_required&&p.move_required);
+ assert(RRConfirmSupportRotation(s,p,{p.move,true,0})==RR_PAIR_CONFIRMED);
+ assert(s.opposite.ticket==other.ticket&&s.opposite.entry_ticks==400000);
+
+ s=wait(cfg,1);
+ // Already-correct geometry of pending and attached stops: no redundant write.
+ s.opposite.entry_ticks=400000;s.opposite.sl_ticks=400080;
+ f=fill(s,s.entry,s.entry.entry_ticks,s.opposite.ticket);p={};
+ const auto stationary=s.opposite;
+ assert(RRStageSupportRotation(s,cfg,f,stationary,p)&&!p.reserved&&!p.sl_required&&!p.move_required);
+ assert(s.phase==RR_ACTIVE&&RRKnownEqual(s.opposite,stationary));
+
+ s=wait(cfg,1);p={};
+ s.opposite.entry_ticks=400005;s.opposite.sl_ticks=400085;
+ f=fill(s,s.entry,400085,s.opposite.ticket);
+ const auto aligned=s.opposite;
+ assert(RRStageSupportRotation(s,cfg,f,aligned,p)&&p.reserved&&p.sl_required&&!p.move_required);
+ assert(RRConfirmSupportRotation(s,p,{p.sl,true,0})==RR_PAIR_CONFIRMED);
+ assert(RRKnownEqual(s.opposite,aligned));
+
+ s=wait(cfg,-1);p={};s.cycle.full_sl_count=23;s.reentry_slot=24;
+ s.entry.volume_steps=cfg.lot_steps[23];
+ f=fill(s,s.entry,s.entry.entry_ticks,s.opposite.ticket);
+ assert(!RRStageSupportRotation(s,cfg,f,s.opposite,p)&&s.phase==RR_WAIT&&!p.reserved);
+}

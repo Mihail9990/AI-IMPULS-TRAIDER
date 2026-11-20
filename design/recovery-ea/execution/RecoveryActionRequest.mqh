@@ -1,6 +1,7 @@
 #ifndef RECOVERY_ACTION_REQUEST_MQH
 #define RECOVERY_ACTION_REQUEST_MQH
 #include "../cycle/RecoveryRangeCoordinator.mqh"
+#include "../cycle/RecoverySupportRotation.mqh"
 #include "RecoveryOrderRequest.mqh"
 
 // Convert only an already-reserved, matching coordinator intent. Retains the
@@ -39,6 +40,17 @@ bool RecoveryBuildStagedRequest(const RRRangeState &range,const RRAction &action
          s.kind=RRQ_POSITION_SL;s.position_ticket=action.position_ticket;
          s.stop_ticks=action.sl_ticks;s.take_ticks=action.tp_ticks;
          break;
+      case RR_MOVE_SUPPORT_OPPOSITE:
+        {
+         const RRKnownOrder existing=range.retire;
+         if(action.position_id!=0 || action.position_ticket!=0 || action.order_ticket==0 ||
+            existing.ticket!=action.order_ticket || existing.side!=action.side ||
+            existing.volume_steps!=action.volume_steps || action.tp_ticks!=0)
+            return false;
+         s.kind=RRQ_MOVE_STOP_ENTRY;s.order_ticket=existing.ticket;s.side=existing.side;
+         s.entry_ticks=action.entry_ticks;s.stop_ticks=action.sl_ticks;s.take_ticks=action.tp_ticks;
+         break;
+        }
       case RR_CANCEL:
         {
          if(action.order_ticket==0 || action.position_ticket!=0 || action.position_id!=0 ||

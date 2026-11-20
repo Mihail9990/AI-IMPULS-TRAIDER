@@ -46,7 +46,9 @@ double MathMax(double a,double b){return std::max(a,b);}
 double MathAbs(double n){return std::abs(n);}
 enum {ORDER_TYPE_BUY_STOP=4,ORDER_TYPE_SELL_STOP=5,ORDER_STATE_PLACED=1,ORDER_STATE_CANCELED=2};
 """
-        body = structs+eq+clear+as_cpp((VERIFIER/"RecoveryInventoryReader.mqh").read_text())+reader+units+adapter
+        rotation = (CYCLE/"RecoverySupportRotation.mqh").read_text()
+        move_kind = next(line for line in rotation.splitlines() if line.startswith("#define RR_MOVE_SUPPORT_OPPOSITE "))
+        body = move_kind+"\n"+structs+eq+clear+as_cpp((VERIFIER/"RecoveryInventoryReader.mqh").read_text())+reader+units+adapter
         body = "\n".join(l for l in body.splitlines() if not l.startswith("#include"))
         body = re.sub(r"string (fields|f)\[\];", r"std::vector<string> \1;", body)
         create_bad = (
@@ -74,6 +76,19 @@ enum {ORDER_TYPE_BUY_STOP=4,ORDER_TYPE_SELL_STOP=5,ORDER_STATE_PLACED=1,ORDER_ST
         negative = lambda rows: "\n".join(
             f"assert(!RecoveryBuildExactOrderEffect({json.dumps(r)},s,b,e) && !e.terminal_verified && !e.created_order);"
             for r in rows)
+        move = LIVE.replace("4000.0000000000000000","4000.1400000000000000").replace(
+            "3999.3000000000001819","3999.4400000000000000")
+        move_bad = (
+            LIVE, CANCEL,
+            move.replace(f"\t{TICKET}\t", f"\t{TICKET+1}\t"),
+            move.replace("\tcurrent\t", "\thistory\t"),
+            move.replace("\t4\t1\t", "\t4\t3\t"),
+            move.replace("\t4\t1\t", "\t5\t1\t"),
+            move.replace("0.0200000000000000\t4000", "0.0100000000000000\t4000"),
+            move.replace("3999.4400000000000000","3999.4300000000000000"),
+            move.replace("3999.4400000000000000\t0.0000000000000000",
+                         "3999.4400000000000000\t4001.0000000000000000"),
+        )
         main = f"""
 int main() {{
   RRRangeState s{{}}; s.scope=19; s.cycle.generation=7; s.cycle.range_id=1;
@@ -90,6 +105,20 @@ int main() {{
   assert(e.terminal_verified && e.created_order==0 && RRActionEqual(e.action,s.pending));
   {negative(cancel_bad)}
   b.request.order_ticket++; assert(!RecoveryBuildExactOrderEffect({json.dumps(CANCEL)},s,b,e));
+  b.request.order_ticket={TICKET}ULL;
+  s.pending.kind=RR_MOVE_SUPPORT_OPPOSITE; s.pending.entry_ticks=400014;
+  s.pending.sl_ticks=399944; s.pending.tp_ticks=0; b.action=s.pending;
+  s.retire={{{TICKET}ULL,1,400000,399930,2}};
+  assert(RecoveryBuildExactOrderEffect({json.dumps(move)},s,b,e));
+  assert(e.terminal_verified && e.created_order==0 && e.action.order_ticket=={TICKET}ULL && RRActionEqual(e.action,s.pending));
+  {negative(move_bad)}
+  s.retire.volume_steps=3; assert(!RecoveryBuildExactOrderEffect({json.dumps(move)},s,b,e));
+  s.retire.volume_steps=2; s.retire.ticket++;
+  assert(!RecoveryBuildExactOrderEffect({json.dumps(move)},s,b,e));s.retire.ticket--;
+  s.retire.entry_ticks=s.pending.entry_ticks;s.retire.sl_ticks=s.pending.sl_ticks;
+  assert(!RecoveryBuildExactOrderEffect({json.dumps(move)},s,b,e));
+  s.retire.sl_ticks--;
+  b.request.order_ticket++; assert(!RecoveryBuildExactOrderEffect({json.dumps(move)},s,b,e));
 }}
 """
         with tempfile.TemporaryDirectory() as tmp:
