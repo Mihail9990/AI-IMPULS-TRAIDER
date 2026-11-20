@@ -12,6 +12,8 @@
 #include "../execution/RecoverySessionLifecycle.mqh"
 #include "../execution/RecoveryAlternatingService.mqh"
 #include "../execution/RecoveryAlternatingFillHint.mqh"
+#include "../execution/RecoveryOwnerEvidence.mqh"
+#include "../execution/RecoveryOrdinaryEventLoop.mqh"
 #include "../execution/RecoverySupportRotationDispatch.mqh"
 #include "../execution/RecoveryExactOrderEffect.mqh"
 #include "../execution/RecoveryPositionEffect.mqh"
