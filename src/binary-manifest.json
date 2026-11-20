@@ -1,24 +1,26 @@
 {
   "format": 1,
-  "build": "ab6028a8a69de19a",
+  "build": "1693752a53da9477",
   "files": {
-    "app/control_host.py": "28beb453821eb557171ad055d279d81a32ec86f178d4f3c3dbedbecceae48d10",
+    "app/control_host.py": "565fa90ed17bd8c96c3c0c38a933cc1be6153c9faf9b9d0f0033cad7593839ab",
+    "app/control_process.py": "95aad911e277af7c7494c7039c6e4a6a9955133bad1153cee88ff7b480db829c",
     "app/ipc_files.py": "840b82980e04087c96e9edaf48e262ba03af70b256d801f123f116e2f63677ba",
     "app/local_settings.py": "862c1ef0f9ed9295a7a5aa7b0678e5573fd2ce964c451fcf463a14c4a312f617",
-    "app/python_supervisor.py": "1d9a1c6eb4b3ab5c8507cdae5fd9cd5c5ab1e002e43ddf2d7433efe795dd6ee5",
-    "app/recovery_book.py": "8befd22133334a6aff2abfd4df99f157dae5dd4685e5484cf04364c8a7fd9884",
-    "app/recovery_desktop.pyw": "78497d56c8fb1a789ee05881928d357a2c01c59881ca0f64997d4e77d67aeac0",
-    "app/recovery_helpers.py": "455b62f8ea8d99b744859ae64726a822e50b2a6f88ea49345c18f24b33312d98",
-    "app/recovery_strategy.py": "235c9b0c3230219380d1e26d94e4969817d2a9de67d607915d28aa741bb1cc49",
+    "app/python_supervisor.py": "dc323345d5a6fa0bd764a861810b8b3b3f3308f836b908a2210cb22effa2a4da",
+    "app/recovery_book.py": "ea6f931a8eec3e1089361c9e660e50611c7b9bd7843ded3de2d55550afefa987",
+    "app/recovery_desktop.pyw": "3cea5f48cc6f07c5634dce3a5ef9ab8233c5da9b2ba464344a9849cdfd49efae",
+    "app/recovery_helpers.py": "86927f68bbdad282b34a1c50a12b1587ad3eacfb4220ec414dfd98f85abab89e",
+    "app/recovery_strategy.py": "5bcbd0128d9df21a0842d1fb1767bf4c5365e85bd94cfe8dadc32562037e4508",
+    "app/trade_wakeup.py": "392f45cf3184fc187c0ba556df3eb881464d536133e4531dc66ac35ef940a8f0",
     "helpers/RecoveryPythonSL.ex5": "d2511d8572f636b71cb48fd30598f0bdac623488a36a775fcf814dcf43621e36",
-    "helpers/RecoveryPythonVerifier.ex5": "384c262c52051a7babfe4337ff4117dd2aeab338bfc7611712749c0287267e70",
+    "helpers/RecoveryPythonVerifier.ex5": "52a7fd31c8d5898bbe456be6807c8fa39e8675c077d95db96d520c878288e8d9",
     "wheels/metatrader5-5.0.6231-cp313-cp313-win_amd64.whl": "3a8c8349ce691a4ef05e314afc034ad82f4dbb19415efc7442af5ea075d5e797",
     "wheels/numpy-2.5.5-cp313-cp313-win_amd64.whl": "e0608d1585557b68dcb6a70a41654f7536567960afad79d91752d2863b242b68"
   },
   "bootstrap": {
     "Install.cmd": "8a6ee7a6f824bf41bec577e1e33d1b3eb84bec82cf7b5e83d8d7006e8cd61c4e",
     "install.py": "f334ece7cd4b6e85ac337683eb64c348751824490c48ce1d1fbc8032df042034",
-    "package_spec.py": "2b26e3a3c5c867f2c3421a1a479f417d8e1a3433e82749c4c25eb2f227d2a91b",
-    "README_RU.txt": "14466f51c39cc505bdf1227fa898101660b6c76669590a30d86ed612239bbb5f"
+    "package_spec.py": "2d5076f5e5e540c3942d9b49c048e876779d54a9e8816537763d6648bcee8394",
+    "README_RU.txt": "53ed451ee52359be99b3dbee730d9ce21922b48408827bac2096d8d4160eba89"
   }
 }

@@ -7,7 +7,6 @@ import sqlite3
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
@@ -43,9 +42,8 @@ class RecoveryStrategy:
                 "CREATE TABLE IF NOT EXISTS actions(id TEXT PRIMARY KEY, wire TEXT NOT NULL, result TEXT NOT NULL, ticket TEXT NOT NULL)"
             )
             self.db.execute(
-                "CREATE TABLE IF NOT EXISTS closed_money(position TEXT PRIMARY KEY, evidence TEXT NOT NULL, result TEXT)"
+                "CREATE TABLE IF NOT EXISTS confirmed_exits(position TEXT PRIMARY KEY, evidence TEXT NOT NULL)"
             )
-            self.money_cursor = 0
             row = self.db.execute("SELECT wire FROM owner_state WHERE k=1").fetchone()
             binding = [int(account), server, symbol, int(magic), helpers.scope]
             if row:
@@ -149,11 +147,6 @@ class RecoveryStrategy:
     def snapshot(self):
         with self.lock:
             leg = self.s["leg"] or {}
-            observed = self.db.execute("SELECT result FROM closed_money WHERE result IS NOT NULL").fetchall()
-            amounts = [json.loads(r[0]) for r in observed]
-            currencies = {r["currency"] for r in amounts}
-            single = len(currencies) == 1
-            pending = self.db.execute("SELECT count(*) FROM closed_money WHERE result IS NULL").fetchone()[0]
             return dict(
                 running=self.running,
                 mode=self.s["mode"],
@@ -172,10 +165,6 @@ class RecoveryStrategy:
                 position_ticket=leg.get("ticket", 0),
                 opposite_ticket=(leg.get("orders", {}).get("reverse") or {}).get("ticket", 0),
                 support_applied=bool(leg.get("be_proven")),
-                closed_outcomes=len(amounts),
-                pending_outcomes=pending,
-                currency=next(iter(currencies)) if single else "",
-                realized_total=str(sum((Decimal(x["net"]) for x in amounts), Decimal(0))) if single else "",
             )
 
     def update_settings(self, settings):
@@ -452,7 +441,6 @@ class RecoveryStrategy:
                 self._lease()
                 self.last_read = time.monotonic()
                 self.available = True
-                self._settle_money()
                 checked(not self.unresolved, "uncertain_broker_action")
                 checked(not self.foreign, "unbound_strategy_exposure")
                 self.reason = ""
@@ -686,29 +674,13 @@ class RecoveryStrategy:
         pid = str(leg["position_id"])
         wire = json.dumps(dict(anchor=leg["anchor"], exits=exits), sort_keys=True, separators=(",", ":"))
         with self.db:
-            self.db.execute("INSERT OR IGNORE INTO closed_money(position,evidence) VALUES(?,?)", (pid, wire))
-            prior = self.db.execute("SELECT evidence FROM closed_money WHERE position=?", (pid,)).fetchone()
-            checked(prior[0] == wire, "closed_evidence_changed")
-
-    def _settle_money(self):
-        # The journal survives cycle turnover. Reconcile one position per timer without
-        # making strategy protection or an independent reverse fill wait for economics.
-        rows = self.db.execute(
-            "SELECT position,evidence FROM closed_money WHERE result IS NULL ORDER BY rowid"
-        ).fetchall()
-        if not rows:
-            return
-        key, wire = rows[self.money_cursor % len(rows)]
-        self.money_cursor += 1
-        try:
-            result = self.b.money(int(key), json.loads(wire)["exits"])
-        except (Wait, HelperUnavailable):
-            return
-        with self.db:
             self.db.execute(
-                "UPDATE closed_money SET result=? WHERE position=? AND result IS NULL",
-                (json.dumps(result, sort_keys=True), key),
+                "INSERT OR IGNORE INTO confirmed_exits(position,evidence) VALUES(?,?)", (pid, wire)
             )
+            prior = self.db.execute(
+                "SELECT evidence FROM confirmed_exits WHERE position=?", (pid,)
+            ).fetchone()
+            checked(prior[0] == wire, "closed_evidence_changed")
 
     def _detached(self):
         for p in self.s["detached"][:]:
@@ -827,16 +799,19 @@ class RecoveryStrategy:
                 if leg["ticket"] in b.positions:
                     self._protect(leg)
                 raise Wait("awaiting_predecessor_stop_classification")
-        observations = {k: self._observe(i) for k, i in leg["orders"].items()}
+        close_wait = None
         if not leg["close"] and leg["ticket"] not in b.positions:
             try:
                 leg["close"] = b.closed(leg, self._record_exit)
                 self.save()
-            except (Wait, HelperUnavailable):
-                # A proved reverse fill has its own identity even when the previous exit is still absent.
-                if not any(v[0] == "filled" for v in observations.values()):
-                    raise
+            except (Wait, HelperUnavailable) as exc:
+                close_wait = exc
+        # The first access can publish a verifier challenge. Ask for the order in
+        # the same poll even when the independent predecessor history is pending.
+        observations = {k: self._observe(i) for k, i in leg["orders"].items()}
         fills = [k for k, v in observations.items() if v[0] == "filled"]
+        if close_wait is not None and not fills:
+            raise close_wait
         if fills:
             if len(fills) > 1:
                 checked(

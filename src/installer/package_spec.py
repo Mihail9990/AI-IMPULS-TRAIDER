@@ -1,8 +1,8 @@
 from pathlib import Path
 import hashlib
 
-RUNTIME = ("control_host.py", "ipc_files.py", "local_settings.py", "python_supervisor.py", "recovery_book.py",
-           "recovery_desktop.pyw", "recovery_helpers.py", "recovery_strategy.py")
+RUNTIME = ("control_host.py", "control_process.py", "ipc_files.py", "local_settings.py", "python_supervisor.py", "recovery_book.py",
+           "recovery_desktop.pyw", "recovery_helpers.py", "recovery_strategy.py", "trade_wakeup.py")
 HELPERS = ("RecoveryPythonSL", "RecoveryPythonVerifier")
 WHEELS = {
     "metatrader5-5.0.6231-cp313-cp313-win_amd64.whl": "3a8c8349ce691a4ef05e314afc034ad82f4dbb19415efc7442af5ea075d5e797",

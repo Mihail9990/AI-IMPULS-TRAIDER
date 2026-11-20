@@ -52,9 +52,7 @@ class Native:
         self.external = True
 
     def account_info(self):
-        return N(
-            login=17, server="test", currency="USD", margin_mode=2, trade_allowed=True, trade_expert=True
-        )
+        return N(login=17, server="test", margin_mode=2, trade_allowed=True, trade_expert=True)
 
     def terminal_info(self):
         return N(connected=True, trade_allowed=True, tradeapi_disabled=not self.external)
@@ -152,10 +150,6 @@ class Native:
                 volume=p.volume,
                 price=at,
                 sl=o.sl,
-                profit=0.0,
-                commission=0.0,
-                swap=0.0,
-                fee=0.0,
             )
         )
         return p
@@ -185,10 +179,6 @@ class Native:
                 volume=p.volume,
                 price=price or p.price_open,
                 sl=p.sl,
-                profit=0.0,
-                commission=0.0,
-                swap=0.0,
-                fee=0.0,
             )
         )
         self.p.pop(p.ticket)
@@ -233,7 +223,6 @@ class Verifier:
         self.registry = []
         self.trade_allowed = True
         self.complete = True
-        self.money = True
         self.disagree = False
 
     def snapshot(self):
@@ -280,7 +269,6 @@ class Verifier:
             login=17,
             server="test",
             symbol="X",
-            currency="USD",
             position_id=pid,
             deals=[
                 dict(
@@ -295,11 +283,6 @@ class Verifier:
                     volume_steps=round(d.volume * 100),
                     price_ticks=round(d.price * 100),
                     sl_ticks=round(d.sl * 100),
-                    **(
-                        {k: str(getattr(d, k)) for k in ("profit", "commission", "swap", "fee")}
-                        if self.money
-                        else {}
-                    ),
                 )
                 for d in self.a.d
                 if d.position_id == pid and (self.complete or d.entry != 1)
@@ -438,7 +421,6 @@ class StrategyTest(unittest.TestCase):
         pos, stop = self.adopt()
         unrelated = self.api.pending(self.api.ORDER_TYPE_SELL_STOP, 75)
         retired = []
-        self.helper.money = False
         for n in range(5):
             retired.append(stop.ticket)
             self.api.closep(pos, n % 3)
@@ -451,7 +433,7 @@ class StrategyTest(unittest.TestCase):
             stop = self.owned()[0]
         removes = [q["order"] for q in self.api.requests if q["action"] == self.api.TRADE_ACTION_REMOVE]
         self.assertEqual(removes, retired)
-        self.assertEqual(self.e.snapshot()["pending_outcomes"], 5)
+        self.assertEqual(self.e.db.execute("SELECT count(*) FROM confirmed_exits").fetchone()[0], 5)
 
     def test_closed_full_and_externally_cancelled_reverse_recovers_flat_paused_on_restart(self):
         pos, stop = self.adopt()
@@ -589,14 +571,33 @@ class StrategyTest(unittest.TestCase):
         self.assertEqual(len(self.owned()), 1)
         self.assertNotIn(0, [r["ticket"] for r in self.helper.registry])
 
-    def test_unclassified_exit_still_records_zero_money(self):
+    def test_unclassified_exit_records_exact_evidence_once_without_trading(self):
         p, o = self.adopt()
         self.api.closep(p, 5)
         self.api.cancel(o.ticket)
         self.tick(4)
         self.assertEqual(self.e.snapshot()["mode"], "active")
-        self.assertEqual(self.e.snapshot()["closed_outcomes"], 1)
-        self.assertEqual(float(self.e.snapshot()["realized_total"]), 0.0)
+        import json
+
+        rows = self.e.db.execute("SELECT position,evidence FROM confirmed_exits").fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], str(p.identifier))
+        out = self.api.d[-1]
+        self.assertEqual(
+            json.loads(rows[0][1])["exits"],
+            [
+                dict(
+                    ticket=out.ticket,
+                    order=out.order,
+                    side=out.type,
+                    steps=1,
+                    reason=5,
+                    time_msc=out.time_msc,
+                    price_ticks=round(out.price * 100),
+                    sl_ticks=round(out.sl * 100),
+                )
+            ],
+        )
 
     def test_exact_be_ack_requires_independent_exit_sl(self):
         p, old = self.adopt()
@@ -775,26 +776,60 @@ class StrategyTest(unittest.TestCase):
         self.assertEqual(len(self.owned()), 2)
         self.assertEqual(self.e.snapshot()["step"], 1)
 
-    def test_money_pending_does_not_block_rearm_persists_and_counts_once(self):
-        p, o = self.adopt()
-        self.api.closep(p, 0)
-        d = self.api.d[-1]
-        d.profit = -3.25
-        d.commission = -0.02
-        d.swap = 0.01
-        d.fee = -0.03
-        self.api.cancel(o.ticket)
-        self.helper.money = False
-        self.tick(3)
-        self.assertEqual(self.e.snapshot()["mode"], "manual_wait")
-        self.assertEqual(self.e.snapshot()["pending_outcomes"], 1)
-        self.assertEqual(self.e.snapshot()["realized_total"], "")
+    def test_legacy_table_is_neither_read_nor_updated_on_idle_ticks(self):
+        self.e.db.execute("CREATE TABLE closed_money(position TEXT PRIMARY KEY, evidence TEXT, result TEXT)")
+        self.e.db.execute("INSERT INTO closed_money VALUES ('123','archived',NULL)")
+        self.e.db.commit()
         self.e.close()
         self.open()
-        self.helper.money = True
+
+        def no_idle_history(pid):
+            self.fail("idle timer requested unrelated position history")
+
+        self.helper.history = no_idle_history
+        statements = []
+        self.e.db.set_trace_callback(statements.append)
+        self.tick(5)
+        self.assertFalse(any("closed_money" in sql for sql in statements))
+        self.assertTrue(
+            {"closed_outcomes", "currency", "realized_total", "pending_outcomes"}.isdisjoint(
+                self.e.snapshot()
+            )
+        )
+        self.assertEqual(
+            self.e.db.execute("SELECT * FROM closed_money").fetchall(), [("123", "archived", None)]
+        )
+
+    def test_disappeared_position_and_filled_order_challenged_together(self):
+        from recovery_helpers import HelperUnavailable
+
+        pos, stop = self.adopt()
+        self.api.closep(pos, self.api.DEAL_REASON_SL)
+        new = self.api.fill(stop.ticket)
+        history = self.helper.history
+        order = self.helper.order
+        requested = set()
+        approved = set()
+
+        def challenge(observation, key, read):
+            requested.add((observation, key))
+            if observation not in approved:
+                raise HelperUnavailable("awaiting test verifier")
+            return read(key)
+
+        self.helper.history = lambda pid: challenge("history", pid, history)
+        self.helper.order = lambda ticket: challenge("order", ticket, order)
+        self.tick()
+        self.assertEqual(requested, {("history", pos.identifier), ("order", stop.ticket)})
+        self.assertEqual(self.owned(), [])
+        approved.add("order")
+        self.tick(2)
+        self.assertEqual(self.e.snapshot()["position_ticket"], new.ticket)
+        self.assertEqual(self.owned(), [])
+        approved.add("history")
         self.tick(3)
-        self.assertEqual(self.e.snapshot()["realized_total"], "-3.29")
-        self.assertEqual((self.e.snapshot()["closed_outcomes"], self.e.snapshot()["currency"]), (1, "USD"))
+        self.assertEqual(self.e.snapshot()["step"], 2)
+        self.assertEqual(len(self.owned()), 1)
 
     def test_detached_order_fill_does_not_wait_for_previous_position_close(self):
         p, o = self.adopt()

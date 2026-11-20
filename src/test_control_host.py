@@ -186,6 +186,20 @@ class MailboxTests(unittest.TestCase):
         self.assertNotIn("unknown_secret", self.client.status())
         self.assertIs(self.client.status()["support_applied"], True)
 
+    def test_retired_owner_fields_are_ignored_in_both_directions(self):
+        legacy = dict(realized_total="34.50", pending_outcomes=2, closed_outcomes=3,
+                      currency="USD", reason="money_exits_unconfirmed")
+        self.strategy.data.update(legacy)
+        self.host.poll(self.strategy)
+        path = self.root / "status.json"
+        published = c._read(path)
+        self.assertTrue(legacy.keys().isdisjoint(published))
+        c._write(path, dict(published, **legacy))
+        observed = self.client.status()
+        self.assertTrue(legacy.keys().isdisjoint(observed))
+        self.assertEqual(observed["boot"], published["boot"])
+        self.assertEqual(observed["mode"], published["mode"])
+
     def test_hidden_tk_gui_reads_exact_snapshot_without_request(self):
         loader=SourceFileLoader("test_recovery_desktop", str(Path(__file__).with_name("recovery_desktop.pyw")))
         spec=importlib.util.spec_from_loader(loader.name,loader)

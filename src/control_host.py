@@ -121,10 +121,12 @@ def _project(state):
     if public["mode"] not in MODES:
         raise ValueError("Недействительный режим.")
     for name in ("reason", "account", "server", "symbol", "strategy_epoch", "step", "position_ticket",
-                 "opposite_ticket", "closed_outcomes", "realized_total", "currency", "pending_outcomes"):
+                 "opposite_ticket"):
         value = state.get(name)
         if isinstance(value, (str, int)) and not isinstance(value, bool):
             public[name] = str(value)[:160]
+    if public.get("reason", "").startswith("money_"):
+        public.pop("reason")  # Previous owners could leave a retired status reason on disk.
     if state.get("settings") is not None:
         public["settings"] = validate_settings(state["settings"])
     if type(state.get("support_applied")) is bool:
@@ -133,6 +135,12 @@ def _project(state):
     public["settings_editable"] = (editable is True and not public["running"] and public["available"]
                                    and public["mode"] == "ready" and "settings" in public)
     return public
+
+
+def intent_binding(state):
+    fields = ("strategy_epoch", "running", "available", "mode", "market_rearm_enabled", "can_start",
+              "can_pause", "settings_editable", "account", "server", "symbol", "mt5_connected", "settings")
+    return hashlib.sha256(_encode([state.get(k) for k in fields])).hexdigest()
 
 
 class ControlHost:
@@ -187,10 +195,7 @@ class ControlHost:
             state = _project(strategy.snapshot())
         except (OSError, TypeError, ValueError, KeyError, RuntimeError):
             state = _project(dict(reason="snapshot_unavailable"))
-        binding = tuple(state.get(k) for k in (
-            "strategy_epoch", "running", "available", "mode", "market_rearm_enabled", "can_start",
-            "can_pause", "settings_editable", "account", "server", "symbol", "mt5_connected"))
-        binding += (_encode(state.get("settings")),)
+        binding = intent_binding(state)
         if binding != self._previous_binding:
             self.generation = uuid4().hex
             self._previous_binding = binding
@@ -251,7 +256,11 @@ class ControlHost:
             # command and a new owner starts a disjoint session without replaying it.
             _write(receipt, dict(request, status="accepted", reason="in_progress"), new=True)
             try:
-                ok = (strategy.update_settings(settings) if action == "update_settings" else strategy.control(action))
+                if hasattr(strategy, "dispatch_control"):
+                    ok = strategy.dispatch_control(action, settings if action == "update_settings" else None,
+                                                   intent_binding(state), row["issued"] + REQUEST_TTL)
+                else:
+                    ok = strategy.update_settings(settings) if action == "update_settings" else strategy.control(action)
                 outcome = dict(request, status="applied" if ok is True else "rejected",
                                reason="confirmed" if ok is True else "owner_rejected")
             except Exception:

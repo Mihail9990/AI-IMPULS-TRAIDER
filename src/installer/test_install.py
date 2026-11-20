@@ -5,6 +5,7 @@ from ctypes import wintypes
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -49,6 +50,8 @@ class InstallerTests(unittest.TestCase):
             self.assertIn(digest(package), sums.read_text())
             with ZipFile(source) as z:
                 self.assertNotIn("machine.json", z.namelist())
+                self.assertIn("trade_wakeup.py", z.namelist())
+                self.assertIn("control_process.py", z.namelist())
                 self.assertTrue(all(not n.endswith((".whl",".ex5",".jsonl",".sqlite3")) for n in z.namelist()))
             kit = root/"kit"
             with ZipFile(package) as z:
@@ -71,6 +74,8 @@ class InstallerTests(unittest.TestCase):
                 version=install.install(kit,base,interactive=False)
                 target=base/"control/python-builds"/version
                 self.assertTrue((target/"recovery_desktop.pyw").is_file())
+                self.assertEqual((target/"trade_wakeup.py").read_bytes(), (SOURCE/"trade_wakeup.py").read_bytes())
+                self.assertEqual((target/"control_process.py").read_bytes(), (SOURCE/"control_process.py").read_bytes())
                 self.assertTrue((desk/SHORTCUT).is_file())
                 local=base/"control/python-v1"
                 cfg=install.read(local/"machine.json")
@@ -80,10 +85,17 @@ class InstallerTests(unittest.TestCase):
                     self.assertEqual(install.read_preset(local/"presets"/(stem+".set")), install.preset_values(cfg))
                     self.assertEqual(digest(data/"MQL5/Experts/RECOVERY-Python"/(stem+".ex5")),digest(HELPERS_DIR/(stem+".ex5")))
                 db=local/"recovery.sqlite3"
-                db.write_bytes(b"fixture: retained existing ledger")
+                conn = sqlite3.connect(db)
+                try:
+                    conn.execute("CREATE TABLE retained_legacy_state(k INTEGER PRIMARY KEY, wire TEXT)")
+                    conn.execute("INSERT INTO retained_legacy_state VALUES (1, 'expected')")
+                    conn.commit()
+                finally:
+                    conn.close()
+                previous_db = db.read_bytes()
                 self.assertEqual(install.install(kit,base,interactive=False),version)
                 self.assertEqual(install.read(local/"machine.json"),cfg)
-                self.assertEqual(db.read_bytes(),b"fixture: retained existing ledger")
+                self.assertEqual(db.read_bytes(),previous_db)
                 self.assertEqual((base/"recovery-profile.json").read_bytes(),before)
                 self.assertFalse((local/"status.json").exists())
                 self.assertFalse((local/"python-runtime.log").exists())

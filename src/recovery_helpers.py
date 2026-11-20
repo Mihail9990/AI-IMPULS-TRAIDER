@@ -9,6 +9,7 @@ import re
 import secrets
 import tempfile
 import time
+from ipc_files import open_shared_read
 
 
 class HelperUnavailable(RuntimeError):
@@ -32,6 +33,18 @@ def _uptime():
     fn = ctypes.windll.kernel32.GetTickCount64
     fn.restype = ctypes.c_ulonglong
     return int(fn())
+
+
+def _replace(path, wire):
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as target:
+            temporary = Path(target.name)
+            target.write(wire)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 @contextlib.contextmanager
@@ -69,7 +82,7 @@ class Helpers:
     def _read(self, name, schema, columns):
         try:
             path = self.directory / name
-            with path.open("rb") as source:
+            with open_shared_read(path) as source:
                 data = source.read(131073)
                 if source.read(1) or len(data) > 131072:
                     raise HelperUnavailable("Слишком большой отчёт помощника")
@@ -142,18 +155,21 @@ class Helpers:
         nonce=secrets.token_hex(16)
         stamp="PYHREQ1" if kind=="history" else "PYOQ1"
         fields=(stamp,self.scope,self.login,self.server,self.symbol,witness["instance"],key,nonce,now,"END")
-        temporary=None
         try:
-            with tempfile.NamedTemporaryFile(dir=self.directory,delete=False) as temp:
-                temporary=Path(temp.name)
-                temp.write(("\t".join(map(str,fields))+"\n").encode("utf-8"));temp.flush()
-            os.replace(temporary,self.directory/(stem+".req"))
+            _replace(self.directory/(stem+".req"), ("\t".join(map(str,fields))+"\n").encode("utf-8"))
+            self._history_requests={k:v for k,v in self._history_requests.items()
+                                    if v[0]==witness["instance"] and 0<=now-v[2]<=FRESH_MS}
             self._history_requests[slot]=(witness["instance"],nonce,now)
         except OSError as exc:
             raise HelperUnavailable("Не удалось запросить независимую сверку") from exc
-        finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
+        # A best-effort index makes current keys visible without walking old files.
+        # Evidence always comes from the independently verified per-key challenge.
+        keys=[str(i) for k,i in self._history_requests if k==kind][-256:]
+        hint="\t".join([witness["instance"],str(now),*keys,"END\n"])
+        try:
+            _replace(self.directory/(kind+"-priority.tsv"),hint.encode("ascii"))
+        except OSError:
+            pass
         raise HelperUnavailable("Ожидание независимой сверки")
 
     def order(self,ticket):
@@ -170,11 +186,12 @@ class Helpers:
         return dict(meta,order=o,tick_size=h[3],volume_step=h[4])
 
     def history(self,position_id):
-        """Structural deal/SL evidence survives missing money; missing monetary fields are None."""
+        """Return independently witnessed structural deals and their actual SL levels."""
         pid=_uint(position_id,True)
         meta,h,rows=self._evidence(pid,"history","PYHIST2",17)
         n,m=_uint(h[5]),_uint(h[8])
-        if n>256 or m>256 or n+m!=len(rows) or h[7] not in ("ok","unavailable"):
+        if (n>256 or m>256 or n+m!=len(rows) or h[7] not in ("ok","unavailable")
+                or any(row[0]!="M" for row in rows[n:])):
             raise HelperUnavailable("Неполная история позиции")
         deals=[]
         for row in rows[:n]:
@@ -188,28 +205,7 @@ class Helpers:
             deals.append(dict(deal,deal_sl_ticks=deal["sl_ticks"]))
         if len({x["ticket"] for x in deals})!=len(deals):
             raise HelperUnavailable("Повтор сделки в истории")
-        cash={}
-        money_ok=h[7]=="ok" and h[6] not in ("","-")
-        monetary=("profit","commission","swap","fee")
-        if money_ok:
-            try:
-                for row in rows[n:]:
-                    if len(row)!=9 or row[0]!="M":
-                        raise ValueError
-                    ticket,position,order,typ=map(_uint,row[1:5])
-                    if ticket in cash or not ticket or position!=pid or not all(
-                            re.fullmatch(r"-?(?:0|[1-9]\d*)\.\d{16}",s) and Decimal(s).is_finite() for s in row[5:]):
-                        raise ValueError
-                    cash[ticket]=dict(ticket=ticket,position_id=pid,order=order,type=typ,**dict(zip(monetary,row[5:])))
-                money_ok=all(d["ticket"] in cash and cash[d["ticket"]]["type"]==d["type"] and
-                             cash[d["ticket"]]["order"]==d["order"] for d in deals)
-            except (ValueError,InvalidOperation,HelperUnavailable):
-                money_ok=False
-        for deal in deals:
-            info=cash[deal["ticket"]] if money_ok else {}
-            deal.update({field:info.get(field) for field in monetary})
-        return dict(meta,position_id=pid,tick_size=h[3],volume_step=h[4],currency=h[6] if h[6]!="-" else "",
-                    money_available=money_ok,cash=list(cash.values()) if money_ok else [],deals=deals)
+        return dict(meta,position_id=pid,tick_size=h[3],volume_step=h[4],deals=deals)
 
     def sl_status(self):
         meta, head, rows = self._read("sl-status.tsv", "PYSL1", 13)
@@ -247,7 +243,7 @@ class Helpers:
                 now = _uptime()
                 current_path = self.directory / "sl-register.tsv"
                 if current_path.exists():
-                    with current_path.open("rb") as current:
+                    with open_shared_read(current_path) as current:
                         existing = current.readline(2048).rstrip(b"\n").decode("utf-8").split("\t")
                     if (len(existing)==10 and existing[:6] == ["PYREG1",self.scope,str(self.login),
                             self.server,self.symbol,status["instance"]] and existing[6]!=run_id and

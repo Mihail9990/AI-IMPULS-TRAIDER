@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 from logging.handlers import RotatingFileHandler
+import multiprocessing
 import os
 from pathlib import Path
 import re
@@ -36,7 +37,8 @@ def ensure_supervisor():
         return
     subprocess.Popen([sys.executable, "-I", "-B", "-X", "utf8", str(APP / "python_supervisor.py")],
                      cwd=APP, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP)
+                     creationflags=(subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+                                    | subprocess.NORMAL_PRIORITY_CLASS))
 
 
 def machine_settings():
@@ -208,26 +210,26 @@ def main():
         root_log.addHandler(logfile)
         sys.path[:0] = [str(APP),str(APP/"lib")]
         import MetaTrader5 as mt
-        from control_host import ControlHost
-        with legacy_locks(Path(cfg["data_dir"])/"MQL5/Files"), ControlHost(PRIVATE) as host:
+        from control_process import DesktopControlProcess
+        from trade_wakeup import TradeWakeup
+        files = Path(cfg["data_dir"]) / "MQL5/Files"
+        with (legacy_locks(files), TradeWakeup(files / "RECOVERY_PY" / cfg["helper_scope"]) as wakeup,
+              DesktopControlProcess(PRIVATE) as control):
             worker = RuntimeAdapter(mt,cfg)
-            last_control_error = None
+            first_pulse = True
+            next_control_log = 0.0
             try:
                 while True:
                     worker.tick()
-                    # A desktop reader can temporarily deny a Windows rename.
-                    # Keep processing broker observations while the local
-                    # command channel retries its durable requests and replies.
                     try:
-                        host.poll(worker)
-                    except OSError as error:
-                        if getattr(error, "winerror", None) not in (5, 32, 33):
-                            raise
-                        now = time.monotonic()
-                        if last_control_error is None or now - last_control_error >= 30:
-                            logging.warning("Windows temporarily denied access to the control channel (%s)", error.winerror)
-                            last_control_error = now
-                    time.sleep(.20)
+                        control.poll(worker)
+                    except Exception:
+                        if time.monotonic() >= next_control_log:
+                            logging.exception("Desktop control request deferred")
+                            next_control_log = time.monotonic() + 30
+                    if wakeup.wait(.20) and first_pulse:
+                        first_pulse = False
+                        logging.info("MT5 verifier notification received")
             finally:
                 worker.close()
     except Exception:
@@ -238,5 +240,6 @@ def main():
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     main()
 

@@ -39,7 +39,6 @@ REASONS = {"not_available": "Команда недоступна в текуще
            "waiting_reverse_fill": "Полный SL подтверждён. Встречный STOP остаётся выставленным.",
            "prior_exposure_still_open": "Ожидаю закрытие прежней позиции или завершение связанной заявки.",
            "waiting_exact_order": "Ожидаю данные выбранного ордера в MT5.",
-           "money_component_pending": "Ожидаю полную историю для денежного результата.",
            "unclassified_exit": "Причина выхода уточняется по истории MT5.",
            "unconfirmed_stop_level": "Уровень SL ещё не подтверждён.",
            "unexpected_order_type": "Тип ордера отличается от ожидаемого.",
@@ -85,9 +84,6 @@ REASONS = {"not_available": "Команда недоступна в текуще
            "history_sources_disagree": "Данные истории MT5 и помощника расходятся.",
            "invalid_grid": "MT5 не подтвердил шаг цены или объёма инструмента.",
            "invalid_order_grid": "Параметры ордера не совпадают с шагом цены или объёма.",
-           "money_currency_unconfirmed": "Валюта денежного результата пока не подтверждена.",
-           "money_exit_changed": "Состав сделок закрытия изменился. Денежный итог проверяется.",
-           "money_exits_unconfirmed": "Ожидаю подтверждение всех закрывающих сделок для расчёта итога.",
            "not_market_entry": "Сделка не соответствует ожидаемому рыночному входу.",
            "not_native_stop": "Не подтверждён подходящий отложенный STOP в MT5.",
            "off_grid": "Значение расходится с шагом цены или объёма символа.",
@@ -293,10 +289,6 @@ class Desktop:
             elif state["mode"] == "manual_wait":
                 notes.append("После ручного закрытия позиции и отмены встречного ордера ожидание возобновится."
                              if state["market_rearm_enabled"] else "Повторное ожидание отключено.")
-            if state.get("closed_outcomes") not in (None, "", "0") and state.get("realized_total") not in (None, ""):
-                notes.append(f"Подтверждённый итог по {state['closed_outcomes']} закрытиям: {state['realized_total']} {state.get('currency', '')}.")
-            if state.get("pending_outcomes") not in (None, "", "0"):
-                notes.append("Ожидают полной истории закрытий: " + state["pending_outcomes"] + ".")
             if state.get("reason") and state["reason"] not in {"ok", "ready", "none"}:
                 notes.append(REASONS.get(state["reason"], state["reason"]))
             self.details.set(" ".join(notes))
@@ -374,8 +366,16 @@ class Desktop:
 
 def main():
     from python_supervisor import ensure_supervisor
+    from control_process import set_desktop_priority
     root = tk.Tk()
-    Desktop(root, LocalClient(), ensure_supervisor)
+    try:
+        set_desktop_priority()
+        priority_message = ""
+    except OSError:
+        priority_message = "Windows не разрешила понизить приоритет окна пульта."
+    ui = Desktop(root, LocalClient(), ensure_supervisor)
+    if priority_message:
+        ui.message.set(priority_message)
     root.mainloop()
 
 

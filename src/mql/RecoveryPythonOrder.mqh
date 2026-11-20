@@ -29,23 +29,28 @@ bool OrderRequest(const string name){
     f[2]!=(string)ExpectedLogin || f[3]!=ExpectedServer || f[4]!=ExpectedSymbol || f[5]!=Instance ||
     !PyNat(f[6],id) || !id || !PyHex(f[7]) || !PyNat(f[8],stamp) || f[9]!="END\n" ||
     stamp>GetTickCount64() || GetTickCount64()-stamp>10000 || name!="order-"+(string)id+".req")return false;
- const string path=Box+"order-"+(string)id+".tsv";string prior;
+ const string path=Box+"order-"+(string)id+".tsv";string prior;bool was_unavailable=false;
  if(PyRead(path,prior,2048)){
     int end=StringFind(prior,"\n");string h[];
-    if(end>0 && StringSplit(StringSubstr(prior,0,end),9,h)==13 && h[5]==Instance && h[10]==f[7])return false;
+    if(end>0 && StringSplit(StringSubstr(prior,0,end),9,h)==13 && h[5]==Instance && h[10]==f[7]){
+       if(h[8]=="ok")return false;
+       was_unavailable=h[8]=="unavailable";
+    }
  }
  double tick=0,step=0;string a="",b="";
  const bool ok=PyGrid(tick,step) && HistoricalOrder(id,tick,step,a) && HistoricalOrder(id,tick,step,b) && a==b;
+ if(!ok && was_unavailable)return false;
  return PyWrite(path,PyHeader("PYORD1")+"\t"+(ok?"ok":"unavailable")+"\t"+(string)id+"\t"+f[7]+"\t"+
     PyNumber(tick)+"\t"+PyNumber(step)+"\n"+(ok?a:"")+"END\n");
 }
-void OrderScan(){
- if(!PySession()){EndOrderScan();return;}
- if(OrderCursor==INVALID_HANDLE){OrderCursor=FileFindFirst(Box+"order-*.req",OrderName);if(OrderCursor==INVALID_HANDLE)return;}
+bool OrderScan(){
+ if(!PySession()){EndOrderScan();return false;}
+ if(OrderCursor==INVALID_HANDLE){OrderCursor=FileFindFirst(Box+"order-*.req",OrderName);if(OrderCursor==INVALID_HANDLE)return false;}
  for(int i=0;i<32;i++){
     const bool processed=OrderRequest(OrderName);
-    if(!FileFindNext(OrderCursor,OrderName)){EndOrderScan();return;}
-    if(processed)return;
+    if(!FileFindNext(OrderCursor,OrderName)){EndOrderScan();return processed;}
+    if(processed)return true;
  }
+ return false;
 }
 #endif

@@ -1,6 +1,6 @@
 """Account-bound MT5 reads and checked native commands for the RECOVERY strategy."""
 
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
 
 class Wait(RuntimeError):
@@ -394,13 +394,7 @@ class Broker:
                 ),
                 "deal_sources_disagree",
             )
-        record_exit(
-            p,
-            [
-                dict(ticket=d.ticket, order=d.order, side=d.type, steps=units(d.volume, self.step))
-                for d in outs
-            ],
-        )
+        cause = None
         reasons = {d.reason for d in outs}
         if len(reasons) == 1 and self.human(next(iter(reasons))):
             cause = "manual"
@@ -416,71 +410,24 @@ class Broker:
                 cause = "full"
             else:
                 raise Wait("unconfirmed_stop_level")
-        else:
-            raise Wait("unclassified_exit")
-        return dict(cause=cause, time=max(d.time_msc for d in outs))
-
-    def money(self, position_id, evidence):
-        report = self.helpers.history(position_id)
-        account = self.api.account_info()
-        currency = report.get("currency")
-        checked(
-            account
-            and account.login == self.account
-            and account.server == self.server
-            and isinstance(currency, str)
-            and currency
-            and currency == account.currency
-            and report["position_id"] == position_id
-            and (report["login"], report["server"], report["symbol"])
-            == (self.account, self.server, self.symbol),
-            "money_currency_unconfirmed",
-        )
-        native = {
-            d.ticket: d
-            for d in self.deals(position_id)
-            if d.entry in (self.api.DEAL_ENTRY_OUT, self.api.DEAL_ENTRY_OUT_BY)
-        }
-        verified = {
-            d["ticket"]: d
-            for d in report["deals"]
-            if d["entry"] in (self.api.DEAL_ENTRY_OUT, self.api.DEAL_ENTRY_OUT_BY)
-        }
-        checked(set(native) == set(verified) == {r["ticket"] for r in evidence}, "money_exits_unconfirmed")
-        totals = dict.fromkeys(("profit", "commission", "swap", "fee"), Decimal(0))
-        for key in evidence:
-            d = native[key["ticket"]]
-            row = verified[key["ticket"]]
-            expected = (key["order"], key["side"], key["steps"])
-            checked(
-                (d.order, d.type, units(d.volume, self.step))
-                == expected
-                == (row["order"], row["type"], row["volume_steps"]),
-                "money_exit_changed",
-            )
-            for field in totals:
-                try:
-                    direct = Decimal(str(getattr(d, field, None)))
-                    confirmed = Decimal(str(row.get(field)))
-                except InvalidOperation as exc:
-                    raise Wait("money_component_pending") from exc
-                checked(
-                    direct.is_finite()
-                    and confirmed.is_finite()
-                    and (
-                        float(confirmed) == getattr(d, field)
-                        or abs(direct - confirmed) <= Decimal("0.00000000000000005")
-                    ),
-                    "money_component_pending",
+        record_exit(
+            p,
+            [
+                dict(
+                    ticket=d.ticket,
+                    order=d.order,
+                    side=d.type,
+                    steps=units(d.volume, self.step),
+                    reason=d.reason,
+                    time_msc=d.time_msc,
+                    price_ticks=facts[d.ticket]["price_ticks"],
+                    sl_ticks=facts[d.ticket]["sl_ticks"],
                 )
-                totals[field] += direct
-        net = sum(totals.values(), Decimal(0))
-        return dict(
-            currency=currency,
-            net=str(net),
-            loss=str(max(-net, Decimal(0))),
-            **{k: str(v) for k, v in totals.items()},
+                for d in outs
+            ],
         )
+        checked(cause is not None, "unclassified_exit")
+        return dict(cause=cause, time=max(d.time_msc for d in outs))
 
     def pending(self, side, entry, sl, volume, comment):
         checked(self.min_vol <= volume <= self.max_vol and entry > 0 and sl > 0, "invalid_order_grid")

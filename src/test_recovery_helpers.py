@@ -86,15 +86,30 @@ class HelpersTest(unittest.TestCase):
         self.write("history-11.tsv","PYHIST2",self.vi,payload,body)
         d=self.h.history(11)["deals"][0]
         self.assertEqual((d["ticket"],d["reason"],d["price_ticks"],d["deal_sl_ticks"]),(2,4,9980,10000))
-        self.assertEqual(d["profit"],"0.0000000000000000")
-        self.assertEqual(d["commission"],"-0.1000000000000000")
-        self.assertTrue(self.h.history(11)["money_available"])
-        payload[-2:]=["unavailable",0]
+        self.assertNotIn("profit",d)
+        self.assertNotIn("cash",self.h.history(11))
+        legacy=d.copy()
+        payload[-3:]=["-","unavailable",0]
         self.write("history-11.tsv","PYHIST2",self.vi,payload,body[:1])
         history=self.h.history(11)
-        self.assertFalse(history["money_available"])
-        self.assertIsNone(history["deals"][0]["profit"])
-        self.assertEqual(history["deals"][0]["deal_sl_ticks"],10000)
+        self.assertNotIn("currency",history)
+        self.assertEqual(history["deals"][0],legacy)
+        # A second structural D row cannot be hidden inside the legacy tail.
+        payload[-1]=1
+        self.write("history-11.tsv","PYHIST2",self.vi,payload,body[:1]*2)
+        with self.assertRaises(bridge.HelperUnavailable):self.h.history(11)
+
+    def test_priority_lists_all_recent_same_kind_challenges(self):
+        for pid in (11,12):
+            with self.assertRaises(bridge.HelperUnavailable):self.h.history(pid)
+        with self.assertRaises(bridge.HelperUnavailable):self.h.order(31)
+        def index(kind):
+            return (self.h.directory/(kind+"-priority.tsv")).read_text().split("\t")
+        self.assertEqual(index("history"),[self.vi,"10000","11","12","END\n"])
+        self.assertEqual(index("order"),[self.vi,"10000","31","END\n"])
+        self.vi="2"*32;self.verifier()
+        with self.assertRaises(bridge.HelperUnavailable):self.h.history(13)
+        self.assertEqual(index("history"),[self.vi,"10000","13","END\n"])
 
     def test_exact_historical_order_is_separate_from_position_id(self):
         with self.assertRaises(bridge.HelperUnavailable): self.h.order(31)
