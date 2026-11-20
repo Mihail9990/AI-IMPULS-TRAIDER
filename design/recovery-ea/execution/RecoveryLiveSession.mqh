@@ -17,10 +17,33 @@ struct RecoveryLiveSession {
 
 const string RecoveryLivePanelRoot="RECOVERY_PANEL";
 
+string RecoveryLiveStatePrefix(const RecoveryPanelCommandScope &mail)
+  {
+   return "{\"boot_id\":\""+mail.boot_id+"\",\"context_id\":\""+mail.context_id+
+      "\",\"generation_id\":\""+mail.generation_id+"\",\"mode\":\"";
+  }
+
+// Remove only this chart's publication while it still holds the writer
+// lock. Nothing in the command or receipt folders is read, removed or resumed.
+void RecoveryLiveSessionWithdraw(const RecoveryLiveSession &s)
+  {
+   if(!s.owns_mail || s.owner_handle==INVALID_HANDLE || !s.lifecycle.active ||
+      !RecoveryPanelCommandUUID(s.mail.boot_id) ||
+      RecoveryPanelBootEpoch(s.mail.boot_id)!=s.lifecycle.epoch ||
+      !RecoveryPanelCommandUUID(s.mail.context_id) || !RecoveryPanelCommandUUID(s.mail.generation_id) ||
+      !RecoveryPanelCommandUUID(s.mail.scope_id))return;
+   const string path=RecoveryLivePanelRoot+"\\state.json", prefix=RecoveryLiveStatePrefix(s.mail);
+   string wire;
+   if(RecoveryPanelMailboxRead(path,wire) && StringFind(wire,prefix)==0 &&
+      StringFind(wire,"\",\"scope_id\":\""+s.mail.scope_id+"\",\"version\":1,",StringLen(prefix))>=0)
+      FileDelete(path);
+  }
+
 void RecoveryLiveSessionStop(RecoveryLiveSession &s)
   {
    RecoveryPanelMailboxClose(s.mailbox);
    RecoveryClearPanelApply(s.panel_seen);
+   RecoveryLiveSessionWithdraw(s);
    RecoverySessionReset(s.lifecycle);
    if(s.owns_mail)FileClose((int)s.owner_handle);
    s.owns_mail=false;s.owner_handle=INVALID_HANDLE;
@@ -46,6 +69,16 @@ string RecoveryLiveUuid(const string category,const string seed)
 
 // Require the caller's scope to describe the configured account/chart. No
 // market requests are made here. On failure the caller stays inactive.
+// FileIsExist returns false and ERR_FILE_IS_DIRECTORY for a directory.
+bool RecoveryLiveSessionPathUnused(const string path)
+  {
+   if(path=="")return false;
+   ResetLastError();
+   if(FileIsExist(path))return false;
+   const int error=GetLastError();
+   return error==0 || error==ERR_FILE_NOT_EXIST;
+  }
+
 bool RecoveryLiveSessionStart(RecoveryLiveSession &s,const RecoverySessionContext &live,
     const string profile_scope,const string instance_seed)
   {
@@ -68,7 +101,7 @@ bool RecoveryLiveSessionStart(RecoveryLiveSession &s,const RecoverySessionContex
    s.mail.context_id=RecoveryLiveUuid("context",seed);
    s.mail.generation_id=RecoveryLiveUuid("generation",seed);
    const string path=RecoveryPanelMailboxBootPath(s.mail.boot_id);
-   if(path=="" || !RecoveryPanelCommandUUID(s.mail.context_id) ||
+   if(!RecoveryLiveSessionPathUnused(path) || !RecoveryPanelCommandUUID(s.mail.context_id) ||
       !RecoveryPanelCommandUUID(s.mail.generation_id) ||
       !FolderCreate(path) || !FolderCreate(path+"\\commands") || !FolderCreate(path+"\\receipts") ||
       RecoverySessionInit(s.lifecycle,live,true,RecoveryPanelBootEpoch(s.mail.boot_id))!=RSL_NEW)
@@ -85,8 +118,7 @@ bool RecoveryLiveSessionPublish(const RecoveryLiveSession &s,const RecoverySessi
    if(!RecoveryLiveSessionCurrent(s,live))return false;
    const string mode_name=mode==REC_CONTROL_MANUAL_WAIT ? "manual_wait":"ready";
    const string path=RecoveryLivePanelRoot+"\\state.json",tmp=path+"."+s.mail.boot_id+".writing";
-   const string wire="{\"boot_id\":\""+s.mail.boot_id+"\",\"context_id\":\""+s.mail.context_id+
-      "\",\"generation_id\":\""+s.mail.generation_id+"\",\"mode\":\""+mode_name+
+   const string wire=RecoveryLiveStatePrefix(s.mail)+mode_name+
       "\",\"scope_id\":\""+s.mail.scope_id+"\",\"version\":1,\"written_at\":"+(string)TimeLocal()+"}";
    const int len=StringLen(wire);
    uchar bytes[];

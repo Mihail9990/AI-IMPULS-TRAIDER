@@ -11,14 +11,17 @@
 #include "RecoveryDualSupportPump.mqh"
 #include "RecoverySupportRotationOwner.mqh"
 #include "RecoveryManualHandoff.mqh"
+#include "RecoveryManualFastFill.mqh"
 #include "RecoverySupportGapOwner.mqh"
 #include "RecoverySupportMoveFill.mqh"
+#include "RecoveryDetachedCloseAccounting.mqh"
 
 struct RecoveryChartRuntime {
  RecoveryLiveSession live_session;
  RecoveryPanelControl panel;
  RecoveryManualChart manual;
  RecoveryManualHandoff adopted;
+ RecoveryManualFastFill manual_fast;
  RecoveryEvidenceOwner verifier;
  RecoveryRangeOco oco;
  RecoveryOcoCancel losing_stop;
@@ -34,6 +37,7 @@ struct RecoveryChartRuntime {
  RecoverySupportRotationOwner rotation[2];
  RecoverySupportGapOwner gap[2];
  RecoverySupportMoveFill fast_survivor[2];
+ RecoveryDetachedCloseAccounting detached_close[2];
  ulong close_position[2];
  string watcher_epoch;
  long watcher_chart;
@@ -49,7 +53,7 @@ struct RecoveryChartRuntime {
 void RecoveryChartStop(RecoveryChartRuntime &chart)
   {
    RecoveryLiveSessionStop(chart.live_session);
-   ZeroMemory(chart.panel);ZeroMemory(chart.verifier);ZeroMemory(chart.manual);ZeroMemory(chart.adopted);
+   ZeroMemory(chart.panel);ZeroMemory(chart.verifier);ZeroMemory(chart.manual);ZeroMemory(chart.adopted);ZeroMemory(chart.manual_fast);
    ZeroMemory(chart.oco);ZeroMemory(chart.losing_stop);
    chart.cancel_started=false;chart.cancel_skipped=false;chart.cancel_result=ROC_WAIT;
    for(int i=0;i<2;i++) {
@@ -58,6 +62,7 @@ void RecoveryChartStop(RecoveryChartRuntime &chart)
     ZeroMemory(chart.support_exit[i]);ZeroMemory(chart.reentry[i]);
     ZeroMemory(chart.dual[i]);ZeroMemory(chart.rotation[i]);
     ZeroMemory(chart.gap[i]);ZeroMemory(chart.fast_survivor[i]);
+    ZeroMemory(chart.detached_close[i]);
     chart.close_position[i]=0;
     chart.reverse_probe_position[i]=0;
  }
@@ -330,12 +335,44 @@ bool RecoveryChartSupportReentryTimer(RecoveryChartRuntime &chart,const Recovery
    return true;
   }
 
+// Verification may continue while the successor is advancing. The ledger
+// merge waits for a safe point so no in-flight action sees a different revision.
+void RecoveryChartDetachedTimer(RecoveryChartRuntime &chart,const RecoverySessionContext &live,
+    const RecoverySessionIntentScope &scope,const RecoveryInventoryScope &verifier,const int i,
+    RecoveryRangeOwner &owner,const RecoveryPanelControl &panel,const bool merge)
+  {
+   RCCloseCheckpoint proof;
+   RecoveryDetachedCloseAccountingTimer(chart.detached_close[i],owner,panel,
+           chart.live_session.lifecycle,live,scope,chart.verifier,verifier,chart.tick,chart.step,proof);
+   if(!merge)return;
+   for(int n=0;n<24;n++)
+     {
+      const RCCloseCheckpoint done=chart.detached_close[i].completed[n];
+      if(done.key.scope==0)continue;
+      if(RecoveryCommitDetachedCloseAccounting(chart.detached_close[i],owner,panel,
+                    chart.live_session.lifecycle,live,scope,done))
+        {
+         ZeroMemory(chart.detached_close[i].completed[n]);
+         return;
+        }
+     }
+  }
+
 void RecoveryChartOrdinaryTimer(RecoveryChartRuntime &chart,const RecoverySessionContext &live,
     const RecoverySessionIntentScope &scope,const RecoveryInventoryScope &verifier,const int i,
     RecoveryRangeOwner &owner,RecoveryPanelControl &panel,const bool manual=false)
   {
-   if(owner.phase!=RRO_ORDINARY ||
-      RecoveryChartSupportReentryTimer(chart,live,scope,verifier,i,owner,panel))return;
+   if(owner.phase==RRO_FINAL)
+     {
+      RecoveryChartDetachedTimer(chart,live,scope,verifier,i,owner,panel,true);
+      return;
+     }
+   if(owner.phase!=RRO_ORDINARY)return;
+   if(RecoveryChartSupportReentryTimer(chart,live,scope,verifier,i,owner,panel))
+     {
+      RecoveryChartDetachedTimer(chart,live,scope,verifier,i,owner,panel,false);
+      return;
+     }
    RecoveryChartWorkingReverse(chart,live,scope,verifier,i,owner,panel);
    RecoveryRangeOwnerArmOrdinary(owner,panel,chart.live_session.lifecycle,
                    live,scope,chart.verifier,0,chart.tick,chart.step);
@@ -346,6 +383,10 @@ void RecoveryChartOrdinaryTimer(RecoveryChartRuntime &chart,const RecoverySessio
    RecoveryChartSupportTimer(chart,live,scope,verifier,i,owner,panel,exact,magic);
    if(chart.support_exit[i].phase==RSCO_STAGED)
       RecoveryChartSupportReentryTimer(chart,live,scope,verifier,i,owner,panel);
+   const bool merge=owner.phase==RRO_FINAL || (!owner.opening.reserved &&
+         owner.ordinary.hint.state!=RFH_QUEUED && owner.ordinary.pump.state==RAP_UNUSED &&
+         chart.support_exit[i].phase==RSCO_IDLE && panel.ranges[i].pending.kind==RR_NONE);
+   RecoveryChartDetachedTimer(chart,live,scope,verifier,i,owner,panel,merge);
   }
 
 void RecoveryChartRangeTimer(RecoveryChartRuntime &chart,const RecoverySessionContext &live,
@@ -393,9 +434,17 @@ bool RecoveryChartOnTimer(RecoveryChartRuntime &chart,const RecoverySessionConte
       if(RecoveryManualChartTimer(chart.manual,chart.panel,recovery_active,chart.verifier,
           chart.live_session.lifecycle,live,scope,verifier,chart.settings,chart.tick,chart.step)==RMC_PROOF)
          chart.publish_needed=true;
+      if(chart.panel.mode==REC_CONTROL_MANUAL_WAIT && !recovery_active)
+        {
+         RecoverySessionAlternatingResult event_result;
+         if(RecoveryManualFastFillTimer(chart.manual_fast,chart.manual,chart.adopted,chart.panel,
+              chart.live_session.lifecycle,live,scope,chart.verifier,verifier,
+              chart.settings,chart.tick,chart.step,event_result)==RAS_ADVANCED)
+            chart.publish_needed=true;
+        }
      }
-   else if(chart.panel.mode==REC_CONTROL_IDLE)
-      RecoveryManualChartClearWaiting(chart.manual);
+   else if(chart.panel.mode==REC_CONTROL_IDLE && RecoveryManualChartClearWaiting(chart.manual))
+      ZeroMemory(chart.manual_fast);
    if(chart.publish_needed &&
       RecoveryLiveSessionPublish(chart.live_session,live,chart.panel.mode))chart.publish_needed=false;
    if(chart.panel.mode==REC_CONTROL_ADOPTED)
@@ -422,6 +471,12 @@ void RecoveryChartOnTrade(RecoveryChartRuntime &chart,const RecoverySessionConte
    if(!RecoveryLiveSessionCurrent(chart.live_session,live))return;
    RecoverySessionIntentScope scope;RecoveryInventoryScope verifier;
    RecoveryChartBindings(chart,live,scope,verifier);
+   if(chart.panel.mode==REC_CONTROL_MANUAL_WAIT)
+     {
+      RecoveryManualFastFillTrade(chart.manual_fast,chart.manual,chart.panel,
+                                  chart.live_session.lifecycle,live,scope,verifier,event);
+      return;
+     }
    if(chart.panel.mode==REC_CONTROL_ADOPTED)
      {
       RecoveryManualHandoffTrade(chart.adopted,chart.panel,chart.live_session.lifecycle,live,scope,verifier,event);

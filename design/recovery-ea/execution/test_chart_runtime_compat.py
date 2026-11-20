@@ -23,7 +23,8 @@ struct RecoveryLiveSession{
 enum {REC_CONTROL_IDLE,REC_CONTROL_RANGES,REC_CONTROL_MANUAL_WAIT,REC_CONTROL_ADOPTED};
 struct TestCycle {ulong position_id,generation,active_order;int range_id;long actual_entry_ticks;};
 struct TestKnown {ulong ticket;};
-struct RRRangeState {TestKnown entry,opposite;TestCycle cycle;ulong scope,position_ticket;long initial_sl,live_sl;int support_stage;};
+struct RRRangeState {TestKnown entry,opposite;TestCycle cycle;ulong scope,position_ticket;long initial_sl,live_sl;int support_stage;struct {int kind;} pending;};
+enum {RR_NONE=0};
 using TestRange=RRRangeState;
 struct RecoveryPanelControl {int mode;bool configured[2];TestRange ranges[2];RRSettings settings;};
 struct RecoveryEvidenceOwner {string verifier_epoch;long verifier_chart;ulong serial;};
@@ -85,7 +86,7 @@ struct RecoverySupportRuntime {int x;};
 enum {RCP_IDLE,RCP_DONE,RCP_UNRESOLVED,RC_INITIAL_LEVEL,RC_SUPPORT_LEVEL,RC_SUPPORT_SL,RC_FULL_SL,RR_ALT_CLOSE_APPLIED};
 enum RecoveryClosePollResult{RCP_PROOF};
 struct RecoveryRangeClosePoll{int state;ulong verified_sequence;};
-struct RCCloseCheckpoint {int value,before,proof;};
+struct RCCloseCheckpoint {int value,before,proof;struct {ulong scope;} key;};
 enum {RSCO_IDLE,RSCO_REQUEST,RSCO_READ,RSCO_STAGED,RSCO_DISPATCHED};
 struct RecoverySupportCloseOwner{int phase,reentry;RecoveryIntentKey key;ulong working_sequence;};
 int reentry_stages=0,full_counts=0;
@@ -230,6 +231,36 @@ bool RecoverySeedManualHandoff(RecoveryManualHandoff& h,const RecoveryManualChar
  ++manual_handoffs;return true;
 }
 struct RecoverySessionAlternatingResult{};
+struct RecoveryDetachedCloseAccounting {RCCloseCheckpoint completed[24];};
+int detached_merges=0;
+bool detached_proof=false;
+void RecoveryDetachedCloseAccountingTimer(RecoveryDetachedCloseAccounting& t,const RecoveryRangeOwner&,
+ const RecoveryPanelControl&,const RecoverySessionLifecycle&,const RecoverySessionContext&,const RecoverySessionIntentScope&,
+ RecoveryEvidenceOwner&,const RecoveryInventoryScope&,double,double,RCCloseCheckpoint&) {
+ if(detached_proof){t.completed[0].key.scope=1;detached_proof=false;}
+}
+bool RecoveryCommitDetachedCloseAccounting(const RecoveryDetachedCloseAccounting&,RecoveryRangeOwner&,
+ const RecoveryPanelControl&,const RecoverySessionLifecycle&,const RecoverySessionContext&,
+ const RecoverySessionIntentScope&,const RCCloseCheckpoint& p){
+ assert(p.key.scope==1);++detached_merges;return true;
+}
+
+struct RecoveryManualFastFill {int state;};
+enum {RAS_NO_EFFECT,RAS_ADVANCED};
+bool manual_fast_proof=false;
+int manual_fast_paths=0,manual_fast_events=0;
+int RecoveryManualFastFillTimer(RecoveryManualFastFill& f,const RecoveryManualChart& m,RecoveryManualHandoff& h,
+ RecoveryPanelControl& p,const RecoverySessionLifecycle& life,const RecoverySessionContext& live,
+ const RecoverySessionIntentScope& scope,RecoveryEvidenceOwner&,const RecoveryInventoryScope&,
+ const RRSettings& cfg,double,double,RecoverySessionAlternatingResult&) {
+ assert(p.mode==REC_CONTROL_MANUAL_WAIT);
+ if(!m.attempted)return RAS_NO_EFFECT;
+ ++manual_fast_paths;f.state=1;
+ if(!manual_fast_proof)return RAS_NO_EFFECT;
+ p.mode=REC_CONTROL_ADOPTED;assert(RecoverySeedManualHandoff(h,m,p,life,live,scope,cfg));
+ return RAS_ADVANCED;
+}
+
 enum {RSMF_IDLE,RSMF_REQUEST,RSMF_DONE};
 enum {RSG_IDLE,RSG_PROBE,RSG_STAGED,RSG_SENT,RSG_FINAL_STATE};
 struct RecoverySupportMoveFill {int state;};
@@ -266,6 +297,13 @@ void RecoveryDispatchSupportGapOwner(RecoverySupportGapOwner& t,RecoveryRangeOwn
 
 struct RecoveryPanelApplyResult{};
 struct MqlTradeTransaction {int range;};
+bool RecoveryManualFastFillTrade(RecoveryManualFastFill& f,const RecoveryManualChart&,
+ const RecoveryPanelControl& p,const RecoverySessionLifecycle&,const RecoverySessionContext&,
+ const RecoverySessionIntentScope&,const RecoveryInventoryScope&,const MqlTradeTransaction&) {
+ assert(p.mode==REC_CONTROL_MANUAL_WAIT);
+ if(!f.state)return false;
+ ++manual_fast_events;return true;
+}
 bool RecoveryManualHandoffTrade(RecoveryManualHandoff& h,const RecoveryPanelControl& p,
  const RecoverySessionLifecycle&,const RecoverySessionContext&,const RecoverySessionIntentScope&,
  const RecoveryInventoryScope&,const MqlTradeTransaction&) {
@@ -387,12 +425,15 @@ int main(){
  assert(RecoveryChartOnTimer(single,live)&&reentry_stages==1);
  assert(submits_reentry==1&&dual_begins==1);
  emit_dual=true;
+ detached_proof=true;
  assert(RecoveryChartOnTimer(single,live)&&rotation_calls==1);
+ assert(single.detached_close[0].completed[0].key.scope==1&&detached_merges==0);
  assert(RecoveryChartOnTimer(single,live)&&single.rotation[0].phase==RSRM_DONE);
  emit_dual=false;
  close_type=RC_FULL_SL;
  single.panel.ranges[0].cycle.position_id=90;
  assert(RecoveryChartOnTimer(single,live)&&full_counts==1&&reentry_stages==1);
+ assert(detached_merges==1);
  RecoveryChartStop(single);
  // Journal-backed fast fill arrives before PLACED proof.
  fast_entry=true;close_type=RC_SUPPORT_SL;closing=false;configure=true;
@@ -429,6 +470,16 @@ int main(){
  assert(manual_handoffs==1&&manual_watches==2&&wait.ranges[0].phase==RRO_UNUSED);
  RecoveryChartOnTrade(wait,live,{1});
  assert(manual_events==1);
+ RecoveryChartStop(wait);
+ assert(RecoveryChartStart(wait,live,"profile","manual-fill-first","verifier",2,settings,.01,.02,string(32,'a'),77));
+ manual_proof=false;manual_arm=true;manual_attempt=true;
+ assert(RecoveryChartOnTimer(wait,live)&&wait.panel.mode==REC_CONTROL_MANUAL_WAIT&&!wait.adopted.seeded);
+ RecoveryChartOnTrade(wait,live,{1});
+ assert(manual_fast_events==1);
+ const int calls=manual_fast_paths;
+ manual_fast_proof=true;
+ assert(RecoveryChartOnTimer(wait,live)&&wait.panel.mode==REC_CONTROL_ADOPTED&&wait.adopted.seeded);
+ assert(RecoveryChartOnTimer(wait,live)&&manual_fast_paths==calls+1&&wait.ranges[0].phase==RRO_UNUSED);
  RecoveryChartStop(wait);
 }
 """

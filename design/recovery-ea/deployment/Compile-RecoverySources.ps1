@@ -11,4 +11,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $launcher = Get-Command py.exe -CommandType Application
 & $launcher.Source -3 (Join-Path $PSScriptRoot 'source_build.py') compile --editor $MetaEditor --archive $Archive --commit $Commit --archive-sha256 $ArchiveSha256 --results $Results --mode $Mode
+$BuildExit = $LASTEXITCODE
+if ($BuildExit -ne 0 -or $Mode -ne 'candidate') { exit $BuildExit }
+& $launcher.Source -3 (Join-Path $PSScriptRoot 'source_build.py') check-candidate-results --archive $Archive --commit $Commit --archive-sha256 $ArchiveSha256 --results $Results
 exit $LASTEXITCODE
+

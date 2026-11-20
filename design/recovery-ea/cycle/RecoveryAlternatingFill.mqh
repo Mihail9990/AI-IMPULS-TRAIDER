@@ -16,6 +16,7 @@ struct RRAlternatingPosition {
  long observed_remaining_at_handoff;
  int exit_class;
  long reported_stop;
+ long confirmed_initial_sl,confirmed_support_sl; // independently observed policy stops
 };
 struct RRAlternationLedger {
  ulong scope,generation;
@@ -41,6 +42,8 @@ void RRAltCapture(const RRRangeState &s,RRAlternatingPosition &p) {
  p.bound_entry=s.cycle;p.position_ticket=s.position_ticket;
  p.last_confirmed_sl=s.live_sl;p.planned_sl=s.initial_sl;
  p.detached=false;p.exit_recorded=false;p.exit_class=0;p.reported_stop=0;
+ p.confirmed_initial_sl=s.live_sl==s.initial_sl && RCBoundedPositive(s.live_sl) ? s.live_sl : 0;
+ p.confirmed_support_sl=s.support_stage==2 && s.live_sl==s.cycle.actual_entry_ticks ? s.live_sl : 0;
  p.observed_open_at_handoff=false;p.observed_remaining_at_handoff=0;
  p.opening_at_handoff.reserved=false;RRClearAction(p.pending_at_handoff);
 }
@@ -120,6 +123,12 @@ RRAlternatingResult RRAdvanceAlternatingFill(RRRangeState &s,const RRSettings &c
  int at=ledger.position_count-1;
  ledger.positions[at].last_confirmed_sl=s.live_sl;
  ledger.positions[at].planned_sl=s.initial_sl;
+ if(s.live_sl==s.initial_sl && RCBoundedPositive(s.live_sl))
+    ledger.positions[at].confirmed_initial_sl=s.live_sl;
+ else if(ledger.positions[at].confirmed_initial_sl!=s.initial_sl)
+    ledger.positions[at].confirmed_initial_sl=0;
+ ledger.positions[at].confirmed_support_sl=
+    s.support_stage==2 && s.live_sl==s.cycle.actual_entry_ticks ? s.live_sl : 0;
  ledger.positions[at].pending_at_handoff=s.pending;
  if(opening.reserved)ledger.positions[at].opening_at_handoff=opening;
  ledger.positions[at].observed_open_at_handoff=e.predecessor_inventory_complete&&e.predecessor_present;

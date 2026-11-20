@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import Mock, patch
 import zipfile
 
-from source_build import (BASE, DIAGNOSTIC, SCHEMA, SUPPORT, compile_sources, package, read_package,
+from source_build import (BASE, CANDIDATE, DIAGNOSTIC, ROLE, SCHEMA, SUPPORT, TRADER, check_candidate_results, compile_sources, package, read_package,
                           file_product_version, result_counts, validated_path, validated_targets)
 
 
@@ -70,11 +70,14 @@ class BuildTest(unittest.TestCase):
             package(self.repo,self.commit,other)
 
     def test_candidate_path_requires_different_commit(self):
-        trader="runtime/RecoveryTrader.mq5"
+        trader=TRADER
+        self.source("execution/OtherTrader.mq5","")
         self.source(trader,'#include "../verifier/part.mqh"\n')
         with self.assertRaises(ValueError):
             package(self.repo,self.commit,self.archive,trader)
         commit=self.checkpoint()
+        with self.assertRaises(ValueError):
+            package(self.repo,commit,self.archive,"execution/OtherTrader.mq5")
         m = package(self.repo,commit,self.archive,trader)
         self.assertEqual(m["mode"],"candidate")
         self.assertEqual(m["targets"],[*SUPPORT,trader])
@@ -103,6 +106,100 @@ class BuildTest(unittest.TestCase):
         for invalid in ("execution/COM1.mq5","aux/t.mqh","x/../a.mq5"):
             with self.assertRaises(ValueError):
                 validated_path(invalid)
+
+
+    def test_candidate_allowlist_and_dependency_closure_checked_on_read(self):
+        self.source(TRADER, '#include "own.mqh" // pure source\n')
+        self.source("execution/own.mqh", '#include "..\\verifier\\part.mqh"\n')
+        commit=self.checkpoint()
+        original=package(self.repo,commit,self.archive,TRADER)
+        _, files=read_package(self.archive,commit,sha(self.archive))
+        self.assertEqual(set(files), {*CANDIDATE, "execution/own.mqh", "verifier/part.mqh", "watcher/watcher.mqh"})
+
+        def forged(name, patch_files):
+            payload=dict(files)
+            patch_files(payload)
+            out=self.root/name
+            manifest=dict(original)
+            manifest["sha256"]={k:hashlib.sha256(v).hexdigest() for k,v in payload.items()}
+            with zipfile.ZipFile(out, "w") as z:
+                z.writestr("manifest.json", json.dumps(manifest))
+                for k,v in payload.items():
+                    z.writestr("src/"+k, v)
+            return out
+
+        for file, change, error in (
+            ("extra.zip", lambda entries: entries.update({"execution/extra.mqh":b"// stray"}), "outside"),
+            ("missing.zip", lambda entries: entries.pop("execution/own.mqh"), "Missing local header"),
+            ("external.zip", lambda entries: entries.update({TRADER:b"#include <Trade.mqh>"}), "Unsupported"),
+            ("resource.zip", lambda entries: entries.update({TRADER:b'#resource "private.bin"'}), "Unsupported"),
+            ("dll.zip", lambda entries: entries.update({TRADER:b'#import "custom.dll"'}), "Unsupported"),
+        ):
+            out=forged(file,change)
+            with self.assertRaisesRegex(ValueError, error):
+                read_package(out,commit,sha(out))
+
+        self.source(TRADER, '#include "own.mqh"\n#include "OWN.mqh"\n')
+        self.source("execution/OWN.mqh","// case collision")
+        with self.assertRaisesRegex(ValueError, "Windows filename collision"):
+            package(self.repo,self.checkpoint(),self.root/"collision.zip",TRADER)
+        self.source(TRADER, '#include "../probe/RecoveryCompileProbe.mq5"\n')
+        with self.assertRaisesRegex(ValueError, "Only local MQL headers"):
+            package(self.repo,self.checkpoint(),self.root/"entry-leak.zip",TRADER)
+
+    def test_native_candidate_provenance_consistency(self):
+        self.source(TRADER, '#include "../verifier/part.mqh"\n')
+        commit=self.checkpoint()
+        manifest=package(self.repo,commit,self.archive,TRADER)
+        ed=self.root/"MetaEditor64.exe"
+        ed.write_bytes(b"fake-editor")
+        def fake(command, **kwargs):
+            src=Path(re.search(r'/compile:"([^"]+)"',command).group(1))
+            src.with_suffix(".log").write_text("Result: 0 errors, 1 warning", encoding="utf-16")
+            src.with_suffix(".ex5").write_bytes(src.name.encode())
+            return subprocess.CompletedProcess(command,0)
+        output=self.root/"out"
+        archive_hash=sha(self.archive)
+        with patch("source_build.sys.platform","win32"), patch("source_build.file_product_version",return_value=("5.0.0.6308","5.0.0.6308")), patch("source_build.subprocess.run",side_effect=fake):
+            report=compile_sources(self.archive,commit,archive_hash,ed,output,"candidate")
+        self.assertEqual([i["role"] for i in report["targets"]], [ROLE[m] for m in CANDIDATE])
+        self.assertEqual(check_candidate_results(self.archive,commit,archive_hash,output),report)
+        for t in report["targets"]:
+            self.assertEqual(t["source_sha256"], manifest["sha256"][t["source"]])
+            self.assertEqual(t["log_sha256"], sha(output/t["log"]))
+            self.assertEqual(t["ex5_sha256"], sha(output/t["ex5"]))
+        log=output/report["targets"][-1]["log"]
+        raw=log.read_bytes()
+        log.write_bytes(b"Result: 0 errors, 2 warnings")
+        with self.assertRaisesRegex(ValueError,"mismatched log"):
+            check_candidate_results(self.archive,commit,archive_hash,output)
+        log.write_bytes(raw)
+        ex5=output/report["targets"][-1]["ex5"]
+        clean=ex5.read_bytes()
+        ex5.unlink()
+        with self.assertRaisesRegex(ValueError,"mismatched ex5"):
+            check_candidate_results(self.archive,commit,archive_hash,output)
+        ex5.write_bytes(clean)
+        (output/"extra.ex5").touch()
+        with self.assertRaisesRegex(ValueError,"Unexpected files"):
+            check_candidate_results(self.archive,commit,archive_hash,output)
+
+    def test_source_mutation_during_mock_compile_never_attested(self):
+        package(self.repo,self.commit,self.archive)
+        ed=self.root/"MetaEditor64.exe"
+        ed.touch()
+        def fake(command, **kwargs):
+            src=Path(re.search(r'/compile:"([^"]+)"',command).group(1))
+            src.write_text("// not pinned")
+            src.with_suffix(".log").write_text("Result: 0 errors, 0 warnings")
+            src.with_suffix(".ex5").write_bytes(b"unproven")
+            return subprocess.CompletedProcess(command,0)
+        output=self.root/"outputs"
+        with patch("source_build.sys.platform","win32"), patch("source_build.file_product_version",return_value=("5.0.0.6308","5.0.0.6308")), patch("source_build.subprocess.run",side_effect=fake) as proc:
+            report=compile_sources(self.archive,self.commit,sha(self.archive),ed,output)
+        self.assertEqual(proc.call_count,1)
+        self.assertTrue(all(r["reason"]=="pinned_sources_changed_or_unreadable" for r in report["targets"]))
+        self.assertFalse(list(output.glob("*.ex5")))
 
     def test_compiler_log_counts(self):
         line="Result: 0 errors, 1 warning, 20 msec elapsed"
@@ -184,3 +281,4 @@ class BuildTest(unittest.TestCase):
 
 if __name__=="__main__":
     unittest.main()
+
