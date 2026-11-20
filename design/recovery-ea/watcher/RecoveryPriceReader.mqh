@@ -29,8 +29,9 @@ bool RecoveryPriceScopeOK(const RecoveryPriceScope &s) {
           s.executor_epoch!=s.watcher_epoch && s.generation>0 && s.login>0 && s.watcher_chart>0 &&
           RecoveryInvContext(s.server) && RecoveryInvContext(s.symbol) && s.position_identifier>0 &&
           s.live_ticket>0 && (s.side==1 || s.side==-1) && RecoveryPriceCanonical(s.actual_entry) &&
-          RecoveryPriceCanonical(s.first_advance) && RecoveryPriceCanonical(s.second_advance) &&
-          StringToDouble(s.first_advance)<StringToDouble(s.second_advance);
+          (s.first_advance=="0.0000000000000000" || RecoveryPriceCanonical(s.first_advance)) &&
+          RecoveryPriceCanonical(s.second_advance) &&
+          RecoveryPriceThresholds(StringToDouble(s.first_advance),StringToDouble(s.second_advance));
 }
 string RecoveryPriceRequestText(const RecoveryPriceScope &s) {
    if(!RecoveryPriceScopeOK(s)) return "";
@@ -40,7 +41,8 @@ string RecoveryPriceRequestText(const RecoveryPriceScope &s) {
           s.actual_entry+"\t"+s.first_advance+"\t"+s.second_advance+"\t"+(string)s.watcher_chart+"\tEND\n";
 }
 string RecoveryPriceFollowText(const RecoveryPriceScope &s,const int desired_stage) {
-   if(!RecoveryPriceScopeOK(s) || (desired_stage!=1 && desired_stage!=2)) return "";
+   if(!RecoveryPriceScopeOK(s) || (desired_stage!=1 && desired_stage!=2) ||
+      (desired_stage==1 && s.first_advance=="0.0000000000000000")) return "";
    return "RECOVERY_PRICE_FOLLOW_V2\t"+s.nonce+"\t"+s.executor_epoch+"\t"+s.watcher_epoch+"\t"+
           (string)s.generation+"\t"+(string)s.login+"\t"+s.server+"\t"+s.symbol+"\t"+
           (string)s.position_identifier+"\t"+(string)s.live_ticket+"\t"+(s.side==1 ? "BUY" : "SELL")+"\t"+
@@ -54,7 +56,8 @@ bool RecoveryPriceParseVersion(const string wire,const RecoveryPriceScope &s,con
    if(desired_stage<0 || desired_stage>2) return false;
    const bool follow=desired_stage>0;
    const int shift=follow ? 1 : 0;
-   if(n<2 || n>2048 || !RecoveryPriceScopeOK(s) || StringFind(wire,"\n")!=n-1) return false;
+   if(n<2 || n>2048 || !RecoveryPriceScopeOK(s) || StringFind(wire,"\n")!=n-1 ||
+      (desired_stage==1 && s.first_advance=="0.0000000000000000")) return false;
    string f[];
    if(StringSplit(StringSubstr(wire,0,n-1),9,f)!=20+shift ||
       f[0]!=(follow ? "RECOVERY_PRICE_PEAK_V2" : "RECOVERY_PRICE_V1") || f[1]!=s.nonce || f[2]!=s.executor_epoch || f[3]!=s.watcher_epoch ||
@@ -118,7 +121,8 @@ bool RecoveryPriceDrop(const RecoveryPriceScope &s,const int desired_stage,const
 bool RecoveryPriceReadVersion(const RecoveryPriceScope &s,const ulong after_sequence,
                              const int desired_stage,RecoveryPriceSignal &out) {
    RecoveryPriceClear(out);
-   if(!RecoveryPriceScopeOK(s) || desired_stage<0 || desired_stage>2) return false;
+   if(!RecoveryPriceScopeOK(s) || desired_stage<0 || desired_stage>2 ||
+      (desired_stage==1 && s.first_advance=="0.0000000000000000")) return false;
    const int h=FileOpen("RECOVERY_PRICE\\"+s.nonce+(desired_stage>0 ? ".peak" : ".quote"),FILE_READ|FILE_BIN);
    if(h==INVALID_HANDLE) return false;
    const ulong size=FileSize(h);

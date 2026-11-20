@@ -61,8 +61,8 @@ void RRClearAction(RRAction &a) {
 }
 bool RRSettingsValid(const RRSettings &cfg) {
  if(cfg.scope==0 || cfg.generation==0 || !RCBoundedPositive(cfg.initial_sl_ticks) ||
-    !RCBoundedPositive(cfg.support_first_ticks) || !RCBoundedPositive(cfg.support_second_ticks) ||
-    !RCBoundedPositive(cfg.support_offset_ticks) || cfg.support_second_ticks<=cfg.support_first_ticks) return false;
+    (cfg.support_first_ticks<0 || cfg.support_first_ticks>RC_MAX_UNITS) || !RCBoundedPositive(cfg.support_second_ticks) ||
+    (cfg.support_offset_ticks<0 || cfg.support_offset_ticks>RC_MAX_UNITS || (cfg.support_first_ticks>0 && cfg.support_offset_ticks==0)) || cfg.support_second_ticks<=cfg.support_first_ticks) return false;
  for(int i=0;i<24;i++) if(!RCBoundedPositive(cfg.lot_steps[i]))return false;
  return true;
 }

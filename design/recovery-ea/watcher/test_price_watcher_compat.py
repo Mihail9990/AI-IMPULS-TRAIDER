@@ -40,7 +40,12 @@ int main(){
   assert(RecoveryPriceStage( 0,3000,3000.6,3000.6,.35,.60)==-1);
   assert(RecoveryPriceStage( 1,3000,3000.6,3000.4,.35,.60)==-1);
   assert(RecoveryPriceStage( 1,3000,3000.6,3000.6,.60,.60)==-1);
-  assert(RecoveryPriceStage( 1,3000,3000.6,3000.6,0,.60)==-1);
+  assert(RecoveryPriceStage( 1,3000,3000.6,3000.6,0,.60)==2);
+  assert(RecoveryPriceStage( 1,3000,3000.25,3000.70,0,.60)==0);
+  assert(RecoveryPriceStage(-1,3000,2999.39,2999.61,0,.60)==0);
+  assert(RecoveryPriceStage(-1,3000,2999.39,2999.40,0,.60)==2);
+  assert(RecoveryPriceStage( 1,3000,3000.60,3000.60,-.25,.60)==-1);
+  assert(RecoveryPriceStage( 1,3000,3000.60,3000.60,0,0)==-1);
   assert(RecoveryPriceStage( 1,3000,3000.6,3000.6,.35,std::numeric_limits<double>::quiet_NaN())==-1);
 
   RecoveryPriceScope s{string(32,'1'),string(32,'2'),string(32,'3'),7,6,42,"Demo","XAUUSD.s",
@@ -87,6 +92,27 @@ int main(){
   assert(!RecoveryPricePeakParse(v2+"2\tunavailable\t-1\t0.0000000000000000\tEND\n",s,8,2,out));
   assert(RecoveryPricePeakParse(v2+"2\tobserved\t2\t"+DoubleToString(3000.61,16)+"\tEND\n",s,8,2,out));
   assert(!RecoveryPricePeakParse(v2+"2\tobserved\t2\t"+DoubleToString(3000.61,16)+"\tEND\n",s,9,2,out));
+  auto disabled=s;
+  disabled.first_advance="0.0000000000000000";
+  assert(RecoveryPriceScopeOK(disabled));
+  assert(!RecoveryPriceRequestText(disabled).empty());
+  assert(RecoveryPriceFollowText(disabled,1).empty());
+  assert(!RecoveryPriceFollowText(disabled,2).empty());
+  string disabled_v1=head;
+  disabled_v1.replace(disabled_v1.find(s.first_advance),s.first_advance.size(),disabled.first_advance);
+  assert(RecoveryPriceParse(disabled_v1+"observed\t0\t"+quote+"\tEND\n",disabled,8,out));
+  assert(out.stage==0 && out.observed);
+  assert(!RecoveryPriceParse(disabled_v1+"observed\t1\t"+quote+"\tEND\n",disabled,8,out));
+  assert(RecoveryPriceParse(disabled_v1+"observed\t2\t"+DoubleToString(3000.61,16)+"\tEND\n",disabled,8,out));
+  string disabled_v2=disabled_v1;
+  disabled_v2.replace(0,string("RECOVERY_PRICE_V1").size(),"RECOVERY_PRICE_PEAK_V2");
+  assert(!RecoveryPricePeakParse(disabled_v2+"1\tobserved\t2\t"+DoubleToString(3000.61,16)+"\tEND\n",disabled,8,1,out));
+  assert(RecoveryPricePeakParse(disabled_v2+"2\tobserved\t2\t"+DoubleToString(3000.61,16)+"\tEND\n",disabled,8,2,out));
+  assert(!RecoveryPricePeakParse(disabled_v2+"2\tobserved\t1\t"+quote+"\tEND\n",disabled,8,2,out));
+  disabled.first_advance="0"; assert(!RecoveryPriceScopeOK(disabled));
+  disabled.first_advance="-0.0000000000000000"; assert(!RecoveryPriceScopeOK(disabled));
+  disabled.first_advance="0.0000000000000000";
+  disabled.second_advance="0.0000000000000000"; assert(!RecoveryPriceScopeOK(disabled));
   auto other=s;other.nonce[0]='9'; assert(!RecoveryPriceParse(live,other,0,out));
   other=s;other.watcher_epoch[0]='9'; assert(!RecoveryPriceParse(live,other,0,out));
   other=s;other.executor_epoch[0]='9'; assert(!RecoveryPriceParse(live,other,0,out));
@@ -129,6 +155,7 @@ class PriceWatcherCompat(unittest.TestCase):
         self.assertIn("SymbolInfoTick(ExpectedSymbol,tick)",src)
         self.assertIn("FileMove(temp,0,prefix+suffix,0)",src)
         self.assertIn("void OnTick()",src)
+        self.assertIn('f[14]=="1" && f[12]=="0.0000000000000000"',src)
         self.assertIn("RecoveryPriceAccumulate(Subs[i].peak",src)
         self.assertIn("PriceWrite(Subs[i].query,Subs[i].peak.stage,Subs[i].peak.selected)",src)
         self.assertIn('PriceLoad(Subs[i].query.nonce+".drop",drop,true,true)',src)

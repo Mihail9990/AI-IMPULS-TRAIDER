@@ -115,10 +115,10 @@ bool RCProposeSupport(const RCRange &r,const long current_sl,const int confirmed
     !RCValidSide(r.side) || !RCBoundedPositive(r.actual_entry_ticks) ||
     !RCBoundedPositive(current_sl) || confirmed_stage<0 || confirmed_stage>2 ||
     !RCBoundedPositive(bid) || !RCBoundedPositive(ask) || ask<bid ||
-    !RCBoundedPositive(first_ticks) || !RCBoundedPositive(second_ticks) ||
-    !RCBoundedPositive(support_offset_ticks) || second_ticks<=first_ticks)return false;
+    (first_ticks<0 || first_ticks>RC_MAX_UNITS) || !RCBoundedPositive(second_ticks) ||
+    (support_offset_ticks<0 || support_offset_ticks>RC_MAX_UNITS || (first_ticks>0 && support_offset_ticks==0)) || second_ticks<=first_ticks)return false;
  long progress=((r.side==1?bid:ask)-r.actual_entry_ticks)*r.side;
- int stage=progress>=second_ticks?2:(progress>=first_ticks?1:0);
+ int stage=progress>=second_ticks?2:(first_ticks>0 && progress>=first_ticks?1:0);
  if(stage<=confirmed_stage)return false;
  long target=(stage==2?r.actual_entry_ticks:r.actual_entry_ticks-r.side*support_offset_ticks);
  if(!RCBoundedPositive(target) || (target-current_sl)*r.side<=0)return false;

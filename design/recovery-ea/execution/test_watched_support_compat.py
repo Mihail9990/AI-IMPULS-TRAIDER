@@ -22,8 +22,8 @@ struct RecoveryPriceSignal{bool usable,observed;long sequence;int stage;string s
 RecoveryPriceSignal response{true,true,2,1,"4000.25"};
 void RRClearAction(RRAction &a){a.kind=RR_NONE;}
 bool RRValid(const RRRangeState &,const RRSettings &){return true;}
-bool RecoveryAdoptionUnits(const string&s,double g,bool,long &n){double x=std::stod(s);
-    n=std::lround(x/g); return std::abs(n*g-x)<1e-9;}
+bool RecoveryAdoptionUnits(const string&s,double g,bool allow_zero,long &n){double x=std::stod(s);
+    n=std::lround(x/g); return (allow_zero || x>0) && std::abs(n*g-x)<1e-9;}
 bool RecoveryPriceParse(const string& s,const RecoveryPriceScope&,long after,RecoveryPriceSignal &out){
     out=response;return s=="exact" && response.sequence>after;}
 bool RecoveryPriceRead(const RecoveryPriceScope&s,long n,RecoveryPriceSignal &out){return RecoveryPriceParse("exact",s,n,out);}
@@ -59,6 +59,12 @@ int main(){
     assert(RecoveryReadWatchedPeak(s,cfg,key,1,.01,action));
     s.pending.kind=0;s.support_stage=2;
     assert(!RecoveryReadWatchedPeak(s,cfg,key,1,.01,action));
+    s.support_stage=0;cfg.support_first_ticks=0;key.first_advance="0";
+    response.selected_quote="3999.75";response.stage=1;
+    assert(!got() && !RecoveryReadWatchedPeak(s,cfg,key,1,.01,action));
+    response.selected_quote="3999.60";response.stage=2;
+    assert(RecoveryReadWatchedPeak(s,cfg,key,1,.01,action) && action.kind==4);
+    s.pending.kind=0;key.first_advance=".25";assert(!got());
 }
 """
 class WatchedSupportTest(unittest.TestCase):

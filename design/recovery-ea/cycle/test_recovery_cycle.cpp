@@ -47,6 +47,13 @@ int main() {
  assert(RCProposeSupport(a,399960,0,400060,400080,30,45,25,stop) && stop.stage==1 && stop.target_ticks==400005);
  assert(RCProposeSupport(a,399960,0,400075,400090,30,45,25,stop) && stop.stage==2 && stop.target_ticks==400030);
  assert(!RCProposeSupport(a,399960,0,400075,400090,45,45,25,stop));
+ assert(!RCProposeSupport(a,399960,0,400055,400080,0,40,25,stop));
+ assert(!RCProposeSupport(a,399960,0,400069,400090,0,40,25,stop));
+ assert(RCProposeSupport(a,399960,0,400070,400090,0,40,25,stop) && stop.stage==2 && stop.target_ticks==400030);
+ assert(!RCProposeSupport(b,400100,0,399965,399991,0,40,25,stop));
+ assert(RCProposeSupport(b,400100,0,399965,399990,0,40,25,stop) && stop.stage==2 && stop.target_ticks==400030);
+ assert(RCProposeSupport(b,400100,0,399980,400000,0,30,0,stop) && stop.stage==2);
+ assert(!RCProposeSupport(b,400100,0,399965,399990,0,0,25,stop));
 
  RCClosePlan out{};
  auto fact=close(a);

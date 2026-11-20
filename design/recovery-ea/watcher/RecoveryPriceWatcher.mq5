@@ -1,5 +1,5 @@
 #property strict
-#property version "0.12"
+#property version "0.13"
 #include "RecoveryPriceCatchup.mqh"
 // Third EA, reads one observed position and the quote, then writes a hint to
 // the main EA's local mailbox. No orders, web commands or position mutations.
@@ -107,9 +107,11 @@ bool PriceLoad(const string name,PriceQuery &query,const bool follow=false,const
       f[5]!=(string)ExpectedLogin || f[6]!=ExpectedServer || f[7]!=ExpectedSymbol ||
       !PriceUnsigned(f[8],position) || !PriceUnsigned(f[9],ticket) || position==0 || ticket==0 ||
       (f[10]!="BUY" && f[10]!="SELL") || !PriceNumber(f[11]) ||
-      !PriceNumber(f[12]) || !PriceNumber(f[13]) || StringToDouble(f[12])>=StringToDouble(f[13]) ||
+      (f[12]!="0.0000000000000000" && !PriceNumber(f[12])) || !PriceNumber(f[13]) ||
+      !RecoveryPriceThresholds(StringToDouble(f[12]),StringToDouble(f[13])) ||
       f[count-2]!=(string)ChartID() || f[count-1]!="END" ||
-      (follow && f[14]!="1" && f[14]!="2")) return false;
+      (follow && f[14]!="1" && f[14]!="2") ||
+      (follow && f[14]=="1" && f[12]=="0.0000000000000000")) return false;
    query.nonce=nonce; query.generation=f[4]; query.position=position; query.ticket=ticket;
    query.side=f[10]=="BUY" ? 1 : -1; query.actual_entry=f[11]; query.first=f[12]; query.second=f[13];
    query.next_stage=follow ? (int)StringToInteger(f[14]) : 0;
