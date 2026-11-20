@@ -12,6 +12,7 @@
 #include "../cycle/RecoveryCompletedReverse.mqh"
 #include "../cycle/RecoveryRejectedSupportMove.mqh"
 #include "../cycle/RecoveryAlternatingFill.mqh"
+#include "../cycle/RecoverySupportGap.mqh"
 #include "../verifier/RecoveryClosedMoney.mqh"
 #include "../execution/RecoveryAdoptionInventory.mqh"
 #include "../execution/RecoveryIntentRestart.mqh"
