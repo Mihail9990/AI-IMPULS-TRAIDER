@@ -49,6 +49,22 @@ bool RCCPStageFromWire(const RCRange &before,const RCCloseWireBinding &binding,
    return true;
 }
 
+bool RCCPStageFromReports(const RCRange &before,const RCCloseWireBinding &binding,
+                       const RecoveryHistorySnapshot &history,const RecoveryInventorySnapshot &inventory,
+                       const RCProtectionFact &protection[],const long reentry_distance,
+                       RCCloseCheckpoint &out) {
+   out.key.scope=0;
+   RCCloseCheckpoint candidate;
+   if(RCBuildCloseFromReports(before,binding,history,inventory,protection,candidate.proof)
+      !=RCE_FULLY_CLASSIFIED)return false;
+   candidate.key=binding.key;candidate.before=before;candidate.reentry_distance=reentry_distance;
+   RCRange after;
+   RCClosePlan plan;
+   if(!RCCPDerive(candidate,after,plan))return false;
+   out=candidate;
+   return true;
+}
+
 void RCCPClearPlan(RCClosePlan &plan) {
    plan.classification=RC_UNRESOLVED;plan.current_slot=0;plan.reentry_slot=0;
    plan.reentry_side=0;plan.reentry_ticks=0;plan.keep_existing_opposite=false;

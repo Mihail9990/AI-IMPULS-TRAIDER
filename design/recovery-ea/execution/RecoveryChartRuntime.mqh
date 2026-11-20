@@ -4,6 +4,9 @@
 #include "RecoveryRangeOwner.mqh"
 #include "RecoveryWorkingReverse.mqh"
 #include "RecoveryOcoCancel.mqh"
+#include "RecoverySupportRuntime.mqh"
+#include "RecoveryRangeClosePoll.mqh"
+#include "RecoverySupportCloseOwner.mqh"
 
 struct RecoveryChartRuntime {
  RecoveryLiveSession live_session;
@@ -14,6 +17,13 @@ struct RecoveryChartRuntime {
  RecoveryOcoCancelResult cancel_result;
  bool cancel_started,cancel_skipped;
  RecoveryRangeOwner ranges[2];
+ RecoverySupportRuntime support[2];
+ RecoveryRangeClosePoll close_poll[2];
+ RCCloseCheckpoint close_proof[2];
+ RecoverySupportCloseOwner support_exit[2];
+ ulong close_position[2];
+ string watcher_epoch;
+ long watcher_chart;
  RecoveryWorkingReverse reverse_probe[2];
  ulong reverse_probe_position[2];
  RRSettings settings;
@@ -31,19 +41,26 @@ void RecoveryChartStop(RecoveryChartRuntime &chart)
    chart.cancel_started=false;chart.cancel_skipped=false;chart.cancel_result=ROC_WAIT;
    for(int i=0;i<2;i++) {
     ZeroMemory(chart.ranges[i]);ZeroMemory(chart.reverse_probe[i]);
+    ZeroMemory(chart.support[i]);ZeroMemory(chart.close_poll[i]);ZeroMemory(chart.close_proof[i]);
+    ZeroMemory(chart.support_exit[i]);
+    chart.close_position[i]=0;
     chart.reverse_probe_position[i]=0;
  }
    ZeroMemory(chart.settings);
-   chart.tick=0;chart.step=0;chart.publish_needed=false;
+   chart.tick=0;chart.step=0;chart.publish_needed=false;chart.watcher_epoch="";chart.watcher_chart=0;
   }
 
 bool RecoveryChartStart(RecoveryChartRuntime &chart,const RecoverySessionContext &live,
    const string profile_scope,const string instance_seed,const string verifier_epoch,
-   const long verifier_chart,const RRSettings &settings,const double tick,const double step)
+   const long verifier_chart,const RRSettings &settings,const double tick,const double step,
+   const string watcher_epoch="",const long watcher_chart=0)
   {
    if(chart.live_session.owns_mail || !RRSettingsValid(settings) ||
       settings.support_first_ticks!=0 || settings.support_offset_ticks!=0 ||
       settings.generation>(ulong)LONG_MAX ||
+      ((watcher_epoch!="" || watcher_chart!=0) && (!RecoveryInvHex(watcher_epoch) ||
+          watcher_chart<=0 || watcher_chart==live.chart || watcher_chart==verifier_chart ||
+          watcher_epoch==verifier_epoch)) ||
       !MathIsValidNumber(tick) || tick<=0 || !MathIsValidNumber(step) || step<=0) return false;
    RecoveryChartStop(chart);
    if(!RecoveryLiveSessionStart(chart.live_session,live,profile_scope,instance_seed))return false;
@@ -54,6 +71,7 @@ bool RecoveryChartStart(RecoveryChartRuntime &chart,const RecoverySessionContext
       RecoveryChartStop(chart);return false;
      }
    chart.settings=settings;chart.tick=tick;chart.step=step;
+   chart.watcher_epoch=watcher_epoch;chart.watcher_chart=watcher_chart;
    return true;
   }
 
@@ -139,6 +157,63 @@ void RecoveryChartOcoTimer(RecoveryChartRuntime &chart,const RecoverySessionCont
    if(chart.cancel_result==ROC_CANCELED)chart.panel.configured[other]=false;
   }
 
+// Known positions only. Generated evidence cannot qualify an SL from a
+// price quote or from the prior submit receipt.
+void RecoveryChartCloseFact(const RRRangeState &range,const int stop_class,
+                           const long stop,RCProtectionFact &fact)
+  {
+   fact.scope=range.scope;fact.generation=range.cycle.generation;
+   fact.range_id=range.cycle.range_id;fact.position_id=range.cycle.position_id;
+   fact.anchor_order=range.cycle.active_order;fact.stop_ticks=stop;
+   fact.stop_class=stop_class;fact.confirmed=RCBoundedPositive(stop);
+  }
+
+void RecoveryChartSupportTimer(RecoveryChartRuntime &chart,const RecoverySessionContext &live,
+    const RecoverySessionIntentScope &scope,const RecoveryInventoryScope &verifier,const int i)
+  {
+   if(chart.watcher_chart==0 || chart.watcher_epoch=="")return;
+   RecoverySupportRuntimeTimer(chart.support[i],chart.verifier,chart.live_session.lifecycle,
+        live,scope,verifier,chart.watcher_epoch,chart.watcher_chart,
+        chart.panel.ranges[i],chart.panel.settings,chart.tick,chart.step);
+   const RRRangeState range=chart.panel.ranges[i];
+   if(range.cycle.position_id==0 || range.position_ticket==0)return;
+   if(chart.close_position[i]!=range.cycle.position_id)
+     {
+      chart.close_position[i]=range.cycle.position_id;
+      ZeroMemory(chart.close_poll[i]);ZeroMemory(chart.close_proof[i]);
+    ZeroMemory(chart.support_exit[i]);
+     }
+   if(chart.close_poll[i].state==RCP_IDLE &&
+      !RecoveryBeginRangeClosePoll(chart.close_poll[i],chart.verifier,chart.live_session.lifecycle,
+           live,verifier,range,chart.panel.settings,chart.tick,chart.step))return;
+   if(chart.close_poll[i].state==RCP_UNRESOLVED)return;
+   if(chart.close_poll[i].state==RCP_DONE)
+     {
+      const RCCloseCheckpoint verified=chart.close_proof[i];
+      if(RCClassifyClose(verified.before,verified.proof)==RC_SUPPORT_SL)
+        {
+         if(chart.support_exit[i].phase==RSCO_IDLE &&
+            !RecoveryBeginSupportCloseOwner(chart.support_exit[i],chart.ranges[i],chart.panel,
+                    chart.live_session.lifecycle,live,scope,chart.verifier,verified,
+                    chart.close_poll[i].verified_sequence,chart.tick,chart.step))return;
+         if(chart.support_exit[i].phase==RSCO_REQUEST || chart.support_exit[i].phase==RSCO_READ)
+            RecoveryStepSupportCloseOwner(chart.support_exit[i],chart.ranges[i],chart.panel,
+                            chart.live_session.lifecycle,live,scope,verifier);
+        }
+      return;
+     }
+   RCProtectionFact facts[2];
+   RecoveryChartCloseFact(range,RC_INITIAL_LEVEL,range.initial_sl,facts[0]);
+   RecoveryChartCloseFact(range,RC_SUPPORT_LEVEL,
+      range.support_stage==2 && range.live_sl==range.cycle.actual_entry_ticks ? range.live_sl : 0,facts[1]);
+   const RecoveryClosePollResult closed=RecoveryRangeClosePollStep(chart.close_poll[i],
+      chart.live_session.lifecycle,live,range,chart.panel.settings,facts,chart.close_proof[i]);
+   if(closed==RCP_PROOF && chart.ranges[i].revision<ULONG_MAX &&
+      RCClassifyClose(chart.close_proof[i].before,chart.close_proof[i].proof)==RC_FULL_SL &&
+      RRRecordAlternatingClose(chart.ranges[i].ledger,chart.close_proof[i])==RR_ALT_CLOSE_APPLIED)
+      ++chart.ranges[i].revision;
+  }
+
 void RecoveryChartRangeTimer(RecoveryChartRuntime &chart,const RecoverySessionContext &live,
     const RecoverySessionIntentScope &scope,const RecoveryInventoryScope &verifier,const int range_id)
   {
@@ -170,6 +245,7 @@ void RecoveryChartRangeTimer(RecoveryChartRuntime &chart,const RecoverySessionCo
       RecoverySessionAlternatingResult event_result;
       RecoveryRangeOwnerOrdinaryTimer(chart.ranges[i],chart.panel,chart.live_session.lifecycle,
                                       live,scope,verifier,event_result);
+      RecoveryChartSupportTimer(chart,live,scope,verifier,i);
      }
   }
 

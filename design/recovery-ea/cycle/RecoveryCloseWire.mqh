@@ -46,18 +46,20 @@ bool RCAnchorType(const ulong type,const int side) {
    return false;
 }
 
-RCEvidenceResult RCBuildCloseFromWire(const RCRange &r,const RCCloseWireBinding &b,
-                                      const string history_wire,const string inventory_wire,
+// The typed snapshots must have been read for the exact challenges in b.
+RCEvidenceResult RCBuildCloseFromReports(const RCRange &r,const RCCloseWireBinding &b,
+                                      const RecoveryHistorySnapshot &hist,const RecoveryInventorySnapshot &inv,
                                       const RCProtectionFact &protection[],RCCloseProof &proof) {
    RCClearCloseProof(proof);
    if(!RCCloseWireScope(b) || !RCBound(r,b.key.generation,b.key.range_id) ||
-      !RCValidSide(r.side) || !RCBoundedPositive(r.filled_steps))return RCE_UNRESOLVED;
-   RecoveryHistorySnapshot hist;
-   RecoveryInventorySnapshot inv;
-   if(!RecoveryHistoryParse(history_wire,b.history,hist) || !hist.usable || !hist.observed ||
-      hist.sequence<=b.history_after ||
-      !RecoveryInvParse(inventory_wire,b.inventory,inv) || !inv.usable || !inv.complete ||
-      inv.sequence<=b.inventory_after) return RCE_UNRESOLVED;
+      !RCValidSide(r.side) || !RCBoundedPositive(r.filled_steps) ||
+      !hist.usable || !hist.observed || hist.sequence<=b.history_after ||
+      !inv.usable || !inv.complete || inv.sequence<=b.inventory_after ||
+      hist.order_count<0 || hist.order_count>128 ||
+      hist.deal_count<0 || hist.deal_count>128 ||
+      inv.position_count<0 || inv.position_count>128 || inv.order_count<0 || inv.order_count>128 ||
+      ArraySize(hist.rows)!=hist.order_count+hist.deal_count ||
+      ArraySize(inv.rows)!=inv.position_count+inv.order_count) return RCE_UNRESOLVED;
    RCExitHistory h;
    h.key=b.key; h.complete=true; h.anchor_final=false; h.anchor_matches_position=false; h.observed_entry_steps=0;
    RCCloseInventory i;
@@ -114,6 +116,17 @@ RCEvidenceResult RCBuildCloseFromWire(const RCRange &r,const RCCloseWireBinding 
    }
    if(h.observed_entry_steps!=anchor_initial-anchor_remainder)return RCE_UNRESOLVED;
    return RCBuildCloseProof(r,b.key,h,i,exits,protection,proof);
+}
+
+RCEvidenceResult RCBuildCloseFromWire(const RCRange &r,const RCCloseWireBinding &b,
+                                      const string history_wire,const string inventory_wire,
+                                      const RCProtectionFact &protection[],RCCloseProof &proof) {
+   RCClearCloseProof(proof);
+   RecoveryHistorySnapshot hist;
+   RecoveryInventorySnapshot inv;
+   if(!RCCloseWireScope(b) || !RecoveryHistoryParse(history_wire,b.history,hist) ||
+      !RecoveryInvParse(inventory_wire,b.inventory,inv))return RCE_UNRESOLVED;
+   return RCBuildCloseFromReports(r,b,hist,inv,protection,proof);
 }
 
 // Mutates only supplied in-memory range once classified. Trading EA must

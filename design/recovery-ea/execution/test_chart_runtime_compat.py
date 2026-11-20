@@ -9,7 +9,7 @@ SHIM=r"""
 #include <string>
 using string=std::string;
 using ulong=unsigned long;
-struct RecoverySessionContext {long login,magic;string server,symbol;};
+struct RecoverySessionContext {long login,magic;string server,symbol;long chart=99;};
 struct RecoverySessionLifecycle {string epoch;};
 struct RRSettings {ulong scope,generation;long support_first_ticks,support_offset_ticks;};
 bool RRSettingsValid(const RRSettings& c){return c.scope&&c.generation;}
@@ -21,9 +21,10 @@ struct RecoveryLiveSession{
  int mailbox,mail,panel_seen;
 };
 enum {REC_CONTROL_IDLE,REC_CONTROL_RANGES};
-struct TestCycle {ulong position_id;};
-struct TestRange {TestCycle cycle;};
-struct RecoveryPanelControl {int mode;bool configured[2];TestRange ranges[2];};
+struct TestCycle {ulong position_id,generation,active_order;int range_id;long actual_entry_ticks;};
+struct RRRangeState {TestCycle cycle;ulong scope,position_ticket;long initial_sl,live_sl;int support_stage;};
+using TestRange=RRRangeState;
+struct RecoveryPanelControl {int mode;bool configured[2];TestRange ranges[2];RRSettings settings;};
 struct RecoveryEvidenceOwner {string verifier_epoch;long verifier_chart;};
 enum {RRO_UNUSED,RRO_PRIMARY_PENDING,RRO_ORDINARY,RRO_FINAL,RRO_PRIMARY_CLAIMED};
 struct TestOpening {bool reserved,sl_required;int reverse;};
@@ -37,7 +38,7 @@ struct RecoveryRangeOwner {
  int phase,sent,received,id;
  RecoveryPrimarySubmitResult primary;
  RRFilled first_proof;
- struct PrimaryPump{RecoveryPrimaryFillBinding binding;};PrimaryPump primary_pump;TestOpening opening;ulong next_exact_ticket,armed_position;TestOrdinary ordinary;
+ struct PrimaryPump{RecoveryPrimaryFillBinding binding;};PrimaryPump primary_pump;TestOpening opening;ulong next_exact_ticket,armed_position,revision;int ledger;TestOrdinary ordinary;
 };
 struct RecoverySessionIntentScope {string executor_epoch,server,symbol;long login,magic;ulong scope,generation;};
 struct RecoveryInventoryScope {string nonce,executor_epoch,verifier_epoch,server,symbol;long login,magic,generation,verifier_chart;};
@@ -77,6 +78,51 @@ bool RecoveryBeginWorkingReverse(RecoveryWorkingReverse& w,const RecoverySession
 int RecoveryStepWorkingReverse(RecoveryWorkingReverse& w,const RecoverySessionLifecycle&,const RecoverySessionContext&,
  const RecoverySessionIntentScope&,TestRange&,TestOpening& p){++working;w.state=2;p.reserved=false;return RWR_ACTIVE;}
 void RecoveryOrdinaryEventReset(TestOrdinary& o){o={};}
+bool RecoveryInvHex(const string& s){return s.size()==32;}
+bool RCBoundedPositive(long n){return n>0;}
+struct RecoverySupportRuntime {int x;};
+enum {RCP_IDLE,RCP_DONE,RCP_UNRESOLVED,RC_INITIAL_LEVEL,RC_SUPPORT_LEVEL,RC_SUPPORT_SL,RC_FULL_SL,RR_ALT_CLOSE_APPLIED};
+enum RecoveryClosePollResult{RCP_PROOF};
+struct RecoveryRangeClosePoll{int state;ulong verified_sequence;};
+struct RCCloseCheckpoint {int value,before,proof;};
+enum {RSCO_IDLE,RSCO_REQUEST,RSCO_READ,RSCO_STAGED};
+struct RecoverySupportCloseOwner{int phase;};
+int reentry_stages=0,full_counts=0;
+int RCClassifyClose(int,int proof){return proof;}
+int RRRecordAlternatingClose(int& count,const RCCloseCheckpoint& re){
+ assert(re.proof==RC_FULL_SL);++count;++full_counts;return RR_ALT_CLOSE_APPLIED;
+}
+bool RecoveryBeginSupportCloseOwner(RecoverySupportCloseOwner& task,const RecoveryRangeOwner&,
+ const RecoveryPanelControl&,const RecoverySessionLifecycle&,const RecoverySessionContext&,
+ const RecoverySessionIntentScope&,RecoveryEvidenceOwner&,const RCCloseCheckpoint& proof,ulong seq,double,double){
+ assert(seq==19&&proof.proof==RC_SUPPORT_SL);task.phase=RSCO_REQUEST;return true;
+}
+void RecoveryStepSupportCloseOwner(RecoverySupportCloseOwner& task,RecoveryRangeOwner&,
+ RecoveryPanelControl&,const RecoverySessionLifecycle&,const RecoverySessionContext&,
+ const RecoverySessionIntentScope&,const RecoveryInventoryScope&){
+ assert(task.phase==RSCO_REQUEST);task.phase=RSCO_STAGED;++reentry_stages;
+}
+struct RCProtectionFact {ulong scope,generation,position_id,anchor_order;int range_id,stop_class;
+                         long stop_ticks;bool confirmed;};
+int support_ticks=0,close_reads=0;
+bool closing=false;int close_type=RC_SUPPORT_SL;
+void RecoverySupportRuntimeTimer(RecoverySupportRuntime&,RecoveryEvidenceOwner&,const RecoverySessionLifecycle&,
+ const RecoverySessionContext&,const RecoverySessionIntentScope&,const RecoveryInventoryScope&,const string&,
+ long watcher,RRRangeState& range,const RRSettings&,double,double){
+ assert(watcher==77&&range.cycle.position_id!=0);
+ ++support_ticks;range.support_stage=2;range.live_sl=range.cycle.actual_entry_ticks;
+}
+bool RecoveryBeginRangeClosePoll(RecoveryRangeClosePoll& probe,RecoveryEvidenceOwner&,const RecoverySessionLifecycle&,
+ const RecoverySessionContext&,const RecoveryInventoryScope&,const RRRangeState&,const RRSettings&,double,double){
+ if(!closing)return false;
+ probe.state=22;return true;
+}
+RecoveryClosePollResult RecoveryRangeClosePollStep(RecoveryRangeClosePoll& probe,const RecoverySessionLifecycle&,const RecoverySessionContext&,
+ const RRRangeState&,const RRSettings&,const RCProtectionFact* f,RCCloseCheckpoint& out){
+ assert(f[0].confirmed&&f[0].stop_class==RC_INITIAL_LEVEL&&f[0].stop_ticks==399920);
+ assert(f[1].confirmed&&f[1].stop_class==RC_SUPPORT_LEVEL&&f[1].stop_ticks==400000);
+ ++close_reads;out.value=1;out.proof=close_type;probe.state=RCP_DONE;probe.verified_sequence=19;return RCP_PROOF;
+}
 struct RecoverySessionAlternatingResult{};
 struct RecoveryPanelApplyResult{};
 struct MqlTradeTransaction {int range;};
@@ -100,6 +146,9 @@ bool RecoveryPanelMailboxPoll(int&,int&,const RecoverySessionLifecycle&,const Re
  if(!configure)return false;
  configure=false;panel.mode=REC_CONTROL_RANGES;
  panel.configured[0]=true;panel.configured[1]=two_ranges;panel.ranges[0].cycle.position_id=10;panel.ranges[1].cycle.position_id=11;
+ for(auto &range:panel.ranges) {
+   range.position_ticket=13;range.cycle.actual_entry_ticks=400000;range.initial_sl=399920;
+ }
  return true;
 }
 bool RecoveryRangeOwnerSubmit(RecoveryRangeOwner& u,RecoveryPanelControl&,int id,const RecoverySessionLifecycle& l,
@@ -180,10 +229,18 @@ int main(){
  good=true;two_ranges=false;configure=true;proof_range=1;
  canceled=cancel_begins=cancel_sends=reverse_sends=0;confirm_cancel=false;
  const int before=submits;
- assert(RecoveryChartStart(single,live,"profile","single","verifier",2,settings,.01,.02));
+ assert(RecoveryChartStart(single,live,"profile","single","verifier",2,settings,.01,.02,string(32,'a'),77));
  assert(RecoveryChartOnTimer(single,live));
  assert(submits==before+1&&single.oco.winner_range_id==1&&cancel_begins==0);
+ assert(support_ticks==1&&close_reads==0);
+ closing=true;
  assert(RecoveryChartOnTimer(single,live)&&canceled==0);
+ assert(support_ticks==2&&close_reads==1&&single.close_proof[0].value==1);
+ assert(RecoveryChartOnTimer(single,live)&&close_reads==1&&reentry_stages==1);
+ assert(RecoveryChartOnTimer(single,live)&&reentry_stages==1);
+ close_type=RC_FULL_SL;
+ single.panel.ranges[0].cycle.position_id=90;
+ assert(RecoveryChartOnTimer(single,live)&&full_counts==1&&reentry_stages==1);
  RecoveryChartStop(single);
 }
 """

@@ -59,13 +59,15 @@ bool RecoveryAdoptionBound(const RecoveryAdoptionBinding &binding,const Recovery
           MathIsValidNumber(binding.volume_step) && binding.volume_step>0;
 }
 
-RecoveryAdoptionResult RecoveryCheckAdoptionInventory(const string wire,
+// Typed snapshot must come from the correlated scope-checking parser/reader.
+RecoveryAdoptionResult RecoveryFoldAdoptionInventory(const RecoveryInventorySnapshot &snapshot,
          const RecoveryInventoryScope &request,const RecoveryAdoptionBinding &binding,
          const RecoveryAdoptionIntent &intent) {
-   if(!RecoveryAdoptionBound(binding,request,intent)) return RA_UNRESOLVED;
-   RecoveryInventorySnapshot snapshot;
-   if(!RecoveryInvParse(wire,request,snapshot) || !snapshot.usable || !snapshot.complete ||
-      snapshot.sequence<=0 || (ulong)snapshot.sequence<=intent.verify_after) return RA_UNRESOLVED;
+   if(!RecoveryAdoptionBound(binding,request,intent) || !snapshot.usable || !snapshot.complete ||
+      snapshot.sequence<=0 || (ulong)snapshot.sequence<=intent.verify_after ||
+      snapshot.position_count<0 || snapshot.position_count>128 ||
+      snapshot.order_count<0 || snapshot.order_count>128 ||
+      ArraySize(snapshot.rows)!=snapshot.position_count+snapshot.order_count) return RA_UNRESOLVED;
 
    RecoveryAdoptionProof proof;
    proof.scope=binding.intent_scope; proof.sequence=(ulong)snapshot.sequence; proof.coherent=true;
@@ -130,6 +132,14 @@ RecoveryAdoptionResult RecoveryCheckAdoptionInventory(const string wire,
       proof.order_state=RA_ORDER_WORKING_STOP;
    }
    return RecoveryCheckAdoption(intent,proof);
+}
+
+RecoveryAdoptionResult RecoveryCheckAdoptionInventory(const string wire,
+         const RecoveryInventoryScope &request,const RecoveryAdoptionBinding &binding,
+         const RecoveryAdoptionIntent &intent) {
+   RecoveryInventorySnapshot snapshot;
+   if(!RecoveryInvParse(wire,request,snapshot))return RA_UNRESOLVED;
+   return RecoveryFoldAdoptionInventory(snapshot,request,binding,intent);
 }
 
 #endif
