@@ -3,11 +3,16 @@
 #include "RecoveryLiveSession.mqh"
 #include "RecoveryRangeOwner.mqh"
 #include "RecoveryWorkingReverse.mqh"
+#include "RecoveryOcoCancel.mqh"
 
 struct RecoveryChartRuntime {
  RecoveryLiveSession live_session;
  RecoveryPanelControl panel;
  RecoveryEvidenceOwner verifier;
+ RecoveryRangeOco oco;
+ RecoveryOcoCancel losing_stop;
+ RecoveryOcoCancelResult cancel_result;
+ bool cancel_started;
  RecoveryRangeOwner ranges[2];
  RecoveryWorkingReverse reverse_probe[2];
  ulong reverse_probe_position[2];
@@ -22,6 +27,8 @@ void RecoveryChartStop(RecoveryChartRuntime &chart)
   {
    RecoveryLiveSessionStop(chart.live_session);
    ZeroMemory(chart.panel);ZeroMemory(chart.verifier);
+   ZeroMemory(chart.oco);ZeroMemory(chart.losing_stop);
+   chart.cancel_started=false;chart.cancel_result=ROC_WAIT;
    for(int i=0;i<2;i++) {
     ZeroMemory(chart.ranges[i]);ZeroMemory(chart.reverse_probe[i]);
     chart.reverse_probe_position[i]=0;
@@ -101,11 +108,41 @@ void RecoveryChartWorkingReverse(RecoveryChartRuntime &chart,const RecoverySessi
      }
   }
 
+// Cancel only the other range's recorded primary STOP. The winning
+// range's opposite order is not a candidate for this action.
+void RecoveryChartOcoTimer(RecoveryChartRuntime &chart,const RecoverySessionContext &live,
+   const RecoverySessionIntentScope &scope,const RecoveryInventoryScope &verifier)
+  {
+   const int winner=chart.oco.winner_range_id;
+   if(winner<1 || winner>2)return;
+   const int win=winner-1,other=2-winner;
+   if(!chart.panel.configured[other] || chart.ranges[other].primary.ticket==0 ||
+      chart.ranges[win].first_proof.entry.executed_order==0) return;
+   if(!chart.cancel_started)
+     {
+      RecoveryExactReportScope q;
+      q.binding=verifier;q.order_ticket=chart.ranges[other].primary.ticket;
+      const string identity=scope.executor_epoch+":"+chart.ranges[other].primary.key.id+":"+
+         (string)q.order_ticket+":"+(string)chart.oco.winner_order;
+      q.binding.nonce=RecoveryOwnerNonce("loser-cancel-exact",identity);
+      const string tag=RecoveryOwnerNonce("loser-cancel-publisher",identity);
+      if(!RecoveryBeginOcoCancel(chart.losing_stop,chart.live_session.lifecycle,live,scope,chart.panel,
+           winner,chart.ranges[win].primary_pump.binding,chart.ranges[win].first_proof,
+           other+1,chart.ranges[other].primary,q,0,tag,chart.tick,chart.step))return;
+      chart.cancel_started=true;
+     }
+   if(chart.cancel_result!=ROC_CANCELED && chart.cancel_result!=ROC_UNKNOWN)
+      chart.cancel_result=RecoveryStepOcoCancel(chart.losing_stop,chart.live_session.lifecycle,live,
+                                                scope,chart.panel);
+   if(chart.cancel_result==ROC_CANCELED)chart.panel.configured[other]=false;
+  }
+
 void RecoveryChartRangeTimer(RecoveryChartRuntime &chart,const RecoverySessionContext &live,
     const RecoverySessionIntentScope &scope,const RecoveryInventoryScope &verifier,const int range_id)
   {
    const int i=range_id-1;
-   if(i<0 || i>1 || !chart.panel.configured[i])return;
+   if(i<0 || i>1 || !chart.panel.configured[i] ||
+      (chart.oco.winner_range_id!=0 && chart.oco.winner_range_id!=range_id))return;
    if(chart.ranges[i].phase==RRO_UNUSED)
       RecoveryRangeOwnerSubmit(chart.ranges[i],chart.panel,range_id,chart.live_session.lifecycle,
                                live,scope,chart.tick,chart.step);
@@ -114,7 +151,7 @@ void RecoveryChartRangeTimer(RecoveryChartRuntime &chart,const RecoverySessionCo
       RecoveryRangeOwnerBindPrimary(chart.ranges[i],chart.panel,chart.live_session.lifecycle,
                        live,scope,chart.verifier,0,chart.tick,chart.step);
       RecoveryRangeOwnerPrimaryTimer(chart.ranges[i],chart.panel,chart.live_session.lifecycle,
-                                     live,scope,verifier);
+                                     live,scope,verifier,chart.oco);
      }
    if(chart.ranges[i].phase==RRO_ORDINARY)
      {
@@ -144,6 +181,8 @@ bool RecoveryChartOnTimer(RecoveryChartRuntime &chart,const RecoverySessionConte
    for(int id=1;id<=2;id++)
       if(RecoveryLiveSessionCurrent(chart.live_session,live))
          RecoveryChartRangeTimer(chart,live,scope,verifier,id);
+   if(RecoveryLiveSessionCurrent(chart.live_session,live))
+      RecoveryChartOcoTimer(chart,live,scope,verifier);
    return true;
   }
 
@@ -154,7 +193,8 @@ void RecoveryChartOnTrade(RecoveryChartRuntime &chart,const RecoverySessionConte
    RecoverySessionIntentScope scope;RecoveryInventoryScope verifier;
    RecoveryChartBindings(chart,live,scope,verifier);
    for(int i=0;i<2;i++)
-      RecoveryRangeOwnerOrdinaryTrade(chart.ranges[i],chart.panel,chart.live_session.lifecycle,
+      if(chart.oco.winner_range_id==i+1)
+         RecoveryRangeOwnerOrdinaryTrade(chart.ranges[i],chart.panel,chart.live_session.lifecycle,
                                      live,scope,verifier,event);
   }
 #endif

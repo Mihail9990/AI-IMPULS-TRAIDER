@@ -6,8 +6,29 @@
 #include "RecoveryOwnerEvidence.mqh"
 
 enum RecoveryRangeOwnerPhase {
- RRO_UNUSED=0,RRO_PRIMARY_PENDING,RRO_ORDINARY,RRO_FINAL
+ RRO_UNUSED=0,RRO_PRIMARY_PENDING,RRO_ORDINARY,RRO_FINAL,
+ RRO_PRIMARY_CLAIMED
 };
+
+// Shared by both ranges in a fresh boot. A winning exact fill is latched
+// before any follow-up submission. Broker fill chronology is not inferred.
+struct RecoveryRangeOco {
+ string executor_epoch;
+ ulong scope,generation,winner_order,winner_position;
+ int winner_range_id;
+};
+
+bool RecoveryRangeOcoWithin(const RecoveryRangeOco &oco,const RecoverySessionIntentScope &scope) {
+ return (oco.winner_range_id==1 || oco.winner_range_id==2) &&
+    oco.winner_order!=0 && oco.winner_position!=0 &&
+    oco.executor_epoch==scope.executor_epoch && oco.scope==scope.scope &&
+    oco.generation==scope.generation;
+}
+
+bool RecoveryRangeOcoMaySubmit(const RecoveryRangeOco &oco) {
+ return oco.winner_range_id==0 && oco.winner_order==0 && oco.winner_position==0 &&
+        oco.scope==0 && oco.generation==0 && oco.executor_epoch=="";
+}
 
 // One boot-local owner per configured panel slot. The authoritative range is
 // always panel.ranges[range_id-1]; this object never stores a second range.
@@ -17,6 +38,7 @@ struct RecoveryRangeOwner {
  string executor_epoch;
  ulong scope,generation,revision,next_exact_ticket,armed_position;
  RecoveryPrimarySubmitResult primary;
+ RRFilled first_proof; // exact winning proof, retained for the cancel service
  RecoveryPrimaryOpenResult first_open;
  RecoveryPrimaryFillPump primary_pump;
  RROpeningPair opening;
@@ -112,14 +134,41 @@ bool RecoveryRangeOwnerBindPrimary(RecoveryRangeOwner &owner,const RecoveryPanel
  return true;
 }
 
+// Only the owner of an exact, independently verified primary fill can
+// claim. Once chosen, the other timer stops without inferring an outcome.
+bool RecoveryRangeOcoClaim(RecoveryRangeOco &oco,
+    const RecoveryRangeOwner &owner,const RecoverySessionIntentScope &scope,
+    const RecoveryPrimaryFillBinding &binding,const RRFilled &proof) {
+ if(!RecoveryRangeOcoMaySubmit(oco) || owner.phase!=RRO_PRIMARY_PENDING ||
+    owner.executor_epoch!=scope.executor_epoch || owner.scope!=scope.scope || owner.generation!=scope.generation ||
+    (owner.range_id!=1 && owner.range_id!=2) || owner.primary.ticket==0 ||
+    !proof.independently_verified || !proof.entry.independently_verified ||
+    !proof.entry.history_complete || !proof.entry.remainder_reconciled ||
+    proof.entry.generation!=owner.generation || proof.entry.range_id!=owner.range_id ||
+    proof.entry.position_id==0 || proof.position_ticket==0 ||
+    proof.entry.expected_order!=owner.primary.ticket || proof.entry.executed_order!=owner.primary.ticket ||
+    binding.scope!=owner.scope || binding.exact.order_ticket!=owner.primary.ticket ||
+    binding.history.anchor_order!=owner.primary.ticket ||
+    proof.entry.position_id!=binding.history.position_identifier ||
+    !RCBoundedPositive(proof.entry.actual_entry_ticks) || proof.entry.side!=owner.primary.action.side || proof.entry.planned_steps!=owner.primary.action.volume_steps ||
+    !RCBoundedPositive(proof.entry.filled_steps) || proof.entry.filled_steps>proof.entry.planned_steps ||
+    proof.entry.active_steps!=proof.entry.filled_steps)
+    return false;
+ oco.executor_epoch=scope.executor_epoch;oco.scope=scope.scope;oco.generation=scope.generation;
+ oco.winner_order=owner.primary.ticket;oco.winner_position=proof.entry.position_id;
+ oco.winner_range_id=owner.range_id;
+ return true;
+}
+
 // Advance only from the already-normalized proof yielded by this range's
 // primary pump. A repeated broker notification cannot invoke this call twice.
 RecoveryPrimaryPumpResult RecoveryRangeOwnerPrimaryTimer(RecoveryRangeOwner &owner,
     RecoveryPanelControl &panel,const RecoverySessionLifecycle &session,
     const RecoverySessionContext &live,const RecoverySessionIntentScope &scope,
-    const RecoveryInventoryScope &live_verifier) {
+    const RecoveryInventoryScope &live_verifier,RecoveryRangeOco &oco) {
  ulong ticket;
  if(owner.primary_pump.state==RPP_UNUSED ||
+    !RecoveryRangeOcoMaySubmit(oco) ||
     !RecoveryRangeOwnerPrimaryTicket(owner,panel,session,live,scope,ticket) ||
     owner.primary_pump.binding.exact.order_ticket!=ticket ||
     !RecoveryAlternatingSameSession(owner.primary_pump.binding.inventory,live_verifier))
@@ -128,6 +177,9 @@ RecoveryPrimaryPumpResult RecoveryRangeOwnerPrimaryTimer(RecoveryRangeOwner &own
  const RecoveryPrimaryPumpResult result=RecoveryPrimaryPumpStep(owner.primary_pump,
                               panel.ranges[owner.range_id-1],panel.settings,proof);
  if(result!=RPP_PROOF)return result;
+ if(!RecoveryRangeOcoClaim(oco,owner,scope,owner.primary_pump.binding,proof))return RPP_STOPPED;
+ owner.first_proof=proof;
+ owner.phase=RRO_PRIMARY_CLAIMED;
  if(!RecoveryOpenVerifiedPrimaryProof(owner.primary_pump.binding,session,live,scope,proof,
             panel.ranges[owner.range_id-1],panel.settings,owner.opening,owner.ledger,owner.first_open))
     return RPP_STOPPED;

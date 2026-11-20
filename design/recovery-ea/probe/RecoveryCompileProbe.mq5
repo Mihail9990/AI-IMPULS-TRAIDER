@@ -19,6 +19,7 @@
 #include "../execution/RecoveryLiveSession.mqh"
 #include "../execution/RecoveryPrimaryService.mqh"
 #include "../execution/RecoveryChartRuntime.mqh"
+#include "../execution/RecoveryOcoCancel.mqh"
 #include "../execution/RecoverySingleSupportService.mqh"
 #include "../execution/RecoverySupportRotationDispatch.mqh"
 #include "../execution/RecoveryExactOrderEffect.mqh"

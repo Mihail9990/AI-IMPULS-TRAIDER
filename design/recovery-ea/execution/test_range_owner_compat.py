@@ -33,7 +33,7 @@ struct RecoveryAlternatingEvidenceBinding {RecoveryInventoryScope inventory;ulon
 struct RecoveryOwnerEvidence {RecoveryAlternatingEvidenceBinding binding;string publisher_tag;};
 struct MqlTradeTransaction {ulong ticket;};
 std::map<string,ulong> journal;
-int primary_sends=0,opening_sends=0,ordinary_sends=0,disk_reads=0;
+int primary_sends=0,opening_sends=0,ordinary_sends=0,disk_reads=0,primary_steps=0;
 bool uncertain=false;
 bool RecoveryAlternatingSameSession(const RecoveryInventoryScope& a,const RecoveryInventoryScope& b) {
  return a.executor_epoch==b.executor_epoch&&a.verifier_epoch==b.verifier_epoch&&a.verifier_chart==b.verifier_chart&&
@@ -94,6 +94,7 @@ bool RecoveryPrimaryPumpBegin(RecoveryPrimaryFillPump& p,const RRRangeState& s,c
 }
 RecoveryPrimaryPumpResult RecoveryPrimaryPumpStep(RecoveryPrimaryFillPump& p,const RRRangeState& s,
  const RRSettings& cfg,RRFilled& f){
+ ++primary_steps;
  if(p.state!=RPP_WAIT_TERMINAL)return RPP_STOPPED;
  if(!primary_ready)return RPP_WAIT;
  const ulong id=500+static_cast<ulong>(s.cycle.range_id),ord=p.binding.exact.order_ticket;
@@ -151,6 +152,7 @@ int main(){
  RecoveryControlCommand cmd{REC_CONTROL_CONFIGURE,2,{{1,1,400000},{2,-1,399800}}};
  assert(RecoveryApplyPanelControl(panel,cmd,cfg)==REC_CONTROL_APPLIED);
  RecoveryRangeOwner owners[2]{};
+ RecoveryRangeOco oco{};
  RecoveryEvidenceOwner v{live,epoch,string(32,'3'),99,0};
  const RecoveryInventoryScope verifier{string(32,'1'),epoch,v.verifier_epoch,static_cast<long>(cfg.generation),
               live.login,live.server,live.symbol,live.magic,99};
@@ -164,14 +166,14 @@ int main(){
  assert(!RecoveryRangeOwnerBindPrimary(owners[0],panel,life,live,scope,v,0,.02,.01)&&v.serial==0);
  assert(RecoveryRangeOwnerBindPrimary(owners[0],panel,life,live,scope,v,0,.01,.01)&&v.serial==1);
  assert(!RecoveryRangeOwnerBindPrimary(owners[0],panel,life,live,scope,v,0,.01,.01)&&v.serial==1);
- assert(RecoveryRangeOwnerPrimaryTimer(owners[0],panel,life,live,scope,verifier)==RPP_WAIT&&opening_sends==0);
+ assert(RecoveryRangeOwnerPrimaryTimer(owners[0],panel,life,live,scope,verifier,oco)==RPP_WAIT&&opening_sends==0);
  auto other=verifier;other.verifier_chart++;
- assert(RecoveryRangeOwnerPrimaryTimer(owners[0],panel,life,live,scope,other)==RPP_STOPPED&&opening_sends==0);
+ assert(RecoveryRangeOwnerPrimaryTimer(owners[0],panel,life,live,scope,other,oco)==RPP_STOPPED&&opening_sends==0);
  primary_ready=true;
- assert(RecoveryRangeOwnerPrimaryTimer(owners[0],panel,life,live,scope,verifier)==RPP_PROOF&&opening_sends==1);
+ assert(RecoveryRangeOwnerPrimaryTimer(owners[0],panel,life,live,scope,verifier,oco)==RPP_PROOF&&opening_sends==1);
  assert(disk_reads==0&&owners[0].phase==RRO_ORDINARY&&owners[0].next_exact_ticket==201&&owners[0].revision==1);
  assert(panel.ranges[0].cycle.position_id==501&&panel.ranges[1].cycle.position_id==0);
- assert(RecoveryRangeOwnerPrimaryTimer(owners[0],panel,life,live,scope,verifier)==RPP_STOPPED&&opening_sends==1);
+ assert(RecoveryRangeOwnerPrimaryTimer(owners[0],panel,life,live,scope,verifier,oco)==RPP_STOPPED&&opening_sends==1);
  assert(RecoveryRangeOwnerArmOrdinary(owners[0],panel,life,live,scope,v,0,.01,.01));
  assert(!RecoveryRangeOwnerArmOrdinary(owners[0],panel,life,live,scope,v,0,.01,.01)&&v.serial==2);
  assert(!RecoveryRangeOwnerOrdinaryTrade(owners[0],panel,life,live,scope,verifier,{202}));
@@ -184,6 +186,56 @@ int main(){
  assert(panel.ranges[0].cycle.position_id==999&&panel.ranges[1].phase==RR_NEW);
  assert(RecoveryRangeOwnerOrdinaryTimer(owners[0],panel,life,live,scope,verifier,result)==RAS_WAITING&&ordinary_sends==1);
  assert(RecoveryRangeOwnerArmOrdinary(owners[0],panel,life,live,scope,v,0,.01,.01)&&v.serial==3);
+ assert(!RecoveryRangeOcoMaySubmit(oco)&&RecoveryRangeOcoWithin(oco,scope));
+ assert(oco.winner_range_id==1&&oco.winner_order==101&&oco.winner_position==501);
+ assert(owners[0].first_proof.entry.executed_order==101);
+
+ // Two exact submitted tickets are recognized, but the first independently
+ // processed proof is the only winner, even when the other pump is ready.
+ journal.clear();primary_sends=0;opening_sends=0;ordinary_sends=0;primary_steps=0;
+ RecoveryPanelControl both{};
+ assert(RecoveryApplyPanelControl(both,cmd,cfg)==REC_CONTROL_APPLIED);
+ RecoveryRangeOwner rr[2]{};
+ RecoveryRangeOco two{};
+ uncertain=false;
+ for(int i=0;i<2;i++) {
+    assert(RecoveryRangeOwnerSubmit(rr[i],both,i+1,life,live,scope,.01,.01));
+    assert(RecoveryRangeOwnerBindPrimary(rr[i],both,life,live,scope,v,0,.01,.01));
+ }
+ assert(primary_sends==2&&RecoveryRangeOcoMaySubmit(two));
+ RRFilled foreign{};
+ assert(!RecoveryRangeOcoClaim(two,rr[0],scope,rr[0].primary_pump.binding,foreign));
+ assert(RecoveryRangeOcoMaySubmit(two));
+ assert(RecoveryRangeOwnerPrimaryTimer(rr[1],both,life,live,scope,verifier,two)==RPP_PROOF);
+ assert(two.winner_range_id==2&&two.winner_order==102&&two.winner_position==502);
+ assert(rr[1].first_proof.entry.executed_order==102&&opening_sends==1&&primary_steps==1);
+ assert(RecoveryRangeOwnerPrimaryTimer(rr[0],both,life,live,scope,verifier,two)==RPP_STOPPED);
+ assert(RecoveryRangeOwnerPrimaryTimer(rr[1],both,life,live,scope,verifier,two)==RPP_STOPPED);
+ assert(opening_sends==1&&primary_steps==1&&rr[0].phase==RRO_PRIMARY_PENDING);
+ assert(!rr[0].opening.reserved&&both.ranges[0].cycle.position_id==0);
+ assert(!RecoveryRangeOwnerArmOrdinary(rr[0],both,life,live,scope,v,0,.01,.01));
+ assert(!RecoveryRangeOwnerOrdinaryTrade(rr[0],both,life,live,scope,verifier,{101}));
+ assert(RecoveryRangeOwnerOrdinaryTimer(rr[0],both,life,live,scope,verifier,result)==RAS_NO_EFFECT);
+ auto changed_scope=scope;changed_scope.generation++;
+ assert(!RecoveryRangeOcoWithin(two,changed_scope));
+
+ // A winning fill remains latched even when opening its reverse cannot be
+ // attempted because its journal linkage is no longer available.
+ journal.clear();opening_sends=0;primary_steps=0;
+ RecoveryPanelControl hold{};
+ assert(RecoveryApplyPanelControl(hold,cmd,cfg)==REC_CONTROL_APPLIED);
+ RecoveryRangeOwner hp[2]{};
+ RecoveryRangeOco claimed{};
+ for(int i=0;i<2;i++) {
+    assert(RecoveryRangeOwnerSubmit(hp[i],hold,i+1,life,live,scope,.01,.01));
+    assert(RecoveryRangeOwnerBindPrimary(hp[i],hold,life,live,scope,v,0,.01,.01));
+ }
+ journal.erase(hp[0].primary.key.id);
+ assert(RecoveryRangeOwnerPrimaryTimer(hp[0],hold,life,live,scope,verifier,claimed)==RPP_STOPPED);
+ assert(claimed.winner_range_id==1&&hp[0].phase==RRO_PRIMARY_CLAIMED);
+ assert(hp[0].first_proof.entry.executed_order==101);
+ assert(RecoveryRangeOwnerPrimaryTimer(hp[1],hold,life,live,scope,verifier,claimed)==RPP_STOPPED);
+ assert(primary_steps==1&&opening_sends==0);
 }
 """
 
@@ -214,7 +266,7 @@ class RangeOwnerCompat(unittest.TestCase):
             key=re.sub(r"\(string\)((?:scope|action)\.\w+)",r"std::to_string(\1)",key)
             (q/"RecoverySessionIntentKey.mqh").write_text(key)
             for name in ("RecoveryPrimaryService.mqh","RecoveryRangeOwner.mqh"):
-                src=re.sub(r"\(string\)([\w.]+)",r"std::to_string(\1)",(HERE/name).read_text())
+                src=re.sub(r"\(string\)([\w.]+)",r"std::to_string(\1)",((HERE/name) if (HERE/name).exists() else (execution/name)).read_text())
                 (q/name).write_text(src)
             for name in ("RecoveryDispatch.mqh","RecoveryPrimaryFill.mqh","RecoveryOpeningDispatch.mqh",
                          "RecoveryPrimaryFillPump.mqh","RecoveryOrdinaryEventLoop.mqh","RecoveryOwnerEvidence.mqh"):
