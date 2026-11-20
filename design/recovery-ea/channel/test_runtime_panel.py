@@ -39,7 +39,6 @@ class PanelAssemblyTest(TestCase):
         self.request = {
             'request_id': self.request_id, 'expected_boot': self.boot, 'expected_context': self.context,
             'expected_generation': self.generation, 'confirmed': True,
-            'payload': {'ranges': [{'range_id': 2, 'side': 'SELL', 'price': '3999.850'}]},
         }
         self.command = self.boot_root / 'commands' / (self.request_id + '.json')
 
@@ -53,10 +52,10 @@ class PanelAssemblyTest(TestCase):
     def test_public_shell_and_fixed_assets_contain_no_key(self):
         home = self.client.get('/recovery')
         self.assertEqual(home.status_code, 200)
-        self.assertIn('Подтвердить и отправить', home.text)
+        self.assertIn('Ожидай триггер ордер и выставь SL', home.text)
         self.assertIn("frame-ancestors 'none'", home.headers['content-security-policy'])
         self.assertEqual(home.headers['cache-control'], 'no-store')
-        for file in ('runtime_panel.mjs', 'runtime_panel.css', 'recovery_ranges.mjs', 'session.js',
+        for file in ('runtime_panel.mjs', 'runtime_panel.css', 'recovery_manual.mjs', 'session.js',
                      'support_controls.mjs', 'support_panel.mjs'):
             route = '/recovery/assets/' + file
             asset = self.client.get(route)
@@ -65,6 +64,11 @@ class PanelAssemblyTest(TestCase):
                 'text/css' if file.endswith('.css') else 'text/javascript'))
             self.assertNotIn(KEY, asset.text)
         self.assertNotIn(KEY, home.text)
+        self.assertIn('Ожидай ручную позицию', home.text)
+        self.assertIn('Отменить ожидание', home.text)
+        self.assertIn('Ордер и SL остаются в MT5.', home.text)
+        self.assertNotIn('Диапазон', home.text)
+        self.assertNotEqual(self.client.get('/recovery/assets/recovery_ranges.mjs').status_code, 200)
         self.assertNotEqual(self.client.get('/recovery/assets/state.json').status_code, 200)
         self.assertNotEqual(self.client.get('/recovery/assets/%2e%2e/%2e%2e/state.json').status_code, 200)
 
@@ -87,13 +91,13 @@ class PanelAssemblyTest(TestCase):
     def test_wrong_csrf_origin_method_and_query_do_not_publish(self):
         csrf = self.login().json()['csrf']
         bad_cases = [
-            (self.headers, EA + '/configure_ranges'),
-            ({**self.headers, 'X-Recovery-CSRF': 'incorrect'}, EA + '/configure_ranges'),
+            (self.headers, EA + '/manual_pending_wait'),
+            ({**self.headers, 'X-Recovery-CSRF': 'incorrect'}, EA + '/manual_pending_wait'),
             ({**self.headers, 'Origin': 'https://wrong.example', 'X-Recovery-CSRF': csrf},
-             EA + '/configure_ranges'),
+             EA + '/manual_pending_wait'),
             ({**self.headers, 'Sec-Fetch-Site': 'cross-site', 'X-Recovery-CSRF': csrf},
-             EA + '/configure_ranges'),
-            ({**self.headers, 'X-Recovery-CSRF': csrf}, EA + '/configure_ranges?x=1'),
+             EA + '/manual_pending_wait'),
+            ({**self.headers, 'X-Recovery-CSRF': csrf}, EA + '/manual_pending_wait?x=1'),
             ({**self.headers, 'X-Recovery-CSRF': csrf}, EA + '/unknown'),
         ]
         for headers, route in bad_cases:
@@ -102,13 +106,17 @@ class PanelAssemblyTest(TestCase):
             self.assertFalse(self.command.exists())
         self.assertEqual(self.client.get(EA + '/state?x=1', headers=self.headers).status_code, 400)
 
-    def test_browser_configure_and_exact_status_query(self):
+    def test_browser_pending_wait_and_exact_status_query(self):
         csrf = self.login().json()['csrf']
-        response = self.client.post(EA + '/configure_ranges',
+        response = self.client.post(EA + '/manual_pending_wait',
                     headers={**self.headers, 'X-Recovery-CSRF': csrf}, json=self.request)
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()['status'], 'unknown')
-        self.assertEqual(json.loads(self.command.read_text())['payload'], self.request['payload'])
+        written = json.loads(self.command.read_text())
+        self.assertEqual(written['payload'], {})
+        self.assertEqual(written['operation'], 'manual_pending_wait')
+        self.assertEqual(self.client.post(EA + '/configure_ranges', headers={
+            **self.headers, 'X-Recovery-CSRF': csrf}, json=self.request).status_code, 403)
         route = EA + '/commands/' + self.request_id
         self.assertEqual(self.client.get(route, headers=self.headers).status_code, 400)
         self.assertEqual(self.client.get(route + '?expected_boot=' + self.boot + '&x=1',

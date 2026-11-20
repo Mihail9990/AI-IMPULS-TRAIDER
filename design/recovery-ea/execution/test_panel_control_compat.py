@@ -24,7 +24,7 @@ int StringReplace(string& s,const string& from,const string& to){
  return count;
 }
 bool RecoveryInvHex(const string& s){return s.size()==32&&s.find_first_not_of("abcdef0123456789")==string::npos;}
-enum RecoveryPanelOperation {RPC_NONE,RPC_MANUAL_WAIT,RPC_MANUAL_CANCEL,RPC_CONFIGURE_RANGES};
+enum RecoveryPanelOperation {RPC_NONE,RPC_MANUAL_WAIT,RPC_MANUAL_CANCEL,RPC_CONFIGURE_RANGES,RPC_MANUAL_PENDING_WAIT};
 struct RecoveryPanelRange{int range_id,side;long price_ticks;};
 struct RecoveryPanelCommand{RecoveryPanelOperation operation;string command_id,content_sha256;int range_count;RecoveryPanelRange ranges[2];};
 struct RecoveryPanelCommandScope{string scope_id,boot_id,context_id,generation_id;};
@@ -32,6 +32,7 @@ bool RecoveryDecodePanelCommand(const string& wire,const string& expected,const 
      RecoveryPanelCommand& out){
  out={};out.command_id=expected;out.content_sha256=wire;
  if(wire=="wait")out.operation=RPC_MANUAL_WAIT;
+ else if(wire=="pending")out.operation=RPC_MANUAL_PENDING_WAIT;
  else if(wire=="cancel")out.operation=RPC_MANUAL_CANCEL;
  else if(wire=="ranges"){out.operation=RPC_CONFIGURE_RANGES;out.range_count=1;out.ranges[0]={1,1,400000};}
  else return false;

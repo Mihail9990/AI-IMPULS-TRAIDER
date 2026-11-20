@@ -1,5 +1,5 @@
 import './session.js';
-import {wireRecoveryRanges} from './recovery_ranges.mjs';
+import {wireRecoveryManual} from './recovery_manual.mjs';
 import {mountSupportSettings} from './support_panel.mjs';
 
 const sessionApi = window.RecoverySession;
@@ -44,11 +44,11 @@ async function panelRequest(path, init) {
   return response;
 }
 
-const ranges = wireRecoveryRanges(panel.querySelector('.recovery-ranges'), {request: panelRequest});
+const manual = wireRecoveryManual(panel.querySelector('.recovery-manual'), {request: panelRequest});
 const support = mountSupportSettings(panel.querySelector('.support-settings'), {request: panelRequest});
 
 async function refreshPanel() {
-  await Promise.all([ranges.refresh(), support.refresh()]);
+  await Promise.all([manual.refresh(), support.refresh()]);
 }
 
 

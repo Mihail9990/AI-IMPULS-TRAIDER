@@ -41,7 +41,7 @@ struct RecoverySessionLifecycle {string epoch;bool active;};
 struct RecoverySessionContext {bool valid;};
 bool RecoverySessionCurrent(const RecoverySessionLifecycle &l,const RecoverySessionContext &c){return l.active&&c.valid;}
 enum RecoveryPanelApplyCode {RECP_INVALID=0,RECP_REJECTED,RECP_STAGED,RECP_DUPLICATE,RECP_CONFLICT};
-enum RecoveryPanelOperation {RPC_NONE=0,RPC_MANUAL_WAIT,RPC_MANUAL_CANCEL,RPC_CONFIGURE_RANGES};
+enum RecoveryPanelOperation {RPC_NONE=0,RPC_MANUAL_WAIT,RPC_MANUAL_CANCEL,RPC_CONFIGURE_RANGES,RPC_MANUAL_PENDING_WAIT};
 struct RecoveryPanelApplyResult {RecoveryPanelApplyCode code,original;RecoveryPanelOperation operation;string command_id,digest;};
 struct RecoveryPanelApplySession {std::map<string,RecoveryPanelApplyCode> seen;};
 struct RecoveryPanelControl {int state_changes;};

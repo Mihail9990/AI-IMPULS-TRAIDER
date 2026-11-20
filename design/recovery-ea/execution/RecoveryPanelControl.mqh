@@ -2,8 +2,8 @@
 #define RECOVERY_PANEL_CONTROL_MQH
 #include "../cycle/RecoveryRangeCoordinator.mqh"
 
-enum RecoveryControlMode { REC_CONTROL_IDLE=0,REC_CONTROL_MANUAL_WAIT,REC_CONTROL_RANGES,REC_CONTROL_ADOPTED };
-enum RecoveryControlOp { REC_CONTROL_UNSET=0,REC_CONTROL_WAIT,REC_CONTROL_CANCEL,REC_CONTROL_CONFIGURE };
+enum RecoveryControlMode { REC_CONTROL_IDLE=0,REC_CONTROL_MANUAL_WAIT,REC_CONTROL_RANGES,REC_CONTROL_ADOPTED,REC_CONTROL_PENDING_WAIT };
+enum RecoveryControlOp { REC_CONTROL_UNSET=0,REC_CONTROL_WAIT,REC_CONTROL_CANCEL,REC_CONTROL_CONFIGURE,REC_CONTROL_PENDING_ARM };
 enum RecoveryControlResult { REC_CONTROL_REJECTED=0,REC_CONTROL_APPLIED };
 
 struct RecoveryControlRange {
@@ -27,12 +27,15 @@ struct RecoveryPanelControl {
 // order was placed; the owner must dispatch and verify the primary STOPs.
 RecoveryControlResult RecoveryApplyPanelControl(RecoveryPanelControl &state,
     const RecoveryControlCommand &command,const RRSettings &cfg) {
- if(command.op==REC_CONTROL_WAIT || command.op==REC_CONTROL_CANCEL)
+ if(command.op==REC_CONTROL_WAIT || command.op==REC_CONTROL_PENDING_ARM || command.op==REC_CONTROL_CANCEL)
    {
     if(command.count!=0)return REC_CONTROL_REJECTED;
     if(command.op==REC_CONTROL_WAIT && state.mode==REC_CONTROL_IDLE)
       {state.mode=REC_CONTROL_MANUAL_WAIT;return REC_CONTROL_APPLIED;}
-    if(command.op==REC_CONTROL_CANCEL && state.mode==REC_CONTROL_MANUAL_WAIT)
+    if(command.op==REC_CONTROL_PENDING_ARM && state.mode==REC_CONTROL_IDLE)
+      {state.mode=REC_CONTROL_PENDING_WAIT;return REC_CONTROL_APPLIED;}
+    if(command.op==REC_CONTROL_CANCEL && (state.mode==REC_CONTROL_MANUAL_WAIT ||
+                                          state.mode==REC_CONTROL_PENDING_WAIT))
       {state.mode=REC_CONTROL_IDLE;return REC_CONTROL_APPLIED;}
     return REC_CONTROL_REJECTED;
    }

@@ -20,7 +20,7 @@ struct RecoveryLiveSession{
  RecoverySessionLifecycle lifecycle;
  int mailbox,mail,panel_seen;
 };
-enum {REC_CONTROL_IDLE,REC_CONTROL_RANGES,REC_CONTROL_MANUAL_WAIT,REC_CONTROL_ADOPTED};
+enum {REC_CONTROL_IDLE,REC_CONTROL_RANGES,REC_CONTROL_MANUAL_WAIT,REC_CONTROL_ADOPTED,REC_CONTROL_PENDING_WAIT};
 struct TestCycle {ulong position_id,generation,active_order;int range_id;long actual_entry_ticks;};
 struct TestKnown {ulong ticket;};
 struct RRRangeState {TestKnown entry,opposite;TestCycle cycle;ulong scope,position_ticket;long initial_sl,live_sl;int support_stage;struct {int kind;} pending;};
@@ -245,6 +245,24 @@ bool RecoveryCommitDetachedCloseAccounting(const RecoveryDetachedCloseAccounting
  assert(p.key.scope==1);++detached_merges;return true;
 }
 
+struct RecoveryManualPendingChart {int state;};
+bool pending_arm=false,pending_proof=false;
+int pending_calls=0,pending_opening=0;
+void RecoveryManualPendingChartReset(RecoveryManualPendingChart& p){p={};}
+bool RecoveryManualPendingChartTimer(RecoveryManualPendingChart& in,RecoveryManualHandoff& h,
+ RecoveryPanelControl& p,RecoveryEvidenceOwner&,const RecoverySessionLifecycle& life,
+ const RecoverySessionContext& live,const RecoverySessionIntentScope& scope,const RecoveryInventoryScope&,
+ const RRSettings& cfg,double,double){
+ assert(p.mode==REC_CONTROL_PENDING_WAIT);++pending_calls;in.state=1;
+ if(!pending_proof)return false;
+ p.mode=REC_CONTROL_ADOPTED;
+ RecoveryManualChart m{true};
+ return RecoverySeedManualHandoff(h,m,p,life,live,scope,cfg);
+}
+void RecoveryManualPendingChartConfirmOpening(RecoveryManualPendingChart& in,RecoveryManualHandoff&,
+ const RecoverySessionLifecycle&,const RecoverySessionContext&,const RecoverySessionIntentScope&){
+ if(in.state)++pending_opening;
+}
 struct RecoveryManualFastFill {int state;};
 enum {RAS_NO_EFFECT,RAS_ADVANCED};
 bool manual_fast_proof=false;
@@ -326,6 +344,7 @@ bool RecoveryLiveSessionPublish(const RecoveryLiveSession&,const RecoverySession
 bool RecoveryPanelMailboxPoll(int&,int&,const RecoverySessionLifecycle&,const RecoverySessionContext&,const RRSettings&,
  double tick,int&,RecoveryPanelControl& panel,RecoveryPanelApplyResult&,bool diagnostic,bool may_cancel) {
  assert(tick==.01&&!diagnostic);++polls;
+ if(pending_arm){pending_arm=false;panel.mode=REC_CONTROL_PENDING_WAIT;return true;}
  if(manual_arm){manual_arm=false;panel.mode=REC_CONTROL_MANUAL_WAIT;return true;}
  if(manual_cancel){manual_cancel=false;if(may_cancel)panel.mode=REC_CONTROL_IDLE;return true;}
  if(!configure)return false;
@@ -481,6 +500,18 @@ int main(){
  assert(RecoveryChartOnTimer(wait,live)&&wait.panel.mode==REC_CONTROL_ADOPTED&&wait.adopted.seeded);
  assert(RecoveryChartOnTimer(wait,live)&&manual_fast_paths==calls+1&&wait.ranges[0].phase==RRO_UNUSED);
  RecoveryChartStop(wait);
+ assert(RecoveryChartStart(wait,live,"profile","pending-manual","verifier",2,settings,.01,.02,string(32,'a'),77));
+ pending_arm=true;
+ assert(RecoveryChartOnTimer(wait,live)&&pending_calls==1&&wait.panel.mode==REC_CONTROL_PENDING_WAIT);
+ manual_cancel=true;
+ assert(RecoveryChartOnTimer(wait,live)&&pending_calls==1&&wait.panel.mode==REC_CONTROL_IDLE&&!wait.pending_manual.state);
+ pending_arm=true;
+ assert(RecoveryChartOnTimer(wait,live)&&pending_calls==2&&wait.panel.mode==REC_CONTROL_PENDING_WAIT);
+ pending_proof=true;
+ assert(RecoveryChartOnTimer(wait,live)&&pending_calls==3&&wait.panel.mode==REC_CONTROL_ADOPTED&&pending_opening==1);
+ assert(wait.adopted.seeded&&!wait.panel.configured[0]&&!wait.panel.configured[1]);
+ RecoveryChartStop(wait);
+
 }
 """
 class ChartRuntimeCompat(unittest.TestCase):

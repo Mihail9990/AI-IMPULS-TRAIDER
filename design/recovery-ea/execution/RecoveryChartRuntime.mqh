@@ -12,6 +12,7 @@
 #include "RecoverySupportRotationOwner.mqh"
 #include "RecoveryManualHandoff.mqh"
 #include "RecoveryManualFastFill.mqh"
+#include "RecoveryManualPendingChart.mqh"
 #include "RecoverySupportGapOwner.mqh"
 #include "RecoverySupportMoveFill.mqh"
 #include "RecoveryDetachedCloseAccounting.mqh"
@@ -22,6 +23,7 @@ struct RecoveryChartRuntime {
  RecoveryManualChart manual;
  RecoveryManualHandoff adopted;
  RecoveryManualFastFill manual_fast;
+ RecoveryManualPendingChart pending_manual;
  RecoveryEvidenceOwner verifier;
  RecoveryRangeOco oco;
  RecoveryOcoCancel losing_stop;
@@ -53,7 +55,7 @@ struct RecoveryChartRuntime {
 void RecoveryChartStop(RecoveryChartRuntime &chart)
   {
    RecoveryLiveSessionStop(chart.live_session);
-   ZeroMemory(chart.panel);ZeroMemory(chart.verifier);ZeroMemory(chart.manual);ZeroMemory(chart.adopted);ZeroMemory(chart.manual_fast);
+   ZeroMemory(chart.panel);ZeroMemory(chart.verifier);ZeroMemory(chart.manual);ZeroMemory(chart.adopted);ZeroMemory(chart.manual_fast);RecoveryManualPendingChartReset(chart.pending_manual);
    ZeroMemory(chart.oco);ZeroMemory(chart.losing_stop);
    chart.cancel_started=false;chart.cancel_skipped=false;chart.cancel_result=ROC_WAIT;
    for(int i=0;i<2;i++) {
@@ -423,7 +425,7 @@ bool RecoveryChartOnTimer(RecoveryChartRuntime &chart,const RecoverySessionConte
    if(RecoveryPanelMailboxPoll(chart.live_session.mailbox,chart.live_session.mail,
           chart.live_session.lifecycle,live,chart.settings,chart.tick,
           chart.live_session.panel_seen,chart.panel,action,false,
-          RecoveryManualChartMayCancel(chart.manual)))
+          (chart.panel.mode==REC_CONTROL_PENDING_WAIT || RecoveryManualChartMayCancel(chart.manual))))
       chart.publish_needed=true;
    RecoverySessionIntentScope scope;RecoveryInventoryScope verifier;
    RecoveryChartBindings(chart,live,scope,verifier);
@@ -443,8 +445,17 @@ bool RecoveryChartOnTimer(RecoveryChartRuntime &chart,const RecoverySessionConte
             chart.publish_needed=true;
         }
      }
-   else if(chart.panel.mode==REC_CONTROL_IDLE && RecoveryManualChartClearWaiting(chart.manual))
-      ZeroMemory(chart.manual_fast);
+   else if(chart.panel.mode==REC_CONTROL_PENDING_WAIT)
+     {
+      if(RecoveryManualPendingChartTimer(chart.pending_manual,chart.adopted,chart.panel,chart.verifier,
+         chart.live_session.lifecycle,live,scope,verifier,chart.settings,chart.tick,chart.step))
+         chart.publish_needed=true;
+     }
+   else if(chart.panel.mode==REC_CONTROL_IDLE)
+     {
+      if(RecoveryManualChartClearWaiting(chart.manual))ZeroMemory(chart.manual_fast);
+      RecoveryManualPendingChartReset(chart.pending_manual);
+     }
    if(chart.publish_needed &&
       RecoveryLiveSessionPublish(chart.live_session,live,chart.panel.mode))chart.publish_needed=false;
    if(chart.panel.mode==REC_CONTROL_ADOPTED)
@@ -453,7 +464,11 @@ bool RecoveryChartOnTimer(RecoveryChartRuntime &chart,const RecoverySessionConte
          RecoverySeedManualHandoff(chart.adopted,chart.manual,chart.panel,
                                    chart.live_session.lifecycle,live,scope,chart.settings);
       if(chart.adopted.seeded)
+        {
+         RecoveryManualPendingChartConfirmOpening(chart.pending_manual,chart.adopted,
+             chart.live_session.lifecycle,live,scope);
          RecoveryChartOrdinaryTimer(chart,live,scope,verifier,0,chart.adopted.ordinary,chart.adopted.backing,true);
+        }
       return true; // public panel still shows no configured ranges
      }
    if(chart.panel.mode!=REC_CONTROL_RANGES)return true;

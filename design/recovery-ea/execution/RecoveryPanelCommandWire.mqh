@@ -2,7 +2,7 @@
 #define RECOVERY_PANEL_COMMAND_WIRE_MQH
 #include "../verifier/RecoveryInventoryReader.mqh"
 
-enum RecoveryPanelOperation { RPC_NONE=0,RPC_MANUAL_WAIT,RPC_MANUAL_CANCEL,RPC_CONFIGURE_RANGES };
+enum RecoveryPanelOperation { RPC_NONE=0,RPC_MANUAL_WAIT,RPC_MANUAL_CANCEL,RPC_CONFIGURE_RANGES,RPC_MANUAL_PENDING_WAIT };
 struct RecoveryPanelRange { int range_id,side; long price_ticks; };
 struct RecoveryPanelCommand {
  RecoveryPanelOperation operation;
@@ -159,6 +159,7 @@ bool RecoveryDecodePanelCommand(const string wire,const string expected_command_
  RecoveryPanelCommand parsed;
  RecoveryPanelCommandClear(parsed);
  if(RecoveryPanelTake(wire,at,"manual_wait"))parsed.operation=RPC_MANUAL_WAIT;
+ else if(RecoveryPanelTake(wire,at,"manual_pending_wait"))parsed.operation=RPC_MANUAL_PENDING_WAIT;
  else if(RecoveryPanelTake(wire,at,"manual_cancel"))parsed.operation=RPC_MANUAL_CANCEL;
  else if(RecoveryPanelTake(wire,at,"configure_ranges"))parsed.operation=RPC_CONFIGURE_RANGES;
  else return false;

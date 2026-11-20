@@ -34,6 +34,7 @@
 #include "../execution/RecoveryManualChart.mqh"
 #include "../execution/RecoveryManualHandoff.mqh"
 #include "../execution/RecoveryManualFastFill.mqh"
+#include "../execution/RecoveryManualPendingChart.mqh"
 #include "../execution/RecoverySupportRotationDispatch.mqh"
 #include "../execution/RecoveryExactOrderEffect.mqh"
 #include "../execution/RecoveryPositionEffect.mqh"

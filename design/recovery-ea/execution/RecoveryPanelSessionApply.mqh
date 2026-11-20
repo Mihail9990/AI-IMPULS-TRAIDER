@@ -63,24 +63,16 @@ RecoveryPanelApplyCode RecoveryDecodeAndStagePanel(
    ZeroMemory(next);
    if(parsed.operation==RPC_MANUAL_WAIT)next.op=REC_CONTROL_WAIT;
    else if(parsed.operation==RPC_MANUAL_CANCEL)next.op=REC_CONTROL_CANCEL;
-   else if(parsed.operation==RPC_CONFIGURE_RANGES)
-     {
-      if(parsed.range_count<1 || parsed.range_count>2)return RECP_INVALID;
-      next.op=REC_CONTROL_CONFIGURE;next.count=parsed.range_count;
-      for(int i=0;i<next.count;i++)
-        {
-         next.ranges[i].id=parsed.ranges[i].range_id;
-         next.ranges[i].side=parsed.ranges[i].side;
-         next.ranges[i].price_ticks=parsed.ranges[i].price_ticks;
-        }
-     }
-   else return RECP_INVALID;
+   else if(parsed.operation==RPC_MANUAL_PENDING_WAIT)next.op=REC_CONTROL_PENDING_ARM;
+   else if(parsed.operation!=RPC_CONFIGURE_RANGES)return RECP_INVALID;
+   // Old range requests can receive a deterministic rejection but can no
+   // longer reach the range control or submit a primary order.
    const int n=ArraySize(ram.seen);
    if(ArrayResize(ram.seen,n+1,32)!=n+1)return RECP_INVALID;
    ram.boot_id=mail.boot_id;
    ram.seen[n].command_id=parsed.command_id;
    ram.seen[n].digest=parsed.content_sha256;
-   out.code=(next.op!=REC_CONTROL_CANCEL || may_cancel_wait) &&
+   out.code=next.op!=REC_CONTROL_UNSET && (next.op!=REC_CONTROL_CANCEL || may_cancel_wait) &&
       RecoveryApplyPanelControl(control,next,cfg)==REC_CONTROL_APPLIED ?
       RECP_STAGED:RECP_REJECTED;
    ram.seen[n].original=out.code;

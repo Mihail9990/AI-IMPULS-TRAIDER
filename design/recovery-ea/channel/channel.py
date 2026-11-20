@@ -3,14 +3,13 @@ from pathlib import Path
 import hashlib
 import json
 import os
-import re
 import tempfile
 import time
 import uuid
 
 VERSION = 1
 LIMIT = 65536
-OPS = {'configure_ranges', 'manual_wait', 'manual_cancel'}
+OPS = {'manual_wait', 'manual_pending_wait', 'manual_cancel'}
 STATES = {'accepted', 'applied', 'rejected', 'unknown'}
 
 class ProtocolError(ValueError): pass
@@ -65,32 +64,11 @@ def atomic_new(path, value):
         os.unlink(temporary)
 
 
-_PRICE = re.compile(r"(?:0|[1-9][0-9]{0,14})(?:\.[0-9]{1,16})?")
-
-
 def validate_payload(operation, payload):
-    if not isinstance(operation, str) or operation not in OPS or not isinstance(payload, dict):
+    if not isinstance(operation, str) or operation not in OPS:
         raise ProtocolError('unsupported command')
-    if operation in {'manual_wait', 'manual_cancel'}:
-        if payload: raise ProtocolError(f'{operation} takes no parameters')
-        return
-    if payload.keys() != {'ranges'}:
-        raise ProtocolError('configure_ranges requires ranges')
-    ranges = payload['ranges']
-    if not isinstance(ranges, list) or not 1 <= len(ranges) <= 2:
-        raise ProtocolError('provide one or two exact-price triggers')
-    seen = set()
-    for row in ranges:
-        if not isinstance(row, dict) or row.keys() != {'range_id', 'side', 'price'}:
-            raise ProtocolError('each range requires range_id, side and price')
-        range_id, side, price = row['range_id'], row['side'], row['price']
-        if type(range_id) is not int or range_id not in (1, 2) or range_id in seen:
-            raise ProtocolError('each range id must be unique (1 or 2)')
-        if side not in ('BUY', 'SELL'):
-            raise ProtocolError('side must be BUY or SELL')
-        if not isinstance(price, str) or not _PRICE.fullmatch(price) or not re.search('[1-9]', price):
-            raise ProtocolError('price must be a positive plain decimal string')
-        seen.add(range_id)
+    if not isinstance(payload, dict) or payload:
+        raise ProtocolError(f'{operation} takes no parameters')
 
 
 class Channel:
@@ -107,7 +85,7 @@ class Channel:
         if type(value.get('version')) is not int or value['version'] != VERSION or value.get('scope_id') != self.scope_id:
             raise ProtocolError('state scope/version mismatch')
         ident(value.get('boot_id')); ident(value.get('context_id')); ident(value.get('generation_id'))
-        if value.get('mode') not in {'ready', 'manual_wait', 'manual_cancel', 'unknown'}:
+        if value.get('mode') not in {'ready', 'manual_wait', 'pending_wait', 'active', 'unknown'}:
             raise ProtocolError('bad mode')
         return value
 

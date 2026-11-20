@@ -10,12 +10,12 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 if __package__:
-    from .channel import Channel, ProtocolError, VERSION, digest, ident, validate_payload
+    from .channel import Channel, OPS, ProtocolError, VERSION, digest, ident, validate_payload
 else:
-    from channel import Channel, ProtocolError, VERSION, digest, ident, validate_payload
+    from channel import Channel, OPS, ProtocolError, VERSION, digest, ident, validate_payload
 
 
-_PUBLIC = {'manual_wait', 'manual_cancel', 'configure_ranges'}
+_PUBLIC = OPS
 _BOUND = ('boot_id', 'context_id', 'generation_id')
 _POST_FIELDS = frozenset(('request_id', 'expected_boot', 'expected_context',
                           'expected_generation', 'confirmed'))
@@ -48,12 +48,11 @@ async def _post(request: Request, operation: str):
         data.extend(chunk)
     try:
         body = json.loads(data.decode('utf-8'), object_pairs_hook=_pairs)
-        fields = _POST_FIELDS | {'payload'} if operation == 'configure_ranges' else _POST_FIELDS
-        if not isinstance(body, dict) or body.keys() != fields:
+        if not isinstance(body, dict) or body.keys() != _POST_FIELDS:
             raise ProtocolError('invalid keys')
         if body['confirmed'] is not True:
             raise ProtocolError('confirmation required')
-        payload = body.get('payload', {})
+        payload = {}
         validate_payload(operation, payload)
         binding = tuple(_uuid(body[name]) for name in
                         ('request_id', 'expected_boot', 'expected_context', 'expected_generation'))

@@ -16,6 +16,14 @@ FastAPI отдаёт страницу `/recovery`, её локальные ст�
 - Разрешены только нужные методы и маршруты. Если EA ещё не создал состояние,
   страница и вход доступны, но форма не получает разрешённый контекст для отправки.
 
+## Основная вкладка
+
+На панели две команды ожидания: ручная позиция и ручной триггер-ордер.
+Ордер отправляет пользователь в MT5; панель только просит EA наблюдать.
+В режиме ожидания показывается «Отменить ожидание»: отмена относится только
+к ожиданию, не к ордеру, позиции или SL. В режиме сопровождения кнопка
+скрывается. Старые диапазоны из этой панели не настраиваются.
+
 ## Настройки запуска (не для вставки в браузер)
 
 Приватный лаунчер передаёт серверу `RECOVERY_PANEL_KEY` из нового профиля,
@@ -50,7 +58,7 @@ handle @recoveryEA {
 
 В комплекте для запуска нужны эти файлы, исходные `web/session.js`
 и `runtime/web_session.py`, а также существующие `channel.py`,
-`web_handoff.py` и `recovery_ranges.*`.
+`web_handoff.py` и `recovery_manual.*`.
 Подключён один порог переноса SL на фактическую цену входа. По умолчанию
 форма видна, но выключена: `app_from_env()` не объявляет себя владельцем
 состояния EA. Без него защищённый маршрут `/api/recovery/ea/support-settings`
@@ -76,5 +84,5 @@ CSRF. Не включает запуск торговли или просмот�
 
 ```sh
 PYTHONPATH=.:design/recovery-ea/channel python -m unittest -v test_runtime_panel test_channel test_web_handoff
-node --test design/recovery-ea/channel/test_recovery_ranges.mjs design/recovery-ea/settings/test_support*.mjs
+node --test design/recovery-ea/channel/test_recovery_manual.mjs design/recovery-ea/settings/test_support*.mjs
 ```

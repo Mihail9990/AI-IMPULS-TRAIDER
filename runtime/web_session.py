@@ -18,7 +18,7 @@ WRITE={'/api/recovery/ranges','/api/recovery/cancel','/api/recovery/lot-schedule
 
 _EA_API='/api/recovery/ea/'
 _EA_SUPPORT=_EA_API+'support-settings'
-_EA_WRITE={_EA_API+name for name in ('configure_ranges','manual_wait','manual_cancel')}
+_EA_WRITE={_EA_API+name for name in ('manual_wait','manual_pending_wait','manual_cancel')}
 _UUID='[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}'
 _EA_STATUS=re.compile(_EA_API+'commands/'+_UUID)
 _EA_BOOT_QUERY=re.compile(('expected_boot='+_UUID).encode('ascii'))

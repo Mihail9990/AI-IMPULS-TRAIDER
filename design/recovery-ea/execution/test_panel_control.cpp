@@ -57,11 +57,15 @@ int main() {
  assert(RecoveryDecodeAndStagePanel("wait","id1",mail,life,live,cfg,.01,ram,state,r)==RECP_DUPLICATE);
  assert(r.original==RECP_STAGED&&state.mode==REC_CONTROL_IDLE);
  assert(RecoveryDecodeAndStagePanel("cancel","id1",mail,life,live,cfg,.01,ram,state,r)==RECP_CONFLICT);
- assert(RecoveryDecodeAndStagePanel("ranges","id3",mail,life,live,cfg,.01,ram,state,r)==RECP_STAGED);
- assert(state.mode==REC_CONTROL_RANGES&&state.ranges[0].primary_ticks==400000);
+ assert(RecoveryDecodeAndStagePanel("ranges","id3",mail,life,live,cfg,.01,ram,state,r)==RECP_REJECTED);
+ assert(state.mode==REC_CONTROL_IDLE&&!state.configured[0]&&!state.configured[1]);
+ assert(RecoveryDecodeAndStagePanel("pending","id8",mail,life,live,cfg,.01,ram,state,r)==RECP_STAGED);
+ assert(state.mode==REC_CONTROL_PENDING_WAIT);
  assert(RecoveryDecodeAndStagePanel("wait","id4",mail,life,live,cfg,.01,ram,state,r)==RECP_REJECTED);
  assert(RecoveryDecodeAndStagePanel("wait","id4",mail,life,live,cfg,.01,ram,state,r)==RECP_DUPLICATE);
- assert(r.original==RECP_REJECTED&&ArraySize(ram.seen)==5);
+ assert(r.original==RECP_REJECTED&&ArraySize(ram.seen)==6);
+ assert(RecoveryDecodeAndStagePanel("cancel","id9",mail,life,live,cfg,.01,ram,state,r)==RECP_STAGED);
+ assert(state.mode==REC_CONTROL_IDLE&&!state.configured[0]&&!state.configured[1]);
  const auto original=mail;mail.boot_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
  assert(RecoveryDecodeAndStagePanel("wait","id5",mail,life,live,cfg,.01,ram,state,r)==RECP_INVALID);
  assert(RecoveryDecodeAndStagePanel("bad","id5",original,life,live,cfg,.01,ram,state,r)==RECP_INVALID);

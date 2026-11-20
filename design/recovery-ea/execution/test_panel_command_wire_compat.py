@@ -42,7 +42,7 @@ class PanelCommandWireCompat(unittest.TestCase):
               record(generation_id=BOOT), record(command_id=BOOT), record(version=2),
               record(version=True),record(created_at=0.1),record(created_at=True),
               record(created_at=2**63),record(created_at=-2**63-1),
-              record("manual_wait",TWO),record("manual_cancel",{"x":1}),record("market",{}),
+              record("manual_wait",TWO),record("manual_pending_wait",{"ticket":"123"}),record("manual_cancel",{"x":1}),record("market",{}),
               record(payload={}),record(payload={"ranges":[]}), record(payload={"ranges":[{},{}]}),
               record(payload={"ranges":TWO["ranges"]+[TWO["ranges"][0]]}),
               record(payload={"ranges": [TWO["ranges"][0]]*2}),
@@ -70,6 +70,7 @@ int main() {{
          cmd.range_count==2 && cmd.ranges[0].range_id==2 && cmd.ranges[0].side==-1 && cmd.ranges[0].price_ticks==399985 &&
          cmd.ranges[1].range_id==1 && cmd.ranges[1].side==1 && cmd.ranges[1].price_ticks==400000);
   assert(use({json.dumps(record("manual_wait",{}))},0) && cmd.operation==RPC_MANUAL_WAIT && cmd.range_count==0);
+  assert(use({json.dumps(record("manual_pending_wait",{}))},0) && cmd.operation==RPC_MANUAL_PENDING_WAIT && cmd.range_count==0);
   assert(use({json.dumps(record("manual_cancel",{},created_at=-2**63))},0) && cmd.operation==RPC_MANUAL_CANCEL);
   assert(use({json.dumps(record(payload=one("4000"),created_at=2**63-1))}) && cmd.ranges[0].price_ticks==400000);
   assert(use({json.dumps(record(payload=one("4000.05")))},0.05) && cmd.ranges[0].price_ticks==80001);

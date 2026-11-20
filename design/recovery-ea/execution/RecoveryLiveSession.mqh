@@ -116,7 +116,9 @@ bool RecoveryLiveSessionPublish(const RecoveryLiveSession &s,const RecoverySessi
                                 const RecoveryControlMode mode)
   {
    if(!RecoveryLiveSessionCurrent(s,live))return false;
-   const string mode_name=mode==REC_CONTROL_MANUAL_WAIT ? "manual_wait":"ready";
+   const string mode_name=mode==REC_CONTROL_MANUAL_WAIT ? "manual_wait" :
+                          (mode==REC_CONTROL_PENDING_WAIT ? "pending_wait" :
+                           (mode==REC_CONTROL_ADOPTED ? "active" : "ready"));
    const string path=RecoveryLivePanelRoot+"\\state.json",tmp=path+"."+s.mail.boot_id+".writing";
    const string wire=RecoveryLiveStatePrefix(s.mail)+mode_name+
       "\",\"scope_id\":\""+s.mail.scope_id+"\",\"version\":1,\"written_at\":"+(string)TimeLocal()+"}";

@@ -46,9 +46,9 @@ def create_panel_app(token: str, origin: str, channel: Channel, *, support_store
     """Opt-in standalone assembly for the new native branch, not a legacy mount."""
     handoff = create_handoff_app(token, channel)
     shell = (HERE / 'runtime_panel.html').read_text(encoding='utf-8')
-    fragment = (HERE / 'recovery_ranges.html').read_text(encoding='utf-8')
+    fragment = (HERE / 'recovery_manual.html').read_text(encoding='utf-8')
     for slot, html in (
-        ('<!-- RANGE_FORM -->', fragment),
+        ('<!-- MANUAL_FORM -->', fragment),
         ('<!-- SUPPORT_FORM -->', (SETTINGS / 'support_controls.html').read_text(encoding='utf-8')),
     ):
         if shell.count(slot) != 1:
@@ -72,7 +72,7 @@ def create_panel_app(token: str, origin: str, channel: Channel, *, support_store
     for name, source, media in (
         ('runtime_panel.mjs', HERE / 'runtime_panel.mjs', 'text/javascript'),
         ('runtime_panel.css', HERE / 'runtime_panel.css', 'text/css'),
-        ('recovery_ranges.mjs', HERE / 'recovery_ranges.mjs', 'text/javascript'),
+        ('recovery_manual.mjs', HERE / 'recovery_manual.mjs', 'text/javascript'),
         ('support_controls.mjs', SETTINGS / 'support_controls.mjs', 'text/javascript'),
         ('support_panel.mjs', SETTINGS / 'support_panel.mjs', 'text/javascript'),
         ('session.js', REPO / 'web' / 'session.js', 'text/javascript'),

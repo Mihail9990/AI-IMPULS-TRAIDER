@@ -60,7 +60,7 @@ bool RecoveryPanelMailboxReceiptText(const RecoveryPanelCommandScope &mail,
     return false;
  const RecoveryPanelApplyCode code=result.code==RECP_DUPLICATE ? result.original : result.code;
  if(result.operation!=RPC_MANUAL_WAIT && result.operation!=RPC_MANUAL_CANCEL &&
-    result.operation!=RPC_CONFIGURE_RANGES)return false;
+    result.operation!=RPC_CONFIGURE_RANGES && result.operation!=RPC_MANUAL_PENDING_WAIT)return false;
  string status,reason;
  if(code==RECP_REJECTED) {status="rejected";reason="control_rejected";}
  else if(code==RECP_STAGED && result.operation==RPC_CONFIGURE_RANGES)

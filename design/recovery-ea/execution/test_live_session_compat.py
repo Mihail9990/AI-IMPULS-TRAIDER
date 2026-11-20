@@ -79,7 +79,7 @@ string RecoverySessionSha256(const string& s){
 struct RecoveryPanelCommandScope {string scope_id,boot_id,context_id,generation_id;};
 struct RecoveryPanelMailbox{int dummy;};
 struct RecoveryPanelApplySession{int seen;};
-enum RecoveryControlMode {REC_CONTROL_IDLE,REC_CONTROL_MANUAL_WAIT};
+enum RecoveryControlMode {REC_CONTROL_IDLE,REC_CONTROL_MANUAL_WAIT,REC_CONTROL_PENDING_WAIT,REC_CONTROL_ADOPTED};
 void RecoveryPanelMailboxClose(RecoveryPanelMailbox& m){m.dummy=0;}
 void RecoveryClearPanelApply(RecoveryPanelApplySession& r){r.seen=0;}
 bool RecoveryPanelCommandUUID(const string& s){return s.size()==36&&s[8]=='-';}
@@ -107,6 +107,10 @@ int main(){
  fail_move=false;
  assert(RecoveryLiveSessionPublish(a,live,REC_CONTROL_MANUAL_WAIT));
  assert(files[state].find("manual_wait")!=string::npos);
+ assert(RecoveryLiveSessionPublish(a,live,REC_CONTROL_PENDING_WAIT));
+ assert(files[state].find("pending_wait")!=string::npos);
+ assert(RecoveryLiveSessionPublish(a,live,REC_CONTROL_ADOPTED));
+ assert(files[state].find("active")!=string::npos);
  connected=false;
  assert(!RecoveryLiveSessionCurrent(a,live)&&!RecoveryLiveSessionPublish(a,live,REC_CONTROL_IDLE));
  RecoveryLiveSessionStop(a);assert(!writer_open&&a.mail.boot_id.empty()&&!files.count(state));
