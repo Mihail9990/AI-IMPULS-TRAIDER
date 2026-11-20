@@ -17,6 +17,7 @@ struct RecoveryPanelApplySession {
 };
 struct RecoveryPanelApplyResult {
  RecoveryPanelApplyCode code,original;
+ RecoveryPanelOperation operation;
  string command_id,digest;
 };
 
@@ -49,6 +50,7 @@ RecoveryPanelApplyCode RecoveryDecodeAndStagePanel(
    RecoveryPanelCommand parsed;
    if(!RecoveryDecodePanelCommand(wire,filename_id,mail,tick,parsed))return RECP_INVALID;
    out.command_id=parsed.command_id;out.digest=parsed.content_sha256;
+   out.operation=parsed.operation;
    for(int i=ArraySize(ram.seen)-1;i>=0;i--)
      {
       if(ram.seen[i].command_id!=parsed.command_id)continue;
