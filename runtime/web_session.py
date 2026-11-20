@@ -16,13 +16,23 @@ BASE='/api/recovery/session/'
 WRITE={'/api/recovery/ranges','/api/recovery/cancel','/api/recovery/lot-schedule',
        '/api/recovery/ranges/1/close-cancel','/api/recovery/ranges/2/close-cancel'}
 
+_EA_API='/api/recovery/ea/'
+_EA_WRITE={_EA_API+name for name in ('configure_ranges','manual_wait','manual_cancel')}
+_UUID='[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}'
+_EA_STATUS=re.compile(_EA_API+'commands/'+_UUID)
+_EA_BOOT_QUERY=re.compile(('expected_boot='+_UUID).encode('ascii'))
+
+
 class BrowserSessions:
-    def __init__(self, app, token, origin, *, mode, context, clock=time.monotonic, ttl=28800):
+    def __init__(self, app, token, origin, *, mode, context, clock=time.monotonic, ttl=28800, route_profile='legacy'):
         parsed=urlsplit(origin)
         if parsed.scheme!='https' or not parsed.hostname or parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment:
             raise ValueError('Fixed HTTPS origin required')
         if mode not in ('native','connectivity') or len(token)<32 or not token.isascii():raise ValueError('Invalid session configuration')
         if not 1 <= ttl <= 28800:raise ValueError('Invalid session expiry')
+        if route_profile not in ('legacy','recovery-ea') or (route_profile=='recovery-ea' and mode!='native'):
+            raise ValueError('Invalid route profile')
+        self.route_profile=route_profile
         self.app,self.token,self.origin,self.host=app,token,origin,parsed.netloc
         self.mode,self.context,self.clock,self.ttl=mode,context,clock,ttl
         self.sessions={};self.last_context=None;self.failures=[]
@@ -47,12 +57,21 @@ class BrowserSessions:
             values=headers.get(name,[])
             return values[0].decode('latin1') if len(values)==1 else None
         auth=one(b'authorization')
-        # Explicit Authorization is always authoritative. Never fall back on cookies.
-        if b'authorization' in headers and not is_session:
-            return await self.app(scope,receive,send)
-        has_cookie=b'cookie' in headers
-        if not is_session and not has_cookie:return await self.app(scope,receive,send)
+        ea_panel=self.route_profile=='recovery-ea'
         def deny(status=401):return self.reply(send,status,{'detail':'Browser session unavailable'})
+        if ea_panel:
+            # Public shell and assets contain no session data. Route every EA
+            # API call through this browser session gate, never raw Bearer.
+            if not is_session and not path.startswith(_EA_API):
+                return await self.app(scope,receive,send)
+            if not is_session and b'authorization' in headers:
+                return await deny()
+        else:
+            # Legacy clients retain their explicit-Bearer behavior.
+            if b'authorization' in headers and not is_session:
+                return await self.app(scope,receive,send)
+            if not is_session and b'cookie' not in headers:
+                return await self.app(scope,receive,send)
         if scope.get('scheme')!='https':return await deny(403)
         if one(b'host')!=self.host or one(b'x-recovery-session')!='1':return await deny(403)
         origin=one(b'origin')
@@ -61,13 +80,22 @@ class BrowserSessions:
             return await deny(403)
         if method!='GET' and origin!=self.origin:return await deny(403)
         if method!='GET' and one(b'content-type')!='application/json':return await deny(415)
-        if scope.get('query_string'):return await deny(400)
+        query=scope.get('query_string',b'')
         login=path==BASE+'login' and method=='POST'
         status=path==BASE+'status' and method=='GET'
         logout=path==BASE+'logout' and method=='POST'
-        allowed=method=='GET' and path=='/api/recovery/state'
-        if self.mode=='native':
-            allowed=allowed or (method=='GET' and re.fullmatch('/api/recovery/commands/[0-9a-fA-F-]{36}',path) is not None) or (method=='POST' and path in WRITE)
+        if ea_panel:
+            poll=method=='GET' and _EA_STATUS.fullmatch(path) is not None
+            if poll:
+                if _EA_BOOT_QUERY.fullmatch(query) is None:return await deny(400)
+            elif query:return await deny(400)
+            allowed=(poll or (method=='GET' and path==_EA_API+'state')
+                     or (method=='POST' and path in _EA_WRITE))
+        else:
+            if query:return await deny(400)
+            allowed=method=='GET' and path=='/api/recovery/state'
+            if self.mode=='native':
+                allowed=allowed or (method=='GET' and re.fullmatch('/api/recovery/commands/[0-9a-fA-F-]{36}',path) is not None) or (method=='POST' and path in WRITE)
         if not (login or status or logout or allowed):return await deny(403)
         now=self.clock()
         raw_cookie=one(b'cookie')

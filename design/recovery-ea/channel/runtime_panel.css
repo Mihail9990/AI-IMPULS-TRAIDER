@@ -1,0 +1,10 @@
+:root{color-scheme:dark;font:16px system-ui}
+body{margin:0;color:#f1f1f3;background:#161719}
+main{width:min(38rem,92vw);margin:2rem auto}
+form,fieldset,label{display:grid;gap:.65rem}
+form{margin-block:1rem}
+fieldset{min-inline-size:0;border:1px solid #65676b;border-radius:.55rem}
+button,input,select{font:inherit;padding:.65rem;border-radius:.35rem}
+button{background:#dfdfdf;color:#17181b;border:0}
+button:disabled{opacity:.55}
+[hidden]{display:none!important}
