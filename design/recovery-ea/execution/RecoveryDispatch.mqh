@@ -20,6 +20,7 @@ struct RecoveryDispatchResult
    RecoveryDispatchState state;
    uint check_retcode;
    uint send_retcode;
+   bool synchronous_sl_ack; // Allows adjacent leg; never proves observed SL.
    ulong order;
   };
 
@@ -111,6 +112,8 @@ RecoveryDispatchState RecoveryDispatchOnce(const RRRangeState &range,const RRAct
    out.state=RD_OUTCOME_UNRESOLVED;
    const bool submitted=OrderSend(request,result);
    out.send_retcode=result.retcode;
+   out.synchronous_sl_ack=(submitted && request.action==TRADE_ACTION_SLTP &&
+                           result.retcode==TRADE_RETCODE_DONE);
    // This ACK binds a ticket only; the independent verifier still proves the
    // effect. No return code here advances strategy state or authorizes retry.
    if(submitted && request.action==TRADE_ACTION_PENDING && result.order!=0 &&

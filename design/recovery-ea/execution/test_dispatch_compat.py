@@ -91,7 +91,11 @@ int main(){
     reset();mutate_after_reserve=true;
     assert(call()==RD_RESERVED_NOT_SENT && reserved && send_calls==0);
     assert(call()==RD_EXISTING_INTENT && send_calls==0);
-    reset();assert(call()==RD_OUTCOME_UNRESOLVED && send_calls==1 && recorded==0);
+    reset();assert(call()==RD_OUTCOME_UNRESOLVED && send_calls==1 && recorded==0 && !r.synchronous_sl_ack);
+    reset();send_code=TRADE_RETCODE_DONE;
+    assert(call()==RD_OUTCOME_UNRESOLVED && r.synchronous_sl_ack && recorded==0);
+    reset();send_code=TRADE_RETCODE_DONE;acked=false;
+    assert(call()==RD_OUTCOME_UNRESOLVED && !r.synchronous_sl_ack);
     reset();a={RR_CANCEL,-1,0,0,77,8,0,399930,400000,2};
     own_order=false;assert(call()==RD_NOT_SENT && check_calls==0);
     reset();assert(call()==RD_OUTCOME_UNRESOLVED && send_calls==1);
