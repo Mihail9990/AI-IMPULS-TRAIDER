@@ -1,4 +1,12 @@
-# AI IMPULS · RECOVERY WEB 0.1.7-preview
+# AI IMPULS · RECOVERY для MetaTrader 5
+
+[Скачать установщик Windows x64](https://raw.githubusercontent.com/Mihail9990/AI-IMPULS-TRAIDER/refs/heads/release/recovery-installer-254e6932/releases/RECOVERY-254e6932/RECOVERY-Setup-x64.exe) · [Контрольная сумма SHA-256](releases/RECOVERY-254e6932/SHA256SUMS) · [Руководство по запуску](design/recovery-ea/deployment/installer/app/README_RU.txt)
+
+Откройте в нужном MT5 **Файл → Открыть каталог данных** и выберите эту папку в мастере. Установщик проверяет и копирует три советника в `MQL5\Experts\RECOVERY`. Панель, Python 3.13 x64 и её зависимости входят в EXE. После копирования мастер покажет путь к `RECOVERY.cmd`.
+
+Включение торговли и подключение основного советника остаются отдельными ручными действиями. Для доступа к панели извне нужен настроенный HTTPS-прокси. Сборка предназначена для проверки на Windows x64 с установленным MT5. [Сборка и проверка установщика](design/recovery-ea/deployment/installer/BUILD_RU.md)
+
+## Архивная документация RECOVERY WEB 0.1.7-preview
 
 Отдельная ветка от прямого MT5-варианта AI-IMPULS-TRAIDER (исходная основа 48130516).
 Оформление и навигация взяты из основной веб-панели; источник данных, кнопки
