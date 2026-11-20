@@ -25,7 +25,7 @@ struct RRAlternationLedger {
 struct RRAlternatingObservation {
  ulong scope;
  RRAction paired_intent; // exact prior intent if its opening pair is pending
- ulong paired_order_ticket; // persisted exact broker-effect identity, not price matching
+ ulong paired_order_ticket; // in-session exact broker-effect identity, not price matching
  RRKnownOrder executed_order; // actual original order parameters proven by history
  RRFilled fill; // exact complete history plus independently matched live position
  bool predecessor_inventory_complete,predecessor_present;

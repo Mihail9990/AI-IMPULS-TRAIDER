@@ -75,7 +75,7 @@ bool RRReleaseSupportGapToReentry(RRRangeState &s,RRSupportGap &g,const RRKnownO
  if(!RRSupportGapBound(s,g) || !g.have_close || g.have_fill ||
     !independently_proven_after_close || !RRKnownEqual(g.opposite,working))return false;
  RRRangeState n=s;
- if(!RRApplyDurableClose(n,g.close)||n.phase!=RR_ARM_REENTRY)return false;
+ if(!RRApplySessionClose(n,g.close)||n.phase!=RR_ARM_REENTRY)return false;
  s=n;g.reserved=false;
  return true;
 }
@@ -88,7 +88,7 @@ RRSupportGapResult RRAdvanceSupportGap(RRRangeState &s,const RRSettings &cfg,RRS
  RRRangeState n=s;
  // Both facts retained until the whole advance succeeds. No call to RRStage
  // while RR_ARM_REENTRY: consume the already filled exact fixed opposite.
- if(!RRApplyDurableClose(n,g.close) || n.phase!=RR_ARM_REENTRY ||
+ if(!RRApplySessionClose(n,g.close) || n.phase!=RR_ARM_REENTRY ||
     !RRObserveFill(n,cfg,g.fill) || n.retire.ticket!=0 || n.reentry_slot!=0)
     return RR_GAP_UNRESOLVED;
  const bool final=RCReverseSlot(n.cycle)==0;

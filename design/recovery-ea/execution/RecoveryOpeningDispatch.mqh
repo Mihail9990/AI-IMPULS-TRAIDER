@@ -37,7 +37,7 @@ bool RecoveryOpeningFillStillThere(const RRRangeState &range,const RROpeningPair
    return RecoveryIntentContextOK(key);
   }
 
-// Fresh opening only. Runtime first durably records the pair payload, the two
+// Fresh opening only. Runtime first retains in this session the pair payload, the two
 // independent immutable IDs, and evidence for any already-attached SL. This
 // helper neither changes the pair state nor treats broker ACK as verifier proof.
 RecoveryPairSendState RecoveryDispatchOpeningPair(const RRRangeState &range,

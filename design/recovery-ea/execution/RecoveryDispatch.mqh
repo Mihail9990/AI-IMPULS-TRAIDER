@@ -5,7 +5,7 @@
 #include "RecoveryAdoptionInventory.mqh"
 #include "../verifier/RecoveryExactOrder.mqh"
 
-// Control layer must persist the full immutable action and enforce a single
+// Control layer must retain the full immutable action in this session and enforce a single
 // writer before calling. This is not an auto-start EA. No automatic retries.
 enum RecoveryDispatchState
   {

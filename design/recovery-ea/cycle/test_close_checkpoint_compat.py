@@ -1,6 +1,5 @@
-"""Offline compile of the MQL close-checkpoint codec and replay semantics."""
+"""Offline compile of the MQL close transition and same-session deduplication."""
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import sys
@@ -18,7 +17,7 @@ from test_close_evidence_compat import arrays, bare
 
 class CloseCheckpointCompat(unittest.TestCase):
     @unittest.skipUnless(shutil.which("c++"), "C++ compiler unavailable")
-    def test_codec_and_replay(self):
+    def test_confirmed_close_applies_once_in_session(self):
         cpp = SHIM + r"""
 #include <cmath>
 using ulong=std::uint64_t;
@@ -44,15 +43,8 @@ template<class T> int ArrayResize(std::vector<T>& a,int n){a.resize(n);return n;
         cpp += bare((HERE / "RecoveryCycle.mqh").read_text())
         cpp += arrays(bare((HERE / "RecoveryCloseEvidence.mqh").read_text()))
         cpp += arrays(bare((HERE / "RecoveryCloseWire.mqh").read_text()))
-        checkpoint = (HERE / "RecoveryCloseCheckpoint.mqh").read_text().split("// Caller owns naming",1)[0] + "\n#endif\n"
-        checkpoint = re.sub(r"\(string\)(r\.\w+\.\w+|r\.reentry_distance|\(r\.before\.side==1\?1:2\))",
-                            r"std::to_string(\1)",checkpoint)
-        cpp += arrays(bare(checkpoint)).replace("string f[];","std::vector<string> f;")
+        cpp += arrays(bare((HERE / "RecoveryCloseCheckpoint.mqh").read_text()))
         cpp += r"""
-static string change(string s,const string &old,const string &replacement) {
- const auto at=s.find(old); assert(at!=string::npos); s.replace(at,old.size(),replacement); return s;
-}
-
 int main() {
  RCCloseCheckpoint record{};
  auto &before=record.before;
@@ -63,42 +55,32 @@ int main() {
  record.reentry_distance=70;
  record.proof={before.generation,before.range_id,before.active_order,before.position_id,
                7,7,0,true,true,RC_SL,300975,RC_SUPPORT_LEVEL,true};
- const auto text=RCCPEncode(record);
- assert(!text.empty());
- RCCloseCheckpoint decoded;
- assert(RCCPDecode(text,record.key,decoded));
- assert(RCCPEncode(decoded)==text && RCCPSameRange(decoded.before,before));
  RCRange current=before;
  RCClosePlan plan;
- assert(RCCPApply(decoded,current,plan)==RCCP_APPLIED);
+ assert(RCCPApply(record,current,plan)==RCCP_APPLIED);
  assert(plan.reentry_ticks==301045 && plan.reentry_slot==5 && plan.keep_existing_opposite);
  auto final=current;
- assert(RCCPApply(decoded,current,plan)==RCCP_ALREADY_APPLIED);
+ assert(RCCPApply(record,current,plan)==RCCP_ALREADY_APPLIED);
  assert(plan.reentry_ticks==0 && !plan.keep_existing_opposite && RCCPSameRange(final,current));
  current.last_closed_order--;
- assert(RCCPApply(decoded,current,plan)==RCCP_CONFLICT);
+ assert(RCCPApply(record,current,plan)==RCCP_CONFLICT);
  current=before;current.full_sl_count++;
- assert(RCCPApply(decoded,current,plan)==RCCP_CONFLICT && current.active_order==before.active_order);
+ assert(RCCPApply(record,current,plan)==RCCP_CONFLICT && current.active_order==before.active_order);
  current=before;current.actual_entry_ticks++;
- assert(RCCPApply(decoded,current,plan)==RCCP_CONFLICT);
+ assert(RCCPApply(record,current,plan)==RCCP_CONFLICT);
  current=before;current.generation++;
- assert(RCCPApply(decoded,current,plan)==RCCP_CONFLICT);
- auto expected=record.key;expected.scope++;
- assert(!RCCPDecode(text,expected,decoded) && decoded.key.scope==0);
- expected=record.key;expected.observation++;
- assert(!RCCPDecode(text,expected,decoded));
- assert(!RCCPDecode("",record.key,decoded));
- assert(!RCCPDecode(text.substr(0,text.size()-1),record.key,decoded));
- assert(!RCCPDecode(text+"END\n",record.key,decoded));
- assert(!RCCPDecode(change(text,"\t301000\t","\t0301000\t"),record.key,decoded));
- assert(!RCCPDecode(change(text,"\t300975\t2\t","\t300975\t3\t"),record.key,decoded));
- assert(!RCCPDecode(change(text,"\t18446744073709551615\t","\t18446744073709551616\t"),record.key,decoded));
+ assert(RCCPApply(record,current,plan)==RCCP_CONFLICT);
+ auto wrong=record;wrong.key.position_id++;
+ current=before;
+ assert(RCCPApply(wrong,current,plan)==RCCP_CONFLICT && RCCPSameRange(current,before));
+ wrong=record;wrong.key.scope=0;
+ assert(RCCPApply(wrong,current,plan)==RCCP_CONFLICT && plan.reentry_ticks==0);
  auto partial=record;partial.proof.exited_steps--;
- assert(RCCPEncode(partial).empty());
+ assert(RCCPApply(partial,current,plan)==RCCP_CONFLICT && RCCPSameRange(current,before));
  partial=record;partial.proof.independently_verified=false;
- assert(RCCPEncode(partial).empty());
+ assert(RCCPApply(partial,current,plan)==RCCP_CONFLICT);
  partial=record;partial.proof.confirmed_stop_mask=RC_INITIAL_LEVEL|RC_SUPPORT_LEVEL;
- assert(RCCPEncode(partial).empty());
+ assert(RCCPApply(partial,current,plan)==RCCP_CONFLICT);
  auto last=record;last.before.full_sl_count=23;
  last.proof.confirmed_stop_mask=RC_INITIAL_LEVEL;
  current=last.before;
@@ -115,11 +97,11 @@ int main() {
                             "-fsanitize=undefined",str(source),"-o",str(executable)],check=True)
             subprocess.run([str(executable)],check=True)
 
-    def test_publish_does_not_overwrite(self):
-        source=(HERE / "RecoveryCloseCheckpoint.mqh").read_text()
-        self.assertIn('FileMove(tmp,0,final,0)',source)
-        self.assertIn('FileIsExist(final)',source)
-        self.assertNotIn('FILE_REWRITE',source)
+    def test_no_persistent_close_state(self):
+        source = (HERE / "RecoveryCloseCheckpoint.mqh").read_text()
+        for operation in ("RCCPPublish", "RCCPRead", "RCCPEncode", "RCCPDecode",
+                          "FileOpen", "FileWrite", "FileFlush", "FileMove"):
+            self.assertNotIn(operation, source)
 
 
 if __name__=="__main__":

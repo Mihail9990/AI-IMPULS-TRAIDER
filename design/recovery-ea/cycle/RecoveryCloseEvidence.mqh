@@ -4,7 +4,7 @@
 
 // Exact normalized evidence only; no live reads, trade APIs or clock gating.
 // Scope/observation bind evidence that consumers have already validated. They
-// are durable local correlation IDs, not adequate proof on their own.
+// are local in-session correlation IDs, not adequate proof on their own.
 struct RCCloseEvidenceKey {
    ulong scope, observation, generation;
    int range_id;

@@ -3,7 +3,7 @@
 #include "../cycle/RecoveryAlternatingFill.mqh"
 
 // Single writer owns revision, increments it for EVERY update (including
-// accounting), and persists the complete state with the outbox atomically.
+// accounting), and commits the complete state with the outbox in one EA event.
 struct RecoveryAlternatingState {
  ulong revision;
  RRRangeState range;
@@ -34,8 +34,7 @@ RRAlternatingResult RecoveryPreviewAlternating(const RecoveryAlternatingState &c
  return result;
 }
 
-// For the state store's CAS, before durable publication (not evidence that a
-// write happened). The authenticated, normalized proof never enters the sender.
+// Check the current session revision before accepting a preview. The authenticated, normalized proof never enters the sender.
 bool RecoveryAlternatingPlanCurrent(const RecoveryAlternatingState &current,
                                    const RecoveryAlternatingPlan &plan) {
  return (plan.result==RR_ALT_NEXT_OPPOSITE || plan.result==RR_ALT_FINAL_PROTECTED) &&
@@ -52,13 +51,37 @@ bool RecoveryAlternatingPlanCurrent(const RecoveryAlternatingState &current,
 }
 
 // Build dispatchable view only from the committed/read-back state, with exact
-// revision and immutable staged action recovered from the same durable outbox.
-bool RecoveryAlternatingDispatchView(const RecoveryAlternatingState &persisted,
+// revision and immutable staged action recovered from the same in-memory outbox.
+bool RecoveryAlternatingDispatchView(const RecoveryAlternatingState &committed,
     const ulong outbox_revision,const RRAction &outbox_action,RRRangeState &shadow) {
- if(outbox_revision==0 || outbox_revision!=persisted.revision ||
-    !RRAltBound(persisted.range,persisted.ledger) || persisted.opening.sl_required ||
-    outbox_action.kind!=RR_REVERSE || outbox_action.entry_ticks!=persisted.range.live_sl)
+ if(outbox_revision==0 || outbox_revision!=committed.revision ||
+    !RRAltBound(committed.range,committed.ledger) || committed.opening.sl_required ||
+    outbox_action.kind!=RR_REVERSE || outbox_action.entry_ticks!=committed.range.live_sl)
     return false;
- return RROpeningRequestState(persisted.range,persisted.opening,outbox_action,shadow);
+ return RROpeningRequestState(committed.range,committed.opening,outbox_action,shadow);
+}
+// Publishing intent and strategy state is one operation in the trading EA
+// event handler. The single writer owns both values; neither survives unload.
+struct RecoveryAlternatingOutbox {
+ ulong revision;
+ RRAction action;
+};
+
+bool RecoveryCommitSessionAlternating(RecoveryAlternatingState &current,
+    const RecoveryAlternatingPlan &plan,RecoveryAlternatingOutbox &outbox) {
+ if(!RecoveryAlternatingPlanCurrent(current,plan))return false;
+ RecoveryAlternatingOutbox next;
+ next.revision=0;RRClearAction(next.action);
+ if(plan.result==RR_ALT_NEXT_OPPOSITE) {
+    RRRangeState view;
+    next.revision=plan.next.revision;
+    next.action=plan.next.opening.reverse;
+    if(!RecoveryAlternatingDispatchView(plan.next,next.revision,next.action,view))return false;
+ } else if(plan.next.opening.reserved) {
+    return false;
+ }
+ current=plan.next;
+ outbox=next;
+ return true;
 }
 #endif

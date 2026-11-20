@@ -57,7 +57,7 @@ RRCompletedReverseResult RRAdvanceCompletedReverse(RRRangeState &s,const RRSetti
     if(RRConfirmOpeningPair(next,prev,filled)!=RR_PAIR_CONFIRMED)
        return RR_COMPLETED_UNRESOLVED;
  }
- if(!RRApplyDurableClose(next,e.predecessor_close) ||
+ if(!RRApplySessionClose(next,e.predecessor_close) ||
     !RRObserveFill(next,cfg,e.successor))return RR_COMPLETED_UNRESOLVED;
 
  // Build follow-up from successor.actual_entry_ticks and this generation's

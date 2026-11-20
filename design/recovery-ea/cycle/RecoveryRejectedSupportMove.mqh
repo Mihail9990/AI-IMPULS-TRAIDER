@@ -3,7 +3,7 @@
 #include "RecoverySupportRotation.mqh"
 
 struct RRRejectedSupportMove {
- RRAction rejected_action; // exact durable modification intent
+ RRAction rejected_action; // exact in-session modification intent
  bool definite_broker_rejection; // mapped final rejection, never timeout/unavailable
  RRKnownOrder executed_original; // verifier history proves old unmodified parameters
  RCCloseCheckpoint predecessor_close;
@@ -42,7 +42,7 @@ RRRejectedMoveResult RRAdvanceRejectedSupportMove(RRRangeState &s,const RRSettin
  // History and the completed close settle the predecessor, not the rejected
  // modify or the optional SL call. Preserve its actual receipts in the journal.
  n.opposite=rotation.previous;RRClearKnown(n.retire);RRClearAction(n.pending);
- if(!RRApplyDurableClose(n,e.predecessor_close) ||
+ if(!RRApplySessionClose(n,e.predecessor_close) ||
     !RRObserveFill(n,cfg,e.successor)) return RR_REJECTED_MOVE_UNRESOLVED;
  n.initial_sl=e.successor.sl_ticks; // exclusively this documented exception
  n.live_sl=e.successor.sl_ticks;

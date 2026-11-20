@@ -6,6 +6,7 @@
 #include "../execution/RecoveryDispatch.mqh"
 #include "../execution/RecoveryOpeningDispatch.mqh"
 #include "../execution/RecoveryAlternatingDispatch.mqh"
+#include "../execution/RecoveryAlternatingEvidence.mqh"
 #include "../execution/RecoverySupportRotationDispatch.mqh"
 #include "../execution/RecoveryExactOrderEffect.mqh"
 #include "../execution/RecoveryPositionEffect.mqh"
@@ -16,7 +17,6 @@
 #include "../cycle/RecoverySupportGap.mqh"
 #include "../verifier/RecoveryClosedMoney.mqh"
 #include "../execution/RecoveryAdoptionInventory.mqh"
-#include "../execution/RecoveryIntentRestart.mqh"
 #include "../verifier/RecoveryExactOrderReader.mqh"
 
 void OnStart()

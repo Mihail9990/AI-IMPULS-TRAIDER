@@ -28,7 +28,12 @@ int main() {
   assert(!RecoveryAlternatingDispatchView(current,42,action,view));
   auto stale=current;stale.revision++;
   assert(!RecoveryAlternatingPlanCurrent(stale,plan));
-  auto persisted=plan.next; // fixture's stand-in for atomic durable read-back
+  RecoveryAlternatingOutbox outbox{};
+  auto persisted=current;
+  assert(!RecoveryCommitSessionAlternating(stale,plan,outbox)&&outbox.revision==0);
+  assert(RecoveryCommitSessionAlternating(persisted,plan,outbox));
+  assert(outbox.revision==42&&RRActionEqual(outbox.action,action));
+  assert(!RecoveryCommitSessionAlternating(persisted,plan,outbox));
   assert(!RecoveryAlternatingPlanCurrent(persisted,plan));
   assert(RecoveryAlternatingDispatchView(persisted,42,action,view)&&RRActionEqual(view.pending,action));
   auto wrong=action;wrong.sl_ticks++;
@@ -46,7 +51,8 @@ int main() {
      auto next=evidence(persisted.range,persisted.opening,50+n,1000+n,persisted.opening.reverse.entry_ticks-11);
      assert(RecoveryPreviewAlternating(persisted,cfg,next,plan)==(n==24?RR_ALT_FINAL_PROTECTED:RR_ALT_NEXT_OPPOSITE));
      assert(RecoveryAlternatingPlanCurrent(persisted,plan));
-     persisted=plan.next;
+     assert(RecoveryCommitSessionAlternating(persisted,plan,outbox));
+     assert(outbox.revision==(n==24 ? 0 : persisted.revision));
   }
   assert(!persisted.opening.reserved);
   assert(!RecoveryAlternatingDispatchView(persisted,persisted.revision,action,view));

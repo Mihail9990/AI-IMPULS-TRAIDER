@@ -50,11 +50,11 @@ int main() {
  assert(RRConfirmOpeningPair(s,pair,{pair.reverse,true,52})==RR_PAIR_CONFLICT);
  assert(s.opposite.ticket==0&&pair.reverse_ticket==51&&s.live_sl==300930);
  assert(!RROpeningRequestState(s,pair,pair.reverse,shadow));
- auto restarted=s;auto restored=pair;
- assert(RRConfirmOpeningPair(restarted,restored,{pair.sl,true,0})==RR_PAIR_CONFIRMED);
- assert(restarted.phase==RR_ACTIVE&&restarted.opposite.ticket==51&&restarted.live_sl==300935);
- assert(restarted.pending.kind==RR_NONE&&!restored.reserved);
- assert(!RROpeningRequestState(restarted,restored,restored.sl,shadow));
+ auto same_session=s;auto staged=pair;
+ assert(RRConfirmOpeningPair(same_session,staged,{pair.sl,true,0})==RR_PAIR_CONFIRMED);
+ assert(same_session.phase==RR_ACTIVE&&same_session.opposite.ticket==51&&same_session.live_sl==300935);
+ assert(same_session.pending.kind==RR_NONE&&!staged.reserved);
+ assert(!RROpeningRequestState(same_session,staged,staged.sl,shadow));
 
  s=fill(c,-1,300995); pair={};
  assert(RRStageOpeningPair(s,c,pair));

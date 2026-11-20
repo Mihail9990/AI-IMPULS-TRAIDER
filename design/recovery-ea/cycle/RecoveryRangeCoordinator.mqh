@@ -3,7 +3,7 @@
 #include "RecoveryCloseCheckpoint.mqh"
 
 // Per-range broker-neutral action coordinator. Its state and action identity
-// must be persisted before an external transport does anything with an intent.
+// must be committed in session before a transport acts on an intent.
 enum RRPhase { RR_NEW=1, RR_WAIT=2, RR_PROTECT=3, RR_ARM_REVERSE=4,
                RR_ACTIVE=5, RR_ARM_REENTRY=6, RR_DRAIN=7, RR_DONE=8 };
 enum RRActionKind { RR_NONE=0, RR_PRIMARY=1, RR_INITIAL_SL=2, RR_REVERSE=3,
@@ -230,7 +230,7 @@ bool RRObserveFill(RRRangeState &s,const RRSettings &cfg,const RRFilled &f) {
  return RRObserveFillCore(s,cfg,f);
 }
 
-bool RRApplyDurableClose(RRRangeState &s,const RCCloseCheckpoint &close) {
+bool RRApplySessionClose(RRRangeState &s,const RCCloseCheckpoint &close) {
  if(s.pending.kind!=RR_NONE || s.scope!=close.key.scope || close.key.scope==0 ||
     (s.phase!=RR_ACTIVE && s.phase!=RR_ARM_REVERSE && s.phase!=RR_PROTECT))return false;
  // No mixed transition after a racing fill/old cancel: preserve exact pending

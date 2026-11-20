@@ -43,7 +43,7 @@ int main() {
  assert(!RRObserveFill(s,c,f));f.entry.remainder_reconciled=true;
  assert(RRObserveFill(s,c,f)&&s.phase==RR_PROTECT&&s.live_sl==300930);
  assert(RRStage(s,c,0,0,a)&&a.kind==RR_INITIAL_SL&&a.sl_ticks==300935&&a.position_ticket==200);
- assert(!RRApplyDurableClose(s,close(s,RC_SL,RC_INITIAL_LEVEL,300930))); // pending effect unresolved
+ assert(!RRApplySessionClose(s,close(s,RC_SL,RC_INITIAL_LEVEL,300930))); // pending effect unresolved
  assert(RRConfirm(s,{a,true,0})&&s.phase==RR_ARM_REVERSE&&s.live_sl==300935);
  assert(RRStage(s,c,0,0,a)&&a.kind==RR_REVERSE&&a.side==-1&&a.entry_ticks==300935&&a.sl_ticks==301005);
  assert(RRConfirm(s,{a,true,51})&&s.phase==RR_ACTIVE);
@@ -54,8 +54,8 @@ int main() {
  assert(RRStage(s,c,301055,301100,a)&&a.kind==RR_SUPPORT_SL&&a.stage==2&&a.sl_ticks==301005);
  assert(RRConfirm(s,{a,true,0}));
  auto proof=close(s,RC_SL,RC_SUPPORT_LEVEL,301005);
- assert(RRApplyDurableClose(s,proof)&&s.cycle.full_sl_count==0&&s.phase==RR_ARM_REENTRY);
- assert(!RRApplyDurableClose(s,proof)); // duplicate immediate close
+ assert(RRApplySessionClose(s,proof)&&s.cycle.full_sl_count==0&&s.phase==RR_ARM_REENTRY);
+ assert(!RRApplySessionClose(s,proof)); // duplicate immediate close
  assert(RRStage(s,c,0,0,a)&&a.kind==RR_REENTRY&&a.entry_ticks==301075&&a.side==1);
  assert(RRConfirm(s,{a,true,52})&&s.phase==RR_WAIT&&s.opposite.ticket==51);
  f=fill(s,s.entry,101,301080,99);
@@ -69,20 +69,20 @@ int main() {
  assert(RRStage(s,c,0,0,a)&&a.kind==RR_REVERSE&&a.entry_ticks==301010);
  assert(RRConfirm(s,{a,true,53}));
  proof=close(s,RC_SL,RC_INITIAL_LEVEL,301010);
- assert(RRApplyDurableClose(s,proof)&&s.cycle.full_sl_count==1&&s.phase==RR_WAIT);
+ assert(RRApplySessionClose(s,proof)&&s.cycle.full_sl_count==1&&s.phase==RR_WAIT);
  assert(s.opposite.ticket==53&&second.cycle.full_sl_count==0);
  assert(RRObserveFill(s,c,fill(s,s.opposite,102,301010)));
  assert(s.cycle.side==-1);
  assert(RRStage(s,c,0,0,a)&&a.kind==RR_REVERSE&&a.side==1);
  assert(RRConfirm(s,{a,true,54}));
  proof=close(s,RC_MANUAL,0,0);
- assert(RRApplyDurableClose(s,proof)&&s.cycle.full_sl_count==1&&s.opposite.ticket==54);
+ assert(RRApplySessionClose(s,proof)&&s.cycle.full_sl_count==1&&s.opposite.ticket==54);
  // Finish full-stop 24 with no projected slot 25.
  s.cycle.full_sl_count=23;
  assert(RRObserveFill(s,c,fill(s,s.opposite,103,s.opposite.entry_ticks)));
  assert(s.phase==RR_ACTIVE&&RCReverseSlot(s.cycle)==0&&s.opposite.ticket==0);
  assert(!RRStage(s,c,0,0,a));
  proof=close(s,RC_SL,RC_INITIAL_LEVEL,s.initial_sl);
- assert(RRApplyDurableClose(s,proof)&&s.cycle.full_sl_count==24&&s.phase==RR_DONE);
+ assert(RRApplySessionClose(s,proof)&&s.cycle.full_sl_count==24&&s.phase==RR_DONE);
  assert(!RRStage(s,c,0,0,a));
 }

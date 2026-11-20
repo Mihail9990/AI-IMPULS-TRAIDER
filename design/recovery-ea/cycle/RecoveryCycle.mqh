@@ -3,7 +3,7 @@
 
 // Offline transition rules. Prices are exact broker ticks, volume is exact broker
 // volume steps. Account/symbol/epoch, order ownership, history completeness,
-// evidence immutability and durable state + intent commit belong to the caller.
+// evidence immutability and in-session state + intent commit belong to the caller.
 // No terminal reads, trade API, timers, retries, or guessed executions.
 #define RC_LIMIT 24
 #define RC_MAX_UNITS 1000000000000
