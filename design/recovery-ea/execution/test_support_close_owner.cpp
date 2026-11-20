@@ -125,4 +125,44 @@ int main(){
  assert(begin(t,f));
  auto alien=t.working.request.binding;alien.verifier_chart++;
  assert(RecoveryStepSupportCloseOwner(t,f.owner,f.panel,f.session,f.live,f.scope,alien)==RSCO_STOPPED);
+ for(int side : {-1,1}) for(int result : {0,1,2}) {
+  auto f=prepared(side);RecoverySupportCloseOwner task{};
+  assert(begin(task,f)&&step(task,f)==RSCO_PUBLISHED);
+  answer=current(f);has_answer=true;
+  assert(step(task,f)==RSCO_REENTRY_READY);
+  auto &r=f.panel.ranges[0];
+  assert(RRConfirm(r,{task.reentry,true,504}));
+  const RRKnownOrder filled=r.entry,other=r.opposite;
+  const long actual=filled.entry_ticks+side*6;
+  const RRFilled e{{r.cycle.generation,r.cycle.range_id,504,504,505,filled.side,filled.volume_steps,
+                    filled.volume_steps,filled.volume_steps,actual,true,true,true},
+                   506,other.ticket,filled.sl_ticks,0,true};
+  auto context=task.working.request.binding;
+  RecoverySupportRotationOwner move{};
+  assert(RecoveryBeginSupportRotationOwner(move,f.owner,f.panel,f.session,f.live,f.scope,f.verifier,
+         context,e,other,54,.01,.01));
+  assert(move.phase==RSRM_SEND&&r.live_sl==filled.sl_ticks&&r.pending.order_ticket==other.ticket);
+  assert(r.pending.entry_ticks==actual-side*80&&r.pending.volume_steps==other.volume_steps);
+  auto tick=[&]{return RecoveryStepSupportRotationOwner(move,f.owner,f.panel,f.session,f.live,f.scope,context);};
+  const int sent=modifications;
+  deny_modify=result==1;
+  if(deny_modify){assert(tick()==RSRM_UNRESOLVED&&tick()==RSRM_UNRESOLVED);}
+  else {
+   assert(tick()==RSRM_REQUEST&&tick()==RSRM_READ);
+   has_answer=false;
+   assert(tick()==RSRM_READ); // no repeat dispatch
+   const auto a=move.plan.move;
+   answer={true,true,"ok","current",result==2?54:55,"0",
+     string("E\tcurrent\t0\t18\t")+(a.side==1?"4":"5")+"\t1\t"+ticks(a.volume_steps)+"\t"+
+     ticks(a.volume_steps)+"\t"+ticks(a.entry_ticks)+"\t"+ticks(a.sl_ticks)+"\t0\t0.0000000000000000"};
+   has_answer=true;
+   assert(tick()==(result==2?RSRM_UNRESOLVED:RSRM_DONE));
+  }
+  assert(modifications==sent+1&&f.owner.next_exact_ticket==other.ticket);
+  assert(f.owner.ledger.confirmed_full_sl_count==2&&r.live_sl==filled.sl_ticks);
+  if(result==0)assert(r.phase==RR_ACTIVE&&r.opposite.ticket==other.ticket&&r.opposite.sl_ticks==actual);
+  else assert(r.phase==RR_ARM_REVERSE&&r.retire.ticket==other.ticket);
+  deny_modify=false;
+ }
+
 }

@@ -81,6 +81,28 @@ bool RecoveryDispatchTarget(const RecoveryIntentKey &key,const RRRangeState &ran
          !RecoveryDispatchUnits(row.remaining_volume,step,false,expected_volume)) return false;
       return RecoveryIntentContextOK(key);
      }
+   // For two-sided support reentry, the old fixed opposite must still
+   // be that exact untouched STOP. RecoveryDispatchImpl checks both before
+   // OrderCheck and again after reservation, immediately before OrderSend.
+   if(action.kind==RR_REENTRY && range.opposite.ticket!=0)
+     {
+      const RRKnownOrder keep=range.opposite;
+      if(keep.side!=-action.side || keep.volume_steps<=0)return false;
+      RecoveryExactOrderScope target;
+      target.login=key.login;target.server=key.server;target.symbol=key.symbol;
+      target.magic=(ulong)key.magic;target.ticket=keep.ticket;
+      RecoveryExactOrderObservation row;
+      if(RecoveryObserveExactOrder(target,row)!=RECOVERY_EXACT_ORDER_OBSERVED ||
+         row.source!=RECOVERY_EXACT_ORDER_CURRENT || row.state!=ORDER_STATE_PLACED ||
+         row.position_identifier!=0 ||
+         row.type!=(keep.side==1 ? ORDER_TYPE_BUY_STOP : ORDER_TYPE_SELL_STOP) ||
+         row.tp!=0.0 || row.stop_limit!=0.0 ||
+         !RecoveryDispatchUnits(row.price,tick,false,keep.entry_ticks) ||
+         !RecoveryDispatchUnits(row.sl,tick,false,keep.sl_ticks) ||
+         !RecoveryDispatchUnits(row.initial_volume,step,false,keep.volume_steps) ||
+         !RecoveryDispatchUnits(row.remaining_volume,step,false,keep.volume_steps))return false;
+      return RecoveryIntentContextOK(key);
+     }
    return action.kind==RR_PRIMARY || action.kind==RR_REVERSE || action.kind==RR_REENTRY;
   }
 

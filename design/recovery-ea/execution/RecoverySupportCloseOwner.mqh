@@ -4,7 +4,7 @@
 #include "RecoveryExactOrderEffect.mqh"
 #include "../cycle/RecoverySupportGap.mqh"
 
-enum RecoverySupportClosePhase { RSCO_IDLE=0, RSCO_REQUEST, RSCO_READ, RSCO_STAGED, RSCO_UNRESOLVED };
+enum RecoverySupportClosePhase { RSCO_IDLE=0, RSCO_REQUEST, RSCO_READ, RSCO_STAGED, RSCO_UNRESOLVED, RSCO_DISPATCHED };
 enum RecoverySupportCloseResult { RSCO_WAIT=0, RSCO_PUBLISHED, RSCO_REENTRY_READY, RSCO_STOPPED };
 
 // Owned only by the running chart. No persistence and no trade IO here.
@@ -13,7 +13,7 @@ struct RecoverySupportCloseOwner {
  RRSupportGap gap;
  RecoveryExactEffectBinding working;
  string publisher_tag;
- ulong owner_revision;
+ ulong owner_revision,working_sequence;
  RRAction reentry;
  RecoveryIntentKey key;
 };
@@ -143,7 +143,8 @@ RecoverySupportCloseResult RecoveryStepSupportCloseOwner(RecoverySupportCloseOwn
 
  panel.ranges[owner.range_id-1]=next;
  owner.ledger=ledger;owner.revision++;
- task.gap=gap;task.reentry=action;task.key=key;task.phase=RSCO_STAGED;
+ task.gap=gap;task.reentry=action;task.key=key;task.working_sequence=(ulong)report.sequence;
+ task.phase=RSCO_STAGED;
  return RSCO_REENTRY_READY;
 }
 #endif

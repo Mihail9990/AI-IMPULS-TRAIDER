@@ -22,10 +22,11 @@ struct RecoveryLiveSession{
 };
 enum {REC_CONTROL_IDLE,REC_CONTROL_RANGES};
 struct TestCycle {ulong position_id,generation,active_order;int range_id;long actual_entry_ticks;};
-struct RRRangeState {TestCycle cycle;ulong scope,position_ticket;long initial_sl,live_sl;int support_stage;};
+struct TestKnown {ulong ticket;};
+struct RRRangeState {TestKnown entry,opposite;TestCycle cycle;ulong scope,position_ticket;long initial_sl,live_sl;int support_stage;};
 using TestRange=RRRangeState;
 struct RecoveryPanelControl {int mode;bool configured[2];TestRange ranges[2];RRSettings settings;};
-struct RecoveryEvidenceOwner {string verifier_epoch;long verifier_chart;};
+struct RecoveryEvidenceOwner {string verifier_epoch;long verifier_chart;ulong serial;};
 enum {RRO_UNUSED,RRO_PRIMARY_PENDING,RRO_ORDINARY,RRO_FINAL,RRO_PRIMARY_CLAIMED};
 struct TestOpening {bool reserved,sl_required;int reverse;};
 struct TestOrdinary {struct Hint{int state;};struct Pump{int state;};Hint hint;Pump pump;};
@@ -85,8 +86,8 @@ enum {RCP_IDLE,RCP_DONE,RCP_UNRESOLVED,RC_INITIAL_LEVEL,RC_SUPPORT_LEVEL,RC_SUPP
 enum RecoveryClosePollResult{RCP_PROOF};
 struct RecoveryRangeClosePoll{int state;ulong verified_sequence;};
 struct RCCloseCheckpoint {int value,before,proof;};
-enum {RSCO_IDLE,RSCO_REQUEST,RSCO_READ,RSCO_STAGED};
-struct RecoverySupportCloseOwner{int phase;};
+enum {RSCO_IDLE,RSCO_REQUEST,RSCO_READ,RSCO_STAGED,RSCO_DISPATCHED};
+struct RecoverySupportCloseOwner{int phase,reentry;RecoveryIntentKey key;ulong working_sequence;};
 int reentry_stages=0,full_counts=0;
 int RCClassifyClose(int,int proof){return proof;}
 int RRRecordAlternatingClose(int& count,const RCCloseCheckpoint& re){
@@ -110,7 +111,7 @@ void RecoverySupportRuntimeTimer(RecoverySupportRuntime&,RecoveryEvidenceOwner&,
  const RecoverySessionContext&,const RecoverySessionIntentScope&,const RecoveryInventoryScope&,const string&,
  long watcher,RRRangeState& range,const RRSettings&,double,double){
  assert(watcher==77&&range.cycle.position_id!=0);
- ++support_ticks;range.support_stage=2;range.live_sl=range.cycle.actual_entry_ticks;
+ ++support_ticks;range.support_stage=close_type==RC_SUPPORT_SL?2:0;range.live_sl=range.cycle.actual_entry_ticks;
 }
 bool RecoveryBeginRangeClosePoll(RecoveryRangeClosePoll& probe,RecoveryEvidenceOwner&,const RecoverySessionLifecycle&,
  const RecoverySessionContext&,const RecoveryInventoryScope&,const RRRangeState&,const RRSettings&,double,double){
@@ -120,8 +121,80 @@ bool RecoveryBeginRangeClosePoll(RecoveryRangeClosePoll& probe,RecoveryEvidenceO
 RecoveryClosePollResult RecoveryRangeClosePollStep(RecoveryRangeClosePoll& probe,const RecoverySessionLifecycle&,const RecoverySessionContext&,
  const RRRangeState&,const RRSettings&,const RCProtectionFact* f,RCCloseCheckpoint& out){
  assert(f[0].confirmed&&f[0].stop_class==RC_INITIAL_LEVEL&&f[0].stop_ticks==399920);
- assert(f[1].confirmed&&f[1].stop_class==RC_SUPPORT_LEVEL&&f[1].stop_ticks==400000);
+ assert(f[1].stop_class==RC_SUPPORT_LEVEL&&f[1].stop_ticks==(close_type==RC_SUPPORT_SL?400000:0));
  ++close_reads;out.value=1;out.proof=close_type;probe.state=RCP_DONE;probe.verified_sequence=19;return RCP_PROOF;
+}
+
+enum { RSRE_IDLE,RSRE_RECEIPT,RSRE_REQUEST,RSRE_READ,RSRE_WORKING,RSRE_UNRESOLVED };
+enum { RDS_IDLE,RDS_LOCAL,RDS_DONE,RDS_STOP,RDS_WAIT,RDS_PROOF };
+enum { RSRM_IDLE,RSRM_SEND,RSRM_REQUEST,RSRM_DONE,RSRM_UNRESOLVED };
+struct RecoverySupportReentry {int state;ulong ticket;};
+struct RecoverySupportRotationOwner {int phase;};
+struct RecoveryDualSupportPump {int state;ulong verified_sequence;};
+struct RecoveryDualSupportBinding {
+ RecoveryExactReportScope entry,opposite;
+ struct {RecoveryInventoryScope binding;} history;
+ RecoveryInventoryScope inventory;
+ string publisher_tag;
+ ulong verify_after;
+ double price_tick,volume_step;
+};
+using RRKnownOrder=TestKnown;
+struct RREffect {ulong created_order;};
+bool fast_entry=false,emit_dual=false;
+int submits_reentry=0,rotation_calls=0,dual_begins=0;
+bool RecoverySubmitSupportReentry(RecoverySupportReentry& t,RecoverySupportCloseOwner& c,RecoveryRangeOwner&,
+ const RecoveryPanelControl&,const RecoverySessionLifecycle&,const RecoverySessionContext&,
+ const RecoverySessionIntentScope&,const RecoveryInventoryScope&) {
+ assert(c.phase==RSCO_STAGED);c.phase=RSCO_DISPATCHED;t.ticket=92;c.key.id="support";
+ c.working_sequence=20;t.state=RSRE_RECEIPT;++submits_reentry;return true;
+}
+bool RecoveryBeginSupportReentryVerification(RecoverySupportReentry& t,const RecoverySupportCloseOwner&,
+ const RecoveryRangeOwner&,const RecoveryPanelControl&,const RecoverySessionLifecycle&,const RecoverySessionContext&,
+ const RecoverySessionIntentScope&,const RecoveryInventoryScope&,RecoveryEvidenceOwner&) {
+ assert(t.state==RSRE_RECEIPT);t.state=RSRE_REQUEST;return true;
+}
+void RecoveryStepSupportReentry(RecoverySupportReentry& t,const RecoverySupportCloseOwner&,
+ RecoveryRangeOwner& r,RecoveryPanelControl& p,const RecoverySessionLifecycle&,const RecoverySessionContext&,
+ const RecoverySessionIntentScope&,const RecoveryInventoryScope&) {
+ if(t.state==RSRE_REQUEST){t.state=RSRE_READ;return;}
+ auto& s=p.ranges[r.id-1];
+ s.cycle.position_id=0;
+ if(fast_entry){t.state=RSRE_UNRESOLVED;return;}
+ s.entry.ticket=92;s.opposite.ticket=77;t.state=RSRE_WORKING;
+}
+bool RRHasSupportAlternatives(const RRRangeState& s){return s.entry.ticket!=0&&s.opposite.ticket!=0;}
+bool RecoveryDualPendingReentryView(const RRRangeState& s,const RRSettings&,const RecoverySessionIntentScope&,
+ int,const RecoveryIntentKey& k,ulong t,double,double,RRRangeState& v) {
+ assert(k.id=="support"&&t==92);
+ v=s;v.entry.ticket=t;v.opposite.ticket=77;return true;
+}
+bool RecoveryBeginDualSupport(RecoveryDualSupportPump& p,const RRRangeState&,const RRSettings&,
+ const RecoveryDualSupportBinding& b){
+ assert(b.entry.order_ticket==92&&b.opposite.order_ticket==77&&b.verify_after==20);
+ p.state=RDS_LOCAL;++dual_begins;return true;
+}
+int RecoveryStepDualSupport(RecoveryDualSupportPump& p,const RRRangeState&,const RRSettings&,RRFilled& f,RRKnownOrder& o){
+ if(!emit_dual)return RDS_WAIT;
+ p.state=RDS_DONE;p.verified_sequence=44;f.entry.executed_order=92;o.ticket=77;return RDS_PROOF;
+}
+bool RecoveryDualPendingReentryEffect(const RecoveryDualSupportPump& p,const RRRangeState&,const RRSettings&,
+ const RecoverySessionIntentScope&,int,const RecoveryIntentKey&,ulong t,RREffect& e) {
+ assert(fast_entry&&p.state==RDS_DONE);e.created_order=t;return true;
+}
+bool RRConfirm(RRRangeState& s,const RREffect& e){s.entry.ticket=e.created_order;return true;}
+bool RecoveryBeginSupportRotationOwner(RecoverySupportRotationOwner& t,RecoveryRangeOwner& u,
+ RecoveryPanelControl& panel,const RecoverySessionLifecycle&,const RecoverySessionContext&,
+ const RecoverySessionIntentScope&,RecoveryEvidenceOwner&,const RecoveryInventoryScope&,
+ const RRFilled& f,const RRKnownOrder& s,ulong seq,double,double) {
+ assert(panel.ranges[u.id-1].entry.ticket==f.entry.executed_order&&s.ticket==77&&seq==44);
+ t.phase=RSRM_SEND;++rotation_calls;return true;
+}
+void RecoveryStepSupportRotationOwner(RecoverySupportRotationOwner& t,RecoveryRangeOwner&,
+ RecoveryPanelControl&,const RecoverySessionLifecycle&,const RecoverySessionContext&,
+ const RecoverySessionIntentScope&,const RecoveryInventoryScope&) {
+ if(t.phase==RSRM_SEND)t.phase=RSRM_REQUEST;
+ else if(t.phase==RSRM_REQUEST)t.phase=RSRM_DONE;
 }
 struct RecoverySessionAlternatingResult{};
 struct RecoveryPanelApplyResult{};
@@ -238,9 +311,23 @@ int main(){
  assert(support_ticks==2&&close_reads==1&&single.close_proof[0].value==1);
  assert(RecoveryChartOnTimer(single,live)&&close_reads==1&&reentry_stages==1);
  assert(RecoveryChartOnTimer(single,live)&&reentry_stages==1);
+ assert(submits_reentry==1&&dual_begins==1);
+ emit_dual=true;
+ assert(RecoveryChartOnTimer(single,live)&&rotation_calls==1);
+ assert(RecoveryChartOnTimer(single,live)&&single.rotation[0].phase==RSRM_DONE);
+ emit_dual=false;
  close_type=RC_FULL_SL;
  single.panel.ranges[0].cycle.position_id=90;
  assert(RecoveryChartOnTimer(single,live)&&full_counts==1&&reentry_stages==1);
+ RecoveryChartStop(single);
+ // Journal-backed fast fill arrives before PLACED proof.
+ fast_entry=true;close_type=RC_SUPPORT_SL;closing=false;configure=true;
+ assert(RecoveryChartStart(single,live,"profile","fast","verifier",2,settings,.01,.02,string(32,'a'),77));
+ assert(RecoveryChartOnTimer(single,live));
+ closing=true;
+ assert(RecoveryChartOnTimer(single,live)&&RecoveryChartOnTimer(single,live));
+ emit_dual=true;
+ assert(RecoveryChartOnTimer(single,live)&&rotation_calls==2&&submits_reentry==2);
  RecoveryChartStop(single);
 }
 """
@@ -249,7 +336,7 @@ class ChartRuntimeCompat(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path=Path(d)
             src=(HERE/"RecoveryChartRuntime.mqh").read_text()
-            for cast in ("request.order_ticket","q.order_ticket","chart.oco.winner_order"):
+            for cast in ("request.order_ticket","q.order_ticket","chart.oco.winner_order","serial"):
                 src=src.replace("(string)"+cast,"std::to_string("+cast+")")
             (path/"RecoveryChartRuntime.mqh").write_text("\n".join(x for x in src.splitlines() if not x.startswith("#include")))
             (path/"check.cpp").write_text(SHIM+TEST)

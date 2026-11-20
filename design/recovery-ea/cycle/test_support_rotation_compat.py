@@ -26,7 +26,7 @@ class SupportRotationCompat(unittest.TestCase):
                         keys[start:end]+keys[match_start:match_end],1)
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
-            for name in ('RecoveryCycle.mqh','RecoveryRangeCoordinator.mqh','RecoveryOpeningPair.mqh','RecoverySupportRotation.mqh','test_support_rotation.cpp'):
+            for name in ('RecoveryCycle.mqh','RecoveryRangeCoordinator.mqh','RecoveryOpeningPair.mqh','RecoverySupportRotation.mqh','RecoveryAlternatingFill.mqh','RecoverySupportRotationLedger.mqh','test_support_rotation.cpp'):
                 shutil.copy2(HERE / name,tmp / name)
             (tmp / 'RecoveryCloseCheckpoint.mqh').write_text(cp+'\n#endif\n')
             exe = tmp / 'cycle'

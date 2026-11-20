@@ -4,7 +4,7 @@
 #include <initializer_list>
 using ulong=std::uint64_t;
 constexpr auto ULONG_MAX=std::numeric_limits<ulong>::max();
-#include "RecoverySupportRotation.mqh"
+#include "RecoverySupportRotationLedger.mqh"
 
 static RRSettings config() {
  RRSettings cfg{};cfg.scope=1;cfg.generation=7;
@@ -155,5 +155,37 @@ int main() {
  assert(!p.reserved&&!p.move_required&&!p.sl_required&&s.pending.kind==RR_NONE);
  assert(s.phase==RR_ACTIVE&&s.live_sl==f.sl_ticks&&s.initial_sl==f.sl_ticks);
  assert(RRKnownEqual(s.opposite,aligned_single)&&RROppositeAnchor(s)==400005);
+
+ // The verified support exit is replaced, not charged; older unconfirmed
+ // predecessors remain separately accountable and duplicate fills do not replay.
+ for(int side : {-1,1}) for(bool reentry_wins : {false,true}) {
+   auto range=wait(single,side);
+   RRAlternationLedger ledger{};
+   ledger.scope=range.scope;ledger.generation=range.cycle.generation;ledger.range_id=range.cycle.range_id;
+   ledger.position_count=2;ledger.strategy_slot=5;ledger.confirmed_full_sl_count=1;
+   ledger.positions[0].bound_entry.position_id=401;ledger.positions[0].bound_entry.active_order=101;
+   ledger.positions[0].detached=true;
+   RRAlternatingPosition &old=ledger.positions[1];
+   old.bound_entry=range.cycle;old.bound_entry.position_id=500;old.bound_entry.active_order=200;
+   old.bound_entry.side=side;old.bound_entry.actual_entry_ticks=400000;old.exit_class=RC_SUPPORT_SL;
+   old.reported_stop=400000;
+   auto won=reentry_wins?range.entry:range.opposite;
+   auto remains=reentry_wins?range.opposite:range.entry;
+   auto e=fill(range,won,won.entry_ticks+won.side*6,remains.ticket);
+   RRSupportRotation r{};
+   assert(!RRStageSupportRotationLedger(range,single,ledger,e,remains,r)); // no confirmed exit
+   old.exit_recorded=true;
+   e.entry.position_id=401;
+   assert(!RRStageSupportRotationLedger(range,single,ledger,e,remains,r)); // replay/owned predecessor
+   e.entry.position_id=501;
+   assert(RRStageSupportRotationLedger(range,single,ledger,e,remains,r));
+   assert(r.move.order_ticket==remains.ticket&&r.move.volume_steps==remains.volume_steps);
+   assert(r.move.entry_ticks==e.entry.actual_entry_ticks-won.side*80);
+   assert(range.live_sl==won.sl_ticks&&RRAltBound(range,ledger));
+   assert(ledger.positions[0].bound_entry.position_id==401&&ledger.positions[0].detached);
+   assert(ledger.positions[1].bound_entry.position_id==501&&!ledger.positions[1].exit_recorded);
+   assert(ledger.position_count==2&&ledger.strategy_slot==5&&ledger.confirmed_full_sl_count==1);
+   assert(!RRStageSupportRotationLedger(range,single,ledger,e,remains,r));
+ }
 
 }

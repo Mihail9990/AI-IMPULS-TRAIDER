@@ -30,6 +30,7 @@ struct RecoveryRangeOwner {
  RecoveryRangeOwnerPhase phase;int range_id;string executor_epoch;
  ulong scope,generation,revision;
  RROpeningPair opening;RRAlternationLedger ledger;
+ ulong next_exact_ticket,armed_position; int ordinary;
 };
 struct RecoveryPanelControl {int mode;bool configured[2];RRSettings settings;RRRangeState ranges[2];};
 const int REC_CONTROL_RANGES=3,ORDER_TYPE_BUY_STOP=4,ORDER_TYPE_SELL_STOP=5,
@@ -93,7 +94,8 @@ class SupportCloseOwnerCompat(unittest.TestCase):
             c.mkdir()
             q.mkdir()
             for fn in ("RecoveryCycle.mqh", "RecoveryRangeCoordinator.mqh", "RecoveryOpeningPair.mqh",
-                       "RecoveryAlternatingFill.mqh", "RecoverySupportGap.mqh"):
+                       "RecoveryAlternatingFill.mqh", "RecoverySupportGap.mqh",
+                       "RecoverySupportRotation.mqh", "RecoverySupportRotationLedger.mqh"):
                 shutil.copy2(cycle / fn, c)
             cp = (cycle / "RecoveryCloseCheckpoint.mqh").read_text().split("// Canonical snapshot", 1)[0]
             cp = cp.replace('#include "RecoveryCloseWire.mqh"', '#include "RecoveryCycle.mqh"')
@@ -112,7 +114,7 @@ class SupportCloseOwnerCompat(unittest.TestCase):
             bound = (execution / "RecoveryRangeOwner.mqh").read_text()
             bound = bound[bound.index("bool RecoveryRangeOwnerBound("):bound.index("bool RecoveryRangeOwnerSubmit(")]
             fold = (execution / "RecoveryExactOrderEffect.mqh").read_text()
-            binder = fold[fold.index("struct RecoveryExactEffectBinding"):fold.index("bool RecoveryExactEffectBound")]
+            binder = fold[fold.index("struct RecoveryExactEffectBinding"):fold.index("// Internal fold")]
             fold = fold[fold.index("bool RecoveryExactEffectFold"):fold.index("bool RecoveryBuildExactOrderEffect")]
             fold = fold.replace("string f[];", "std::vector<string> f;").replace(
                 "(string)binding.request.binding.magic", "std::to_string(binding.request.binding.magic)")
@@ -128,8 +130,28 @@ class SupportCloseOwnerCompat(unittest.TestCase):
             fixture = fixture.replace("constexpr auto ULONG_MAX", "#undef ULONG_MAX\nconstexpr auto ULONG_MAX")
             src = q / "test.cpp"
             cpp = (HERE / "test_support_close_owner.cpp").read_text()
+            rotation = (HERE / "RecoverySupportRotationOwner.mqh").read_text()
+            rotation = "\n".join(l for l in rotation.splitlines() if not l.startswith("#include"))
+            rotation = rotation.replace("(string)serial", "std::to_string(serial)")
+            binder = '#include "../cycle/RecoverySupportRotationLedger.mqh"\n' + binder
+            runtime = r"""
+bool RecoveryWorkingReverseContext(const RecoverySessionLifecycle& session,const RecoverySessionContext& live,
+ const RecoverySessionIntentScope& scope,const RecoveryExactReportScope& q){
+ return RecoveryPrimarySession(session,live,scope)&&RecoveryInvScopeOK(q.binding)&&q.order_ticket>0&&
+        q.binding.executor_epoch==session.epoch&&q.binding.login==live.login&&q.binding.magic==live.magic;
+}
+void RecoveryOrdinaryEventReset(int& o){o=0;}
+enum {RD_NOT_SENT=0,RD_OUTCOME_UNRESOLVED=3};
+struct RecoveryRotationDispatchResult {struct {int state;} move;};
+int modifications=0;bool deny_modify=false;
+bool RecoveryDispatchSupportRotation(const RRRangeState& s,const RRSupportRotation& p,const RecoveryIntentKey&,
+ const RecoveryIntentKey&,double,double,RecoveryRotationDispatchResult& out){
+ assert(RRSupportRotationBound(s,p)&&!p.sl_required&&p.move_required&&p.move.order_ticket==p.previous.ticket);
+ ++modifications;out.move.state=deny_modify?RD_NOT_SENT:RD_OUTCOME_UNRESOLVED;return true;
+}
+"""
             src.write_text(shim + fixture + TYPES.replace('"RecoverySupportGap.mqh"', '"../cycle/RecoverySupportGap.mqh"')
-                           + bound + binder + fold + source + "\n" + cpp)
+                           + bound + binder + fold + source + runtime + rotation + "\n" + cpp)
             exe = q / "test"
             subprocess.run(["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
                             "-fsanitize=undefined", "-fno-sanitize-recover=all", str(src), "-lcrypto",

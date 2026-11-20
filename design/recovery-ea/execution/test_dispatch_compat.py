@@ -22,7 +22,7 @@ enum {RR_INITIAL_SL=1,RR_SUPPORT_SL,RR_CANCEL,RR_PRIMARY,RR_REVERSE,RR_REENTRY,R
 struct RRAction {int kind,side;ulong position_ticket,position_id,order_ticket,generation;long
                  tp_ticks,entry_ticks,sl_ticks,volume_steps;};
 struct RRKnownOrder {ulong ticket{}; int side{}; long entry_ticks{},sl_ticks{},volume_steps{};};
-struct RRRangeState {long live_sl; RRKnownOrder retire{};};
+struct RRRangeState {long live_sl; RRKnownOrder retire{},opposite{};};
 struct RecoveryIntentKey {long login,magic,generation; string server,symbol;};
 enum {RI_NO_RECORD,RI_UNRESOLVED,RI_TICKET,RI_UNAVAILABLE};
 struct MqlTradeRequest {int action;};
@@ -34,7 +34,7 @@ struct RecoveryExactOrderObservation {int source,state,type;ulong position_ident
    tp,stop_limit,price,sl,initial_volume,remaining_volume;};
 template<class T> void ZeroMemory(T& a){a=T{};}
 bool context=true,preflight=true,can_reserve=true,reserved=false,can_record=true,acked=true;
-bool own_order=true,valid_build=true,mutate_after_reserve=false;
+bool own_order=true,valid_build=true,mutate_after_reserve=false,lose_other_during_check=false;
 int send_calls=0,async_calls=0,check_calls=0,change_sl=0,check_code=0;
 uint send_code=TRADE_RETCODE_PLACED;
 ulong broker_ticket=9007199254740993ULL,recorded=0;
@@ -62,13 +62,13 @@ bool PositionGetDouble(int prop,double &v){v=prop==POSITION_TP?4000.8:3999.3+cha
 int RecoveryObserveExactOrder(const RecoveryExactOrderScope&,RecoveryExactOrderObservation& o){
     o={RECOVERY_EXACT_ORDER_CURRENT,ORDER_STATE_PLACED,ORDER_TYPE_SELL_STOP,0,0,0,3999.3,4000,.02,
        own_order?.02:.01};return RECOVERY_EXACT_ORDER_OBSERVED;}
-bool OrderCheck(MqlTradeRequest&,MqlTradeCheckResult &r){++check_calls;r.retcode=check_code;return preflight;}
+bool OrderCheck(MqlTradeRequest&,MqlTradeCheckResult &r){++check_calls;r.retcode=check_code;if(lose_other_during_check)own_order=false;return preflight;}
 bool OrderSend(MqlTradeRequest&,MqlTradeResult &r){
     assert(reserved);++send_calls;r.order=broker_ticket;r.retcode=send_code;return acked;}
 bool OrderSendAsync(MqlTradeRequest&,MqlTradeResult &r){
     assert(reserved);++async_calls;r.retcode=send_code;return acked;}
 void reset(){context=preflight=can_reserve=can_record=acked=own_order=valid_build=true;
-    reserved=mutate_after_reserve=false;send_calls=async_calls=check_calls=change_sl=check_code=0;
+    reserved=mutate_after_reserve=lose_other_during_check=false;send_calls=async_calls=check_calls=change_sl=check_code=0;
     send_code=TRADE_RETCODE_PLACED;broker_ticket=9007199254740993ULL;recorded=0;}
 """
 TEST = r"""
@@ -107,6 +107,13 @@ int main(){
     reset();acked=false;
     assert(RecoveryDispatchOpeningSLAsync(s,a,k,.01,.01,r)==RD_RESERVED_NOT_SENT &&
            !r.async_sl_submitted && check_calls==0 && async_calls==1);
+    reset();a={RR_REENTRY,1,0,0,0,8,0,400000,399920,2};
+    s.opposite={77,-1,399930,400000,2};
+    own_order=false;assert(call()==RD_NOT_SENT && check_calls==0 && send_calls==0);
+    reset();lose_other_during_check=true;
+    assert(call()==RD_RESERVED_NOT_SENT && check_calls==1 && send_calls==0);
+    reset();assert(call()==RD_TICKET_RECORDED && check_calls==1 && send_calls==1);
+    s.opposite={};
     reset();a={RR_CANCEL,-1,0,0,77,8,0,399930,400000,2};
     own_order=false;assert(call()==RD_NOT_SENT && check_calls==0);
     reset();assert(call()==RD_OUTCOME_UNRESOLVED && send_calls==1);
