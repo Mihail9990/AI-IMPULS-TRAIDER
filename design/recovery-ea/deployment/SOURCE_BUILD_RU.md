@@ -10,7 +10,7 @@
 с проверяемыми исходниками.
 
 ```powershell
-$Commit = 'aa4685a85d15af0f52c693a1552a6b5acfac876d'
+$Commit = '020a13cd5d7ff70365663f3ff0331445f7504562'
 $Deploy = 'design\recovery-ea\deployment'
 $Archive = Join-Path $env:TEMP 'recovery-ea-diagnostic.zip'
 $Results = Join-Path $env:TEMP 'recovery-ea-compile-results'
@@ -52,7 +52,10 @@ $Pack = $PackJson | ConvertFrom-Json
 издателя. Если результат неизвестен или
 лог неполный, сборка считается неуспешной. Запускается только
 [компиляция через MetaEditor](https://www.metatrader5.com/en/metaeditor/help/beginning/integration_ide);
-выпуск требует отдельного прогона и проверки полного цикла на демо.
+это не проверка фактического исполнения торговых заявок. Для выдачи
+финального ZIP требуются сборка трёх рабочих EA и проверка чистого установщика;
+демо-прогон не является обязательной стадией. Укажите, если исполнение сделок
+не проверялось.
 Перед передачей логов удалите личное имя из путей и лишние данные;
 достаточно результата и строк с ошибками.
 
