@@ -76,8 +76,8 @@ bool RecoveryExactReportRequest(const RecoveryExactReportScope &scope,const stri
    const string text=RecoveryExactReportRequestText(scope);
    if(text=="" || !RecoveryInvHex(publisher_tag)) return false;
    const string prefix="RECOVERY_VERIFY\\"+scope.binding.nonce;
-   const string final=prefix+".ord", temp=prefix+"."+publisher_tag+".ord.tmp";
-   if(FileIsExist(final) || FileIsExist(prefix+".order") || FileIsExist(temp)) return false;
+   const string request_path=prefix+".ord", temp=prefix+"."+publisher_tag+".ord.tmp";
+   if(FileIsExist(request_path) || FileIsExist(prefix+".order") || FileIsExist(temp)) return false;
    uchar payload[];
    const int length=StringToCharArray(text,payload,0,WHOLE_ARRAY,CP_UTF8)-1;
    if(length<1 || length>2048) return false;
@@ -86,7 +86,7 @@ bool RecoveryExactReportRequest(const RecoveryExactReportScope &scope,const stri
    const uint written=FileWriteArray(h,payload,0,length);
    FileFlush(h);
    FileClose(h);
-   if(written==(uint)length && FileMove(temp,0,final,0)) return true;
+   if(written==(uint)length && FileMove(temp,0,request_path,0)) return true;
    FileDelete(temp);
    return false;
 }

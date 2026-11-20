@@ -3,9 +3,10 @@
 #include "RecoverySingleSupportService.mqh"
 #include "RecoveryOwnerEvidence.mqh"
 #include "RecoveryInventoryRequest.mqh"
+#include "RecoveryProofRetry.mqh"
 
 enum RecoverySupportRuntimeState {
- RSS_IDLE=0,RSS_WATCH,RSS_WAIT_LOCAL,RSS_WAIT_VERIFIER,RSS_DONE,RSS_UNCERTAIN
+ RSS_IDLE=0,RSS_WATCH,RSS_WAIT_LOCAL,RSS_WAIT_VERIFIER,RSS_DONE,RSS_UNCERTAIN,RSS_RETRY_VERIFIER
 };
 enum RecoverySupportRuntimeResult {
  RSR_WAIT=0,RSR_WATCHING,RSR_SUBMITTED,RSR_REQUESTED,RSR_CONFIRMED,RSR_UNKNOWN
@@ -14,6 +15,7 @@ struct RecoverySupportRuntime {
  RecoverySupportRuntimeState state;
  RecoverySingleSupport service;
  RecoveryPositionEffectBinding proof;
+ RecoveryProofRetry retry;
  string publisher_tag;
  ulong scope,generation,entry_order,position_id,position_ticket;
  int range_id;
@@ -158,30 +160,48 @@ RecoverySupportRuntimeResult RecoverySupportRuntimeTimer(RecoverySupportRuntime 
     if(task.receipt.state!=RD_OUTCOME_UNRESOLVED)return RecoverySupportRuntimeUnknown(task);
     return RSR_SUBMITTED;
  }
- if(task.state!=RSS_WAIT_LOCAL && task.state!=RSS_WAIT_VERIFIER)return RecoverySupportRuntimeUnknown(task);
+ if(task.state!=RSS_WAIT_LOCAL && task.state!=RSS_WAIT_VERIFIER && task.state!=RSS_RETRY_VERIFIER)
+    return RecoverySupportRuntimeUnknown(task);
  if(!RecoveryPositionEffectBound(range,task.proof))return RecoverySupportRuntimeUnknown(task);
 
- if(task.state==RSS_WAIT_LOCAL) {
+ if(task.state!=RSS_WAIT_VERIFIER) {
     // Do not ask the one-shot verifier before the asynchronously submitted
     // target is visible. This does not confirm it; only releases the query.
     ulong actual_magic;string actual_entry;
     if(!RecoverySupportLocalPosition(range,live,tick,step,task.service.action.sl_ticks,expected_magic,actual_magic,actual_entry) ||
        actual_magic!=task.proof.prior_position_magic || actual_entry!=task.proof.prior_position_entry)
        return RSR_WAIT;
+    if(task.state==RSS_RETRY_VERIFIER) {
+       if(!RecoveryProofRetryDue(task.retry,GetTickCount64()))return RSR_WAIT;
+       if(owner.serial==ULONG_MAX)return RecoverySupportRuntimeUnknown(task);
+       const ulong serial=++owner.serial;
+       const string nonce=RecoveryOwnerNonce("support-inventory-retry",task.service.request.nonce+":"+(string)serial);
+       if(!RecoveryInvHex(nonce) || nonce==task.proof.request.nonce || nonce==task.service.request.nonce ||
+          nonce==task.publisher_tag)return RSR_WAIT;
+       task.proof.request.nonce=nonce;
+    }
     const RecoveryInventoryScope q=task.proof.request;
-    task.state=RSS_WAIT_VERIFIER;
     if(!RecoveryRequestInventory(q.nonce,q.executor_epoch,q.verifier_epoch,q.generation,
-                                 q.login,q.server,q.symbol,q.magic))
-       return RecoverySupportRuntimeUnknown(task);
+                                 q.login,q.server,q.symbol,q.magic)) {
+       task.state=RSS_RETRY_VERIFIER;return RSR_WAIT;
+    }
+    task.state=RSS_WAIT_VERIFIER;
     return RSR_REQUESTED;
  }
 
+ // A snapshot taken while the position was open remains evidence even if
+ // it is delivered after the close. Absence alone never proves support.
+ if(!FileIsExist("RECOVERY_VERIFY\\"+task.proof.request.nonce+".snapshot"))return RSR_WAIT;
  RecoveryInventorySnapshot report;
- if(!RecoveryInvRead(task.proof.request,report))return RSR_WAIT;
- if(!RecoverySupportOwnerBound(owner,session,live,scope,verifier,watcher_epoch,watcher_chart) ||
-    !RecoveryConfirmSingleSupport(task.service,range,task.proof))
-    return RecoverySupportRuntimeUnknown(task);
- task.state=RSS_DONE;
- return RSR_CONFIRMED;
+ if(RecoveryInvRead(task.proof.request,report)) {
+    if(!RecoverySupportOwnerBound(owner,session,live,scope,verifier,watcher_epoch,watcher_chart))return RSR_UNKNOWN;
+    if(RecoveryConfirmSingleSupport(task.service,range,task.proof)) {
+       task.state=RSS_DONE;return RSR_CONFIRMED;
+    }
+    if(report.sequence>0 && (ulong)report.sequence>task.proof.verify_after)
+       task.proof.verify_after=(ulong)report.sequence;
+ }
+ task.state=RSS_RETRY_VERIFIER;
+ return RSR_WAIT;
 }
 #endif

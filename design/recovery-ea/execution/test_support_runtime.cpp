@@ -18,7 +18,7 @@ enum { RR_NONE,RR_ACTIVE,RR_SUPPORT_SL,RD_OUTCOME_UNRESOLVED,RD_NOT_SENT,
 struct RRAction {int kind,stage;long sl_ticks;};
 struct RRRangeState {
  ulong scope,position_ticket,opposite;
- struct {ulong generation,active_order,position_id;int range_id,side;long actual_entry_ticks,filled_steps;} cycle;
+ struct {ulong generation,active_order,position_id;int range_id,side;long actual_entry_ticks,filled_steps;int full_sl_count=0;} cycle;
  RRAction pending;int phase,support_stage;long live_sl,live_tp;
 };
 struct RRSettings {ulong scope,generation;long support_first_ticks,support_second_ticks,support_offset_ticks;};
@@ -37,10 +37,16 @@ struct RecoveryPositionEffectBinding {
  string prior_position_entry;double price_tick,volume_step;
 };
 struct RecoveryDispatchResult {int state;};
-struct RecoveryInventorySnapshot {bool ok;};
+struct RecoveryInventorySnapshot {long sequence;};
 const string _Symbol="XAUUSD.s";
 bool connected=true,has_pos=true,price_reached=false,follow_ok=true,submit_ok=true,inv_request_ok=true,inv_ready=false,inv_proof=true;
 int follows=0,sends=0,queries=0,confirms=0,drops=0;
+bool malformed=false;
+long sequence=1;
+ulong clock_ms=0;
+string latest_nonce;
+ulong GetTickCount64(){return clock_ms;}
+bool FileIsExist(const string &path){return path=="RECOVERY_VERIFY\\"+latest_nonce+".snapshot" && inv_ready;}
 long local_id=15,local_ticket=14,local_magic=700,local_login=5;
 double local_sl=3999.20;
 bool RecoveryInvHex(const string &s){return s.size()==32 && s.find_first_not_of("abcdef0123456789")==string::npos;}
@@ -80,6 +86,10 @@ string RecoveryOwnerNonce(const string &lane,const string &identity){
  assert(!identity.empty());
  if(lane=="support-price")return string(32,'1');
  if(lane=="support-inventory")return string(32,'2');
+ if(lane=="support-inventory-retry"){
+    const string ordinal=identity.substr(identity.rfind(':')+1);
+    return string(32-ordinal.size(),'9')+ordinal;
+ }
  assert(lane=="support-publisher");return string(32,'3');
 }
 bool RecoveryPriceScopeOK(const RecoveryPriceScope &w){return RecoveryInvHex(w.nonce);}
@@ -98,7 +108,7 @@ bool RecoverySubmitSingleSupport(RecoverySingleSupport &t,const RecoverySessionL
     const RecoverySessionContext &,const RecoverySessionIntentScope &,RRRangeState &r,
     const RRSettings &,double,double,RecoveryDispatchResult &out){
  if(!price_reached)return false;
- assert(r.opposite==50 && !r.pending.kind && t.state==1);
+ assert(r.opposite==(r.cycle.full_sl_count==23 ? 0UL : 50UL) && !r.pending.kind && t.state==1);
  ++sends;t.state=2;t.action={RR_SUPPORT_SL,2,r.cycle.actual_entry_ticks};r.pending=t.action;
  out.state=submit_ok?RD_OUTCOME_UNRESOLVED:RD_NOT_SENT;
  return true;
@@ -109,17 +119,20 @@ bool RecoveryPositionEffectBound(const RRRangeState &r,const RecoveryPositionEff
 }
 bool RecoveryRequestInventory(const string &nonce,const string &,const string &,long generation,long login,
     const string &,const string &,long magic) {
- assert(nonce==string(32,'2')&&generation==7&&login==5&&magic==700);
+ assert(RecoveryInvHex(nonce)&&generation==7&&login==5&&magic==700);
+ inv_ready=false;malformed=false;latest_nonce=nonce;
  ++queries;return inv_request_ok;
 }
 bool RecoveryInvRead(const RecoveryInventoryScope &q,RecoveryInventorySnapshot &r){
- assert(q.nonce==string(32,'2'));r.ok=inv_proof;return inv_ready;
+ assert(q.nonce==latest_nonce);r.sequence=sequence;return inv_ready && !malformed;
 }
 bool RecoveryConfirmSingleSupport(const RecoverySingleSupport &t,RRRangeState &r,
                                    const RecoveryPositionEffectBinding &b){
  ++confirms;
- if(!inv_proof || !RecoveryPositionEffectBound(r,b) || t.action.sl_ticks!=400000)return false;
- assert(r.opposite==50);r.support_stage=2;r.live_sl=t.action.sl_ticks;r.pending={};
+ if(!inv_ready || !inv_proof || (ulong)sequence<=b.verify_after ||
+    !RecoveryPositionEffectBound(r,b) || t.action.sl_ticks!=400000)return false;
+ assert(r.opposite==(r.cycle.full_sl_count==23 ? 0UL : 50UL));
+ r.support_stage=2;r.live_sl=t.action.sl_ticks;r.pending={};
  return true;
 }
 #include "SupportRuntimeUnderTest"
@@ -154,4 +167,53 @@ int main(){
  assert(step()==RSR_UNKNOWN && sends==2);
  range=initial;local_sl=0;range.live_sl=0;task={};
  assert(step()==RSR_WAIT && task.state==RSS_IDLE);
+
+ submit_ok=true;
+ for(int prior_stops:{0,23}) {
+    task={};range=initial;range.cycle.full_sl_count=prior_stops;
+    if(prior_stops==23)range.opposite=0; // the last rung has no opposite
+    has_pos=true;local_sl=3999.20;
+    const int before_sends=sends;
+    assert(step()==RSR_WATCHING && step()==RSR_SUBMITTED);
+    local_sl=4000;
+    assert(step()==RSR_REQUESTED);
+    const int first_query=queries;
+    const string first_nonce=latest_nonce;
+    for(int i=0;i<25;i++){clock_ms+=1000;assert(step()==RSR_WAIT);}
+    assert(queries==first_query && range.support_stage==0);
+
+    // A published "changed" cannot confirm the effect. A subsequent
+    // malformed reply also gets a distinct read challenge, never a send.
+    inv_ready=true;inv_proof=false;++sequence;
+    assert(step()==RSR_WAIT);
+    auto await_read=[&](){
+       const int before=queries;
+       for(int i=0;i<30 && queries==before;i++){
+          clock_ms+=1000;
+          const auto status=step();assert(status==RSR_WAIT || status==RSR_REQUESTED);
+       }
+       assert(queries==before+1 && range.support_stage==0 && sends==before_sends+1);
+    };
+    await_read();
+    const string second_nonce=latest_nonce;
+    assert(second_nonce!=first_nonce && task.proof.verify_after==(ulong)sequence);
+    malformed=true;inv_ready=true;
+    assert(step()==RSR_WAIT);
+    await_read();
+    assert(latest_nonce!=second_nonce && latest_nonce!=first_nonce);
+
+    // Already sampled before closure, but delivered afterwards.
+    inv_ready=true;inv_proof=true;++sequence;has_pos=false;
+    assert(step()==RSR_CONFIRMED && range.support_stage==2);
+    assert(step()==RSR_WAIT && sends==before_sends+1 && queries==first_query+2);
+ }
+ // The position disappeared without an independent observation of the
+ // moved SL. The local pre-close read and dispatch receipt are insufficient.
+ task={};range=initial;has_pos=true;local_sl=3999.20;
+ assert(step()==RSR_WATCHING && step()==RSR_SUBMITTED);
+ local_sl=4000;assert(step()==RSR_REQUESTED);
+ const int last_query=queries,last_send=sends;
+ has_pos=false;inv_ready=true;inv_proof=false;++sequence;
+ for(int i=0;i<40;i++){clock_ms+=1000;assert(step()==RSR_WAIT);}
+ assert(range.support_stage==0 && queries==last_query && sends==last_send);
 }

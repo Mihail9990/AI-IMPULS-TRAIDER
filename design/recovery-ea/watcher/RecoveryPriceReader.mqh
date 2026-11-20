@@ -96,8 +96,8 @@ bool RecoveryPricePublishLocal(const RecoveryPriceScope &s,const string publishe
                                 const string text,const string suffix,const string response) {
    if(text=="" || !RecoveryInvHex(publisher_tag)) return false;
    const string p="RECOVERY_PRICE\\"+s.nonce;
-   const string final=p+suffix, temp=p+"."+publisher_tag+suffix+".tmp";
-   if(FileIsExist(final) || FileIsExist(p+response) || FileIsExist(temp)) return false;
+   const string request_path=p+suffix, temp=p+"."+publisher_tag+suffix+".tmp";
+   if(FileIsExist(request_path) || FileIsExist(p+response) || FileIsExist(temp)) return false;
    uchar payload[];
    const int length=StringToCharArray(text,payload,0,WHOLE_ARRAY,CP_UTF8)-1;
    if(length<1 || length>2048) return false;
@@ -105,7 +105,7 @@ bool RecoveryPricePublishLocal(const RecoveryPriceScope &s,const string publishe
    if(h==INVALID_HANDLE) return false;
    const uint written=FileWriteArray(h,payload,0,length);
    FileFlush(h); FileClose(h);
-   if(written==(uint)length && FileMove(temp,0,final,0)) return true;
+   if(written==(uint)length && FileMove(temp,0,request_path,0)) return true;
    FileDelete(temp);
    return false;
 }

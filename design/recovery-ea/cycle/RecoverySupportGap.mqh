@@ -102,8 +102,8 @@ RRSupportGapResult RRAdvanceSupportGap(RRRangeState &s,const RRSettings &cfg,RRS
     n.initial_sl=g.fill.sl_ticks;
     if(!RRAfterActualEntryNoSL(n,cfg))return RR_GAP_UNRESOLVED;
  }
- const bool final=RCReverseSlot(n.cycle)==0;
- if(final) {
+ const bool last_slot=RCReverseSlot(n.cycle)==0;
+ if(last_slot) {
     if(n.phase==RR_PROTECT) {
        RRAction a;
        if(!RRStage(n,cfg,0,0,a)||a.kind!=RR_INITIAL_SL)return RR_GAP_UNRESOLVED;

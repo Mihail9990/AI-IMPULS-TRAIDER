@@ -112,6 +112,8 @@ bool RecoveryChartStart(RecoveryChartRuntime&,const RecoverySessionContext& live
 }
 void RecoveryChartStop(RecoveryChartRuntime&){++stops;}
 bool RecoveryChartOnTimer(RecoveryChartRuntime&,const RecoverySessionContext&){++timers;return true;}
+void RecoveryMoneyJournalTimer(long,const string&,const string&){}
+void RecoveryMoneyFlushPending(){}
 void RecoveryChartOnTrade(RecoveryChartRuntime&,const RecoverySessionContext&,const MqlTradeTransaction& event){
   assert(event.value==123);++trades;
 }

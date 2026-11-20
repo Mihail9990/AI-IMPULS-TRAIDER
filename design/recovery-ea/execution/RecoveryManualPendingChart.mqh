@@ -5,7 +5,7 @@
 #include "RecoveryInventoryRequest.mqh"
 
 enum RecoveryPendingChartState {
- RMPCH_IDLE=0,RMPCH_INVENTORY,RMPCH_BOUND,RMPCH_ACTIVE
+ RMPCH_IDLE=0,RMPCH_INVENTORY,RMPCH_BOUND,RMPCH_ACTIVE,RMPCH_REQUEST
 };
 struct RecoveryManualPendingChart {
  RecoveryPendingChartState state;
@@ -15,7 +15,7 @@ struct RecoveryManualPendingChart {
  RecoveryInventoryScope initial, confirm;
  RecoveryInventoryScope fill_history,fill_inventory,opening_confirm;
  string tag;
- ulong hint;
+ int retry_wait,retry_delay;
  bool confirm_requested,opening_requested;
  RecoveryPairSendResult opening_receipts;
 };
@@ -49,6 +49,15 @@ bool RecoveryPendingChartSLVisible(const RecoveryManualPendingOwner &o) {
 // request, removal, SL undo, or history replay is possible from reset.
 void RecoveryManualPendingChartReset(RecoveryManualPendingChart &task) {ZeroMemory(task);}
 
+// Only read requests are retried. Delay repeated negative replies by up to
+// 32 owner timer events. An outstanding request without a reply stays put.
+void RecoveryPendingChartRetry(RecoveryManualPendingChart &task) {
+ task.state=RMPCH_REQUEST;
+ if(task.retry_delay==0)task.retry_delay=1;
+ else if(task.retry_delay<32)task.retry_delay*=2;
+ task.retry_wait=task.retry_delay;
+}
+
 // Returns true once on transfer to regular RECOVERY. The order belonging to
 // the user is never created or removed. Only the independently proved fill
 // may start a new RECOVERY order.
@@ -66,39 +75,60 @@ bool RecoveryManualPendingChartTimer(RecoveryManualPendingChart &task,RecoveryMa
     ulong hint;
     if(!RecoveryPendingChartManualOrder(live.symbol,hint) ||
        !RecoveryCaptureManualPendingEarly(hint,live,tick,step,task.early))return false;
+    task.initial=q;task.state=RMPCH_REQUEST;
+ }
+ if(!RecoveryAlternatingSameSession(task.initial,q))return false;
+ if(task.state==RMPCH_REQUEST) {
+    const ulong hint=task.early.original.ticket;
+    if(task.retry_wait>0) {task.retry_wait--;return false;}
+    if(task.retry_delay>0) {
+       // A different working order cannot replace the frozen candidate.
+       // A known fill can still be proved when other STOPs are present.
+       ulong current;
+       long state;
+       if((!RecoveryPendingChartManualOrder(live.symbol,current) || current!=hint) &&
+          (!HistoryOrderSelect(hint) || !HistoryOrderGetInteger(hint,ORDER_STATE,state) ||
+           state!=ORDER_STATE_FILLED))return false;
+    }
     if(verifier.serial==ULONG_MAX)return false;
     const ulong serial=verifier.serial+1;
     const string id=scope.executor_epoch+":"+(string)hint+":"+(string)serial;
-    task.initial=q;task.confirm=q;task.fill_history=q;task.fill_inventory=q;task.opening_confirm=q;
-    task.initial.nonce=RecoveryOwnerNonce("manual-pending-initial",id);
+    RecoveryInventoryScope initial=q;
+    task.confirm=q;task.fill_history=q;task.fill_inventory=q;task.opening_confirm=q;
+    initial.nonce=RecoveryOwnerNonce("manual-pending-initial",id);
     task.confirm.nonce=RecoveryOwnerNonce("manual-pending-sl",id);
     task.fill_history.nonce=RecoveryOwnerNonce("manual-pending-fill-history",id);
     task.fill_inventory.nonce=RecoveryOwnerNonce("manual-pending-fill-inventory",id);
     task.opening_confirm.nonce=RecoveryOwnerNonce("manual-pending-opening",id);
     task.tag=RecoveryOwnerNonce("manual-pending-fill-publisher",id);
-    if(!RecoveryInvScopeOK(task.initial) || !RecoveryInvScopeOK(task.confirm) ||
+    if(!RecoveryInvScopeOK(initial) || !RecoveryInvScopeOK(task.confirm) ||
        !RecoveryInvScopeOK(task.fill_history) || !RecoveryInvScopeOK(task.fill_inventory) ||
        !RecoveryInvScopeOK(task.opening_confirm) ||
        !RecoveryInvHex(task.tag)) return false;
-    verifier.serial=serial;task.hint=hint;
+    task.initial=initial;verifier.serial=serial;
     if(RecoveryManualPublishInventory(task.initial))task.state=RMPCH_INVENTORY;
+    else RecoveryPendingChartRetry(task);
     return false;
  }
- if(!RecoveryAlternatingSameSession(task.initial,q))return false;
  if(task.state==RMPCH_INVENTORY) {
+    // The verifier atomically publishes one immutable snapshot per nonce.
+    if(!FileIsExist("RECOVERY_VERIFY\\"+task.initial.nonce+".snapshot"))return false;
     RecoveryInventorySnapshot initial;
-    if(!RecoveryInvRead(task.initial,initial))return false;
+    if(!RecoveryInvRead(task.initial,initial)) {RecoveryPendingChartRetry(task);return false;}
     RecoveryManualPendingCandidate candidate;
-    if(RecoveryFindManualPending(initial,task.initial,0,0,tick,step,candidate)) {
-       if(candidate.ticket!=task.hint || !RecoveryManualPendingEarlyTerms(candidate,task.early.original) ||
-          !RecoveryPrepareManualPending(task.origin,true,life,live,scope,cfg,task.initial,initial,0,
-                                       candidate.ticket,tick,step) ||
-          task.origin.time_type!=task.early.time_type || task.origin.expiration!=task.early.expiration) {
-          RecoveryManualPendingChartReset(task);return false;
-       }
-    } else if(!RecoveryPrepareManualPendingEarly(task.origin,true,life,live,scope,cfg,task.initial,
-                                                   initial,task.early,tick,step))return false;
-    task.state=RMPCH_BOUND;
+    RecoveryManualPendingOwner prepared;
+    ZeroMemory(prepared);
+    bool ready;
+    if(RecoveryFindManualPending(initial,task.initial,0,0,tick,step,candidate) &&
+       RecoveryManualPendingEarlyTerms(candidate,task.early.original))
+       ready=RecoveryPrepareManualPending(prepared,true,life,live,scope,cfg,task.initial,initial,0,
+                      candidate.ticket,tick,step) && prepared.time_type==task.early.time_type &&
+                      prepared.expiration==task.early.expiration;
+    else
+       ready=RecoveryPrepareManualPendingEarly(prepared,true,life,live,scope,cfg,task.initial,
+                                                initial,task.early,tick,step);
+    if(!ready) {RecoveryPendingChartRetry(task);return false;}
+    task.origin=prepared;task.state=RMPCH_BOUND;
  }
  if(task.state!=RMPCH_BOUND)return false;
  if(task.origin.phase==RMP_PREPARED)RecoveryAttemptManualPendingSL(task.origin,true,life,live,scope);

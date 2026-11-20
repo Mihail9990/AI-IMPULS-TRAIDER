@@ -23,25 +23,25 @@ struct RecoveryAlternatingPump {
 // Caller owns globally unique nonces (including across stages and prior
 // pumps), current boot state and exact ticket/intent association.
 bool RecoveryAlternatingPumpBegin(RecoveryAlternatingPump &p,const RRRangeState &s,
-    const RROpeningPair &opening,const RecoveryAlternatingEvidenceBinding &input,
+    const RROpeningPair &opening,const RecoveryAlternatingEvidenceBinding &evidence_binding,
     const string publisher_tag) {
- if(p.state!=RAP_UNUSED || input.history.position_identifier!=0 ||
-    !RecoveryInvHex(publisher_tag) || input.scope!=s.scope ||
-    input.exact.order_ticket==0 || input.exact.order_ticket!=input.history.anchor_order ||
-    !MathIsValidNumber(input.price_tick) || input.price_tick<=0 ||
-    !MathIsValidNumber(input.volume_step) || input.volume_step<=0 ||
-    !RecoveryAlternatingSameSession(input.exact.binding,input.history.binding) ||
-    !RecoveryAlternatingSameSession(input.exact.binding,input.inventory) ||
-    input.exact.binding.nonce==input.history.binding.nonce ||
-    input.exact.binding.nonce==input.inventory.nonce ||
-    input.history.binding.nonce==input.inventory.nonce) return false;
+ if(p.state!=RAP_UNUSED || evidence_binding.history.position_identifier!=0 ||
+    !RecoveryInvHex(publisher_tag) || evidence_binding.scope!=s.scope ||
+    evidence_binding.exact.order_ticket==0 || evidence_binding.exact.order_ticket!=evidence_binding.history.anchor_order ||
+    !MathIsValidNumber(evidence_binding.price_tick) || evidence_binding.price_tick<=0 ||
+    !MathIsValidNumber(evidence_binding.volume_step) || evidence_binding.volume_step<=0 ||
+    !RecoveryAlternatingSameSession(evidence_binding.exact.binding,evidence_binding.history.binding) ||
+    !RecoveryAlternatingSameSession(evidence_binding.exact.binding,evidence_binding.inventory) ||
+    evidence_binding.exact.binding.nonce==evidence_binding.history.binding.nonce ||
+    evidence_binding.exact.binding.nonce==evidence_binding.inventory.nonce ||
+    evidence_binding.history.binding.nonce==evidence_binding.inventory.nonce) return false;
  // RecoveryAlternatingWanted also requires a distinct successor identifier.
  // This symbolic value is for binding validation only; never put it on wire.
- RecoveryAlternatingEvidenceBinding check=input;
+ RecoveryAlternatingEvidenceBinding check=evidence_binding;
  check.history.position_identifier=s.cycle.position_id==1 ? 2 : 1;
  RRKnownOrder wanted;
  if(!RecoveryAlternatingWanted(s,opening,check,wanted)) return false;
- p.binding=input;p.wanted=wanted;p.publisher_tag=publisher_tag;
+ p.binding=evidence_binding;p.wanted=wanted;p.publisher_tag=publisher_tag;
  p.prior_order=s.cycle.active_order;p.prior_position=s.cycle.position_id;
  p.prior_ticket=s.position_ticket;p.range_id=s.cycle.range_id;
  RecoveryExactReportClear(p.exact);RecoveryHistoryClear(p.history);

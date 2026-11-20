@@ -27,6 +27,17 @@ struct RCProtectionFact{};
 struct RecoveryHistorySnapshot {bool usable,observed;long sequence;};
 struct RecoveryInventorySnapshot{long sequence;};
 struct RCCloseCheckpoint{RCCloseWireBinding::Key key;};
+ulong tick_clock=500;
+bool immutable_bad=false;
+ulong GetTickCount64(){return tick_clock;}
+bool FileIsExist(const string&){return immutable_bad;}
+enum RCEvidenceResult{RCE_UNRESOLVED=0,RCE_FULLY_CLASSIFIED=2,RCE_CLOSED_UNCLASSIFIED=3};
+struct RCClosePlan{};
+int money_proofs=0;
+bool strategy_plan=true,mixed_exit=false;
+bool RecoveryMoneyEnqueue(const RCCloseWireBinding&,const RecoveryHistorySnapshot&,const RCCloseCheckpoint&){++money_proofs;return true;}
+bool RCCPDerive(const RCCloseCheckpoint&,RCRange&,RCClosePlan&){return strategy_plan;}
+void Print(const string&){}
 long history_sequence=7,inventory_sequence=8;
 bool current=true,position_present=true,history_ready=false,inventory_ready=false,typed_proof=false;
 int history_requests=0,inventory_requests=0;
@@ -57,11 +68,11 @@ bool RecoveryInvRead(const RecoveryInventoryScope&,RecoveryInventorySnapshot& v)
  if(!inventory_ready)return false;
  v.sequence=inventory_sequence;return true;
 }
-bool RCCPStageFromReports(const RCRange&,const RCCloseWireBinding& b,const RecoveryHistorySnapshot&,
- const RecoveryInventorySnapshot&,const std::vector<RCProtectionFact>&,long distance,RCCloseCheckpoint& out){
- assert(distance==80);
- if(!typed_proof)return false;
- out.key=b.key;return true;
+RCEvidenceResult RCCPObserveFromReports(const RCRange&,const RCCloseWireBinding& b,const RecoveryHistorySnapshot&,
+ const RecoveryInventorySnapshot&,const std::vector<RCProtectionFact>&,long distance,RCCloseCheckpoint& out,bool include_unclassified){
+ assert(distance==80&&include_unclassified);
+ if(!typed_proof)return RCE_UNRESOLVED;
+ out.key=b.key;return mixed_exit?RCE_CLOSED_UNCLASSIFIED:RCE_FULLY_CLASSIFIED;
 }
 #include "RecoveryRangeClosePoll.mqh"
 int main(){
@@ -87,6 +98,17 @@ int main(){
  assert(RecoveryRangeClosePollStep(task,life,live,range,cfg,facts,out)==RCP_WAIT);
  inventory_ready=true;typed_proof=true;
  assert(RecoveryRangeClosePollStep(task,life,live,range,cfg,facts,out)==RCP_PROOF);
+ assert(money_proofs==1);
+ // A confirmed TP (classified, no strategy plan) and two different exit
+ // reasons are valid monetary observations. Neither can advance trading.
+ auto replay=task;
+ for(int scenario=0;scenario<3;scenario++){
+  replay.state=RCP_INVENTORY_READ;strategy_plan=false;mixed_exit=scenario==1;typed_proof=scenario!=2;
+  RCCloseCheckpoint trading{};
+  assert(RecoveryRangeClosePollStep(replay,life,live,range,cfg,facts,trading)==RCP_NOT_CONFIRMED);
+  assert(trading.key.scope==0&&money_proofs==(scenario==0?2:3));
+ }
+ strategy_plan=true;mixed_exit=false;typed_proof=true;
  assert(out.key.position_id==22&&out.key.scope==1&&out.key.observation==owner.serial);
  assert(RecoveryRangeClosePollStep(task,life,live,range,cfg,facts,out)==RCP_NOT_CONFIRMED);
  assert(history_requests==1&&inventory_requests==1&&out.key.scope==0);
@@ -94,6 +116,22 @@ int main(){
  current=false;
  assert(RecoveryRangeClosePollStep(task,life,live,range,cfg,facts,out)==RCP_NOT_CONFIRMED);
  assert(history_requests==1);
+ current=true;task={};history_ready=false;
+ assert(RecoveryBeginRangeClosePoll(task,owner,life,live,v,range,cfg,.01,.01));
+ const auto original=task.binding.history.binding.nonce;
+ assert(RecoveryRangeClosePollStep(task,life,live,range,cfg,facts,out)==RCP_PROGRESS);
+ assert(RecoveryRangeClosePollStep(task,life,live,range,cfg,facts,out)==RCP_WAIT);
+ immutable_bad=true;
+ assert(RecoveryRangeClosePollStep(task,life,live,range,cfg,facts,out)==RCP_NOT_CONFIRMED);
+ RecoveryRearmCloseRead(task);
+ assert(task.state==RCP_UNRESOLVED);
+ tick_clock+=999;RecoveryRearmCloseRead(task);assert(task.state==RCP_UNRESOLVED);
+ ++tick_clock;RecoveryRearmCloseRead(task);assert(task.state==RCP_IDLE);
+ assert(RecoveryBeginRangeClosePoll(task,owner,life,live,v,range,cfg,.01,.01));
+ assert(task.binding.history.binding.nonce!=original);
+ immutable_bad=false;history_ready=true;
+ for(int i=0;i<3;i++)assert(RecoveryRangeClosePollStep(task,life,live,range,cfg,facts,out)==RCP_PROGRESS);
+ assert(RecoveryRangeClosePollStep(task,life,live,range,cfg,facts,out)==RCP_PROOF);
 }
 """
 class RangeClosePollCompat(unittest.TestCase):
@@ -102,6 +140,7 @@ class RangeClosePollCompat(unittest.TestCase):
             p=Path(folder)
             src=(HERE/"RecoveryRangeClosePoll.mqh").read_text()
             src="\n".join(x for x in src.splitlines() if not x.startswith("#include"))
+            src=(HERE/"RecoveryProofRetry.mqh").read_text()+"\n"+src
             src=src.replace("const RCProtectionFact &facts[]","const std::vector<RCProtectionFact> &facts")
             src=re.sub(r'\(string\)(b\.key\.\w+|serial)',r'std::to_string(\1)',src)
             (p/"RecoveryRangeClosePoll.mqh").write_text(src)

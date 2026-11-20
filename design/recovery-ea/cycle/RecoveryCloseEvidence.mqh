@@ -40,7 +40,7 @@ struct RCProtectionFact {
 };
 
 enum RCEvidenceResult {
-   RCE_UNRESOLVED=0, RCE_OPEN_OR_PARTIAL=1, RCE_FULLY_CLASSIFIED=2
+   RCE_UNRESOLVED=0, RCE_OPEN_OR_PARTIAL=1, RCE_FULLY_CLASSIFIED=2, RCE_CLOSED_UNCLASSIFIED=3
 };
 
 bool RCCloseKeysEqual(const RCCloseEvidenceKey &a,const RCCloseEvidenceKey &b) {
@@ -82,7 +82,7 @@ void RCClearCloseProof(RCCloseProof &out) {
 RCEvidenceResult RCBuildCloseProof(const RCRange &range,const RCCloseEvidenceKey &expected,
                                   const RCExitHistory &history,const RCCloseInventory &inventory,
                                   const RCExitDeal &deals[],const RCProtectionFact &protection[],
-                                  RCCloseProof &out) {
+                                  RCCloseProof &out,const bool include_unclassified=false) {
    RCClearCloseProof(out);
    const int count=ArraySize(deals);
    if(count>128 || ArraySize(protection)>128 || !RCBound(range,expected.generation,expected.range_id) ||
@@ -130,19 +130,20 @@ RCEvidenceResult RCBuildCloseProof(const RCRange &range,const RCCloseEvidenceKey
          return RCE_UNRESOLVED;
       return RCE_OPEN_OR_PARTIAL;
    }
-   if(!uniform || (reason!=RC_SL && reason!=RC_MANUAL && reason!=RC_TP)) return RCE_UNRESOLVED;
    int stop_mask=0;
-   if(reason==RC_SL) {
-      if(!RCBoundedPositive(stop)) return RCE_UNRESOLVED;
+   bool classified=uniform && (reason==RC_SL || reason==RC_MANUAL || reason==RC_TP);
+   if(classified && reason==RC_SL) {
       stop_mask=RCProtectionMask(expected,stop,protection);
-      if(stop_mask!=RC_INITIAL_LEVEL && stop_mask!=RC_SUPPORT_LEVEL)
-         return RCE_UNRESOLVED;
+      classified=RCBoundedPositive(stop) && (stop_mask==RC_INITIAL_LEVEL || stop_mask==RC_SUPPORT_LEVEL);
    }
+   // Full disappearance and the exact complete exit volume are independent
+   // of a strategy classification. Only the accounting caller opts into this.
+   if(!classified && !include_unclassified)return RCE_UNRESOLVED;
    out.generation=expected.generation;out.range_id=expected.range_id;out.order=expected.anchor_order;
    out.position_id=expected.position_id;out.filled_steps=range.filled_steps;
    out.exited_steps=total;out.remaining_steps=0;out.independently_verified=true;
-   out.history_complete=true;out.reason=reason;out.exit_stop_ticks=stop;
-   out.confirmed_stop_mask=stop_mask;out.uniform_exit_reason_and_stop=true;
-   return RCE_FULLY_CLASSIFIED;
+   out.history_complete=true;out.reason=uniform ? reason : 0;out.exit_stop_ticks=uniform ? stop : 0;
+   out.confirmed_stop_mask=stop_mask;out.uniform_exit_reason_and_stop=uniform;
+   return classified ? RCE_FULLY_CLASSIFIED : RCE_CLOSED_UNCLASSIFIED;
 }
 #endif

@@ -26,7 +26,7 @@ class AlternatingFillCompat(unittest.TestCase):
                         keys[start:end]+keys[match_start:match_end],1)
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
-            for name in ('RecoveryCycle.mqh','RecoveryRangeCoordinator.mqh','RecoveryOpeningPair.mqh','RecoveryAlternatingFill.mqh','test_alternating_fill.cpp'):
+            for name in ('RecoveryCycle.mqh','RecoveryRangeCoordinator.mqh','RecoveryOpeningPair.mqh','RecoveryAlternatingFill.mqh','RecoveryFinalSlot.mqh','test_alternating_fill.cpp'):
                 shutil.copy2(HERE / name,tmp / name)
             (tmp / 'RecoveryCloseCheckpoint.mqh').write_text(cp+'\n#endif\n')
             exe = tmp / 'cycle'

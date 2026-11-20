@@ -115,8 +115,8 @@ RRAlternatingResult RRAdvanceAlternatingFill(RRRangeState &s,const RRSettings &c
 
  RROpeningPair follow;
  follow.reserved=false;
- const bool final=RCReverseSlot(n.cycle)==0;
- if(final) { if(n.phase!=RR_ACTIVE)return RR_ALT_UNRESOLVED; }
+ const bool last_slot=RCReverseSlot(n.cycle)==0;
+ if(last_slot) { if(n.phase!=RR_ACTIVE)return RR_ALT_UNRESOLVED; }
  else if(!RRStageOpeningPair(n,cfg,follow) || follow.sl_required ||
          follow.reverse.entry_ticks!=RROppositeAnchor(n))return RR_ALT_UNRESOLVED;
 
@@ -139,9 +139,9 @@ RRAlternatingResult RRAdvanceAlternatingFill(RRRangeState &s,const RRSettings &c
  ledger.position_count++;
  ledger.strategy_slot++;
  s=n;
- if(final)opening.reserved=false;
+ if(last_slot)opening.reserved=false;
  else opening=follow;
- return final?RR_ALT_FINAL_NO_TRIGGER:RR_ALT_NEXT_OPPOSITE;
+ return last_slot?RR_ALT_FINAL_NO_TRIGGER:RR_ALT_NEXT_OPPOSITE;
 }
 
 // Optional history may arrive before or after strategy advancement. It affects

@@ -64,7 +64,7 @@ class PanelAssemblyTest(TestCase):
                 'text/css' if file.endswith('.css') else 'text/javascript'))
             self.assertNotIn(KEY, asset.text)
         self.assertNotIn(KEY, home.text)
-        self.assertIn('Ожидай ручную позицию', home.text)
+        self.assertIn('Ожидай рыночный ордер', home.text)
         self.assertIn('Отменить ожидание', home.text)
         self.assertIn('Ордер и SL остаются в MT5.', home.text)
         self.assertNotIn('Диапазон', home.text)

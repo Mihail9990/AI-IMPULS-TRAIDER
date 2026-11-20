@@ -46,6 +46,7 @@ static RCCloseCheckpoint closure(const RRAlternationLedger &a,int index,int reas
           0,true,true,reason,reason==RC_SL?pos.planned_sl:0,reason==RC_SL?RC_INITIAL_LEVEL:0,true};
  return c;
 }
+#include "RecoveryFinalSlot.mqh"
 int main() {
  const auto cfg=config();
  for(int start_side : {-1,1}) {
@@ -135,6 +136,59 @@ int main() {
   }
   assert(!opening.reserved&&s.phase==RR_ACTIVE&&RCReverseSlot(s.cycle)==0);
   assert(!RRStageOpeningPair(s,cfg,opening));
+  {
+   auto last=s;
+   auto accounting=ledger;
+   const int i=accounting.position_count-1;
+   const int losses=accounting.confirmed_full_sl_count;
+   auto incomplete=closure(accounting,i);
+   incomplete.proof.remaining_steps=1;
+   assert(!RRFinalClose(last,cfg,accounting,incomplete));
+   assert(!accounting.positions[i].exit_recorded);
+   auto breakeven=closure(accounting,i);
+   breakeven.proof.confirmed_stop_mask=RC_SUPPORT_LEVEL;
+   breakeven.proof.exit_stop_ticks=last.cycle.actual_entry_ticks;
+   assert(!RRFinalClose(last,cfg,accounting,breakeven));
+   last.support_stage=2;last.live_sl=last.cycle.actual_entry_ticks;
+   assert(RRFinalClose(last,cfg,accounting,breakeven));
+   assert(!RRFinalClose(last,cfg,accounting,breakeven) && !RRFinalSettled(last,accounting));
+   assert(last.phase==RR_ARM_REENTRY && last.reentry_slot==24 && last.opposite.ticket==0);
+   const int side=breakeven.before.side;
+   RRAction action{};
+   assert(RRStage(last,cfg,0,0,action) && action.kind==RR_REENTRY && action.side==side);
+   assert(action.volume_steps==cfg.lot_steps[23] && action.sl_ticks==breakeven.proof.exit_stop_ticks);
+   assert(action.entry_ticks==action.sl_ticks+side*cfg.initial_sl_ticks);
+   RRAction repeated{};
+   assert(!RRStage(last,cfg,0,0,repeated));  // already reserved, no second submission
+   RRKnownOrder wanted;RRSetKnown(wanted,2001,action);
+   RRFilled fill{{cfg.generation,1,2001,2001,3001,side,10,10,10,
+                  action.entry_ticks+side*3,true,true,true},4001,0,action.sl_ticks,0,true};
+   auto wrong=fill;wrong.entry.position_id=breakeven.before.position_id;
+   assert(!RRFinalReentryFill(last,cfg,accounting,wanted,wrong));
+   wrong=fill;wrong.entry.filled_steps=9;
+   assert(!RRFinalReentryFill(last,cfg,accounting,wanted,wrong));
+   assert(RRFinalReentryFill(last,cfg,accounting,wanted,fill));
+   assert(!RRFinalReentryFill(last,cfg,accounting,wanted,fill));
+   assert(last.phase==RR_ACTIVE && last.position_ticket==4001 && last.opposite.ticket==0);
+   assert(last.initial_sl==action.sl_ticks && last.live_sl==action.sl_ticks && last.support_stage==0);
+   assert(accounting.strategy_slot==24 && accounting.confirmed_full_sl_count==losses);
+   assert(!RRFinalClose(last,cfg,accounting,breakeven)); // late proof for prior support position
+   assert(!RRFinalClose(last,cfg,accounting,closure(accounting,i,RC_MANUAL)));
+   const auto final_sl=closure(accounting,i);
+   assert(RRFinalClose(last,cfg,accounting,final_sl));
+   assert(last.phase==RR_DONE && accounting.confirmed_full_sl_count==losses+1);
+   assert(!RRFinalClose(last,cfg,accounting,final_sl) && !RRFinalSettled(last,accounting));
+   for(int n=0;n<i;n++) {
+      if(!accounting.positions[n].exit_recorded)
+         assert(RRRecordAlternatingClose(accounting,closure(accounting,n))==RR_ALT_CLOSE_APPLIED);
+   }
+   assert(RRFinalSettled(last,accounting) && RCReverseSlot(last.cycle)==0);
+   auto fresh_cfg=cfg;fresh_cfg.generation++;
+   RRRangeState fresh{};
+   assert(RRNewRange(fresh,fresh_cfg,1,side,400000) && RCCurrentSlot(fresh.cycle)==1);
+   assert(RRStage(fresh,fresh_cfg,0,0,action) && action.volume_steps==cfg.lot_steps[0]);
+   assert(!RRFinalClose(fresh,fresh_cfg,accounting,final_sl));
+  }
   // Closures can arrive out of order, without changing the terminal strategy slot.
   assert(RRRecordAlternatingClose(ledger,closure(ledger,23,RC_MANUAL))==RR_ALT_CLOSE_APPLIED);
   assert(RRRecordAlternatingClose(ledger,closure(ledger,3))==RR_ALT_CLOSE_APPLIED);

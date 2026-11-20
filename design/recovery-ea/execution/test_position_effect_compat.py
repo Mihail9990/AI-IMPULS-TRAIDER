@@ -31,9 +31,8 @@ class PositionEffectCompat(unittest.TestCase):
         body=structs+eq+clear+as_cpp((VERIFIER/"RecoveryInventoryReader.mqh").read_text())+units+source
         body="\n".join(l for l in body.splitlines() if not l.startswith("#include"))
         body=re.sub(r"string f\[\];",r"std::vector<string> f;",body)
-        prefix=SHIM+f'\n#include <cmath>\n#include "{CYCLE/"RecoveryCycle.mqh"}"\n'
+        prefix=SHIM+'\n#include <cmath>\nusing ulong=std::uint64_t;\n#include "RecoveryCycle.mqh"\n'
         prefix += """
-using ulong=std::uint64_t;
 double StringToDouble(const string &s){return std::stod(s);}
 bool MathIsValidNumber(double n){return std::isfinite(n);}
 double MathRound(double n){return std::round(n);}
@@ -86,7 +85,7 @@ int main() {{
             src=Path(d)/"position.cpp"; exe=src.with_suffix("")
             src.write_text(prefix+body+main)
             subprocess.run([compiler,"-std=c++17","-Wall","-Wextra","-Werror","-fsanitize=undefined",
-                            str(src),"-o",str(exe)],check=True)
+                            "-I",str(CYCLE),str(src),"-o",str(exe)],check=True)
             subprocess.run([str(exe)],check=True)
 
 

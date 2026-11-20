@@ -124,8 +124,8 @@ bool RecoveryHistoryRequest(const RecoveryHistoryScope &scope,const string publi
    const string text=RecoveryHistoryRequestText(scope);
    if(text=="" || !RecoveryInvHex(publisher_tag)) return false;
    const string prefix="RECOVERY_VERIFY\\"+scope.binding.nonce;
-   const string final=prefix+".hist", temp=prefix+"."+publisher_tag+".hist.tmp";
-   if(FileIsExist(final) || FileIsExist(prefix+".history") || FileIsExist(temp)) return false;
+   const string request_path=prefix+".hist", temp=prefix+"."+publisher_tag+".hist.tmp";
+   if(FileIsExist(request_path) || FileIsExist(prefix+".history") || FileIsExist(temp)) return false;
    uchar payload[];
    const int length=StringToCharArray(text,payload,0,WHOLE_ARRAY,CP_UTF8)-1;
    if(length<1 || length>2048) return false;
@@ -134,7 +134,7 @@ bool RecoveryHistoryRequest(const RecoveryHistoryScope &scope,const string publi
    const uint written=FileWriteArray(h,payload,0,length);
    FileFlush(h);
    FileClose(h);
-   if(written==(uint)length && FileMove(temp,0,final,0)) return true;
+   if(written==(uint)length && FileMove(temp,0,request_path,0)) return true;
    FileDelete(temp);
    return false;
 }

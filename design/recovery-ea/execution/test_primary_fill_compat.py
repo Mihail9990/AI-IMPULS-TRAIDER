@@ -84,6 +84,17 @@ int main() {{
            RecoveryInvParse(i,b.inventory,z) && RecoveryPrimaryFillFold(s,cfg,b,x,y,z,f);
  }};
  new_range(1,false);
+ // The final support order may fill between submission and the first poll.
+ // No synthetic working acknowledgement or opposite order is needed.
+ RRClearAction(s.pending);
+ s.cycle.full_sl_count=23;s.cycle.last_closed_order=23;s.cycle.last_closed_position=31;
+ s.reentry_side=1;s.reentry_ticks=400000;s.reentry_slot=24;s.phase=RR_ARM_REENTRY;
+ const long previous_lot=cfg.lot_steps[23];cfg.lot_steps[23]=cfg.lot_steps[0];
+ assert(RRStage(s,cfg,0,0,b.routed)&&b.routed.kind==RR_REENTRY);
+ assert(reports({args(buy)})&&f.entry.actual_entry_ticks==400005&&f.entry.executed_order=={ORDER}ULL);
+ s.opposite.ticket=42;assert(!reports({args(buy)}));s.opposite.ticket=0;
+ s.reentry_slot=23;assert(!reports({args(buy)}));cfg.lot_steps[23]=previous_lot;
+ new_range(1,false);
  assert(reports({args(buy)}) && s.phase==RR_NEW && s.pending.kind==RR_PRIMARY);
  auto wrong=f;wrong.entry.position_id++;
  assert(!RecoveryStagePrimaryOpening(s,cfg,b,wrong,opening,ledger)&&s.phase==RR_NEW&&!opening.reserved&&!ledger.scope);

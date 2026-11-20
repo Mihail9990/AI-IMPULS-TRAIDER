@@ -106,6 +106,19 @@ template<class T> int ArrayResize(std::vector<T>& a,int n){a.resize(n);return n;
  r=initial; assert(RCApplyCloseFromWire(r,bind,{q(h)},{q(i)},stops,70,plan)=={result});
  assert(r.full_sl_count=={count} && plan.reentry_ticks=={reentry});
 """ for h,i,result,count,reentry in cases)
+        # Monetary observations use the same exact V1 reports as the trading
+        # path, including a completely closed position with mixed exit reasons.
+        money_cases = [
+            (hist([entered, exited.replace("\t1\t4\t", "\t1\t5\t")]), "RCE_FULLY_CLASSIFIED", 7),
+            (hist([entered, split[0], split[1].replace("\t1\t4\t", "\t1\t0\t")]),
+             "RCE_CLOSED_UNCLASSIFIED", 7),
+            (hist([entered, split[0]]), "RCE_UNRESOLVED", 0),
+        ]
+        money_checks = "\n".join(f"""
+ assert(RecoveryHistoryParse({q(h)},hs,raw_history));
+ assert(RCBuildCloseFromReports(initial,bind,raw_history,raw_inventory,stops,economic,true)=={status});
+ assert(economic.exited_steps=={steps} && economic.independently_verified==({steps}!=0));
+""" for h, status, steps in money_cases)
         cpp += f"""
 int main() {{
  test_normalized();
@@ -118,6 +131,9 @@ int main() {{
  RCCloseWireBinding bind{{k,hs,ib,0,0,.01,.01}};
  const std::vector<RCProtectionFact> stops{{level(k,RC_INITIAL_LEVEL,300970),level(k,RC_SUPPORT_LEVEL,300975)}};
  RCClosePlan plan{{}};
+ RecoveryHistorySnapshot raw_history;RecoveryInventorySnapshot raw_inventory;RCCloseProof economic;
+ assert(RecoveryInvParse({q(inv)},ib,raw_inventory));
+ {money_checks}
  {snippets}
  r=initial;assert(RCApplyCloseFromWire(r,bind,{q(good)},{q(inv)},stops,70,plan)==RCE_FULLY_CLASSIFIED);
  assert(RCApplyCloseFromWire(r,bind,{q(good)},{q(inv)},stops,70,plan)==RCE_UNRESOLVED);

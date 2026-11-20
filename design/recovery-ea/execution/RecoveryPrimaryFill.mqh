@@ -7,16 +7,15 @@ struct RecoveryPrimaryFillBinding {
  RecoveryHistoryScope history;
  RecoveryInventoryScope inventory;
  ulong scope,verify_after;
- RRAction routed; // RR_PRIMARY if still pending, RR_NONE if verified working
+ RRAction routed; // staged primary/final reentry, or RR_NONE for a verified working primary
  double price_tick,volume_step;
 };
 
 bool RecoveryPrimaryFillWanted(const RRRangeState &s,const RRSettings &cfg,
     const RecoveryPrimaryFillBinding &b,RRKnownOrder &wanted) {
  if(!RRValid(s,cfg) || s.scope!=b.scope || s.scope==0 || s.cycle.position_id!=0 ||
-    s.cycle.active_order!=0 || RCCurrentSlot(s.cycle)!=1 || s.cycle.last_closed_order!=0 ||
-    s.cycle.last_closed_position!=0 || s.position_ticket!=0 || s.support_stage!=0 ||
-    s.opposite.ticket!=0 || s.retire.ticket!=0 || s.reentry_slot!=0 ||
+    s.cycle.active_order!=0 || s.position_ticket!=0 || s.support_stage!=0 ||
+    s.opposite.ticket!=0 || s.retire.ticket!=0 ||
     !RecoveryAlternatingSameSession(b.exact.binding,b.history.binding) ||
     !RecoveryAlternatingSameSession(b.exact.binding,b.inventory) ||
     b.exact.binding.nonce==b.history.binding.nonce || b.exact.binding.nonce==b.inventory.nonce ||
@@ -26,9 +25,18 @@ bool RecoveryPrimaryFillWanted(const RRRangeState &s,const RRSettings &cfg,
     b.history.position_identifier==0) return false;
  RRAction expected;
  RRClearAction(expected);
- if(!RRMakeEntry(cfg,s.primary_side,s.primary_ticks,1,expected))return false;
- if(s.phase==RR_NEW) {
-    if(s.entry.ticket!=0 || b.routed.kind!=RR_PRIMARY || b.routed.serial==0 ||
+ // The final rung has exactly one same-side reentry and no successor STOP.
+ // Its exact ticket can fill before a working-order observation, like a primary.
+ const bool reentry=b.routed.kind==RR_REENTRY;
+ if(reentry) {
+    if(RCCurrentSlot(s.cycle)!=RC_LIMIT || s.reentry_slot!=RC_LIMIT || s.phase!=RR_ARM_REENTRY ||
+       s.cycle.last_closed_order==0 || s.cycle.last_closed_position==0 ||
+       b.exact.order_ticket==s.cycle.last_closed_order ||
+       !RRMakeEntry(cfg,s.reentry_side,s.reentry_ticks,RC_LIMIT,expected))return false;
+ } else if(RCCurrentSlot(s.cycle)!=1 || s.cycle.last_closed_order!=0 || s.cycle.last_closed_position!=0 ||
+           s.reentry_slot!=0 || !RRMakeEntry(cfg,s.primary_side,s.primary_ticks,1,expected))return false;
+ if(s.phase==RR_NEW || reentry) {
+    if(s.entry.ticket!=0 || (!reentry && b.routed.kind!=RR_PRIMARY) || b.routed.serial==0 ||
        b.routed.serial!=s.action_serial ||
        b.routed.scope!=s.scope || b.routed.generation!=s.cycle.generation ||
        b.routed.range_id!=s.cycle.range_id || b.routed.order_ticket!=0 ||

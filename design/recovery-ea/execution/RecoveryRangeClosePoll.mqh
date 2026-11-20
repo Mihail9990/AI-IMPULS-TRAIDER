@@ -1,14 +1,17 @@
 #ifndef RECOVERY_RANGE_CLOSE_POLL_MQH
 #define RECOVERY_RANGE_CLOSE_POLL_MQH
+#include "RecoveryProofRetry.mqh"
 #include "../cycle/RecoveryCloseCheckpoint.mqh"
 #include "RecoveryOwnerEvidence.mqh"
 #include "RecoveryInventoryRequest.mqh"
+#include "RecoveryMoneyJournal.mqh"
 
 enum RecoveryClosePollState { RCP_IDLE=0,RCP_HISTORY_REQUEST,RCP_HISTORY_READ,
                               RCP_INVENTORY_REQUEST,RCP_INVENTORY_READ,RCP_DONE,RCP_UNRESOLVED };
 enum RecoveryClosePollResult { RCP_WAIT=0,RCP_PROGRESS,RCP_PROOF,RCP_NOT_CONFIRMED };
 struct RecoveryRangeClosePoll {
  RecoveryClosePollState state;
+ RecoveryProofRetry retry;
  RCCloseWireBinding binding;
  RCRange before;
  ulong live_ticket;
@@ -16,6 +19,12 @@ struct RecoveryRangeClosePoll {
  string publisher_tag;
  RecoveryHistorySnapshot history;
 };
+
+void RecoveryRearmCloseRead(RecoveryRangeClosePoll &p) {
+ if(p.state!=RCP_UNRESOLVED || !RecoveryProofRetryDue(p.retry,GetTickCount64()))return;
+ const RecoveryProofRetry retry=p.retry;
+ ZeroMemory(p);p.retry=retry;
+}
 
 // For an exact known position from this session only. Absence merely
 // starts observation; it cannot classify a close or submit a broker action.
@@ -79,7 +88,9 @@ RecoveryClosePollResult RecoveryRangeClosePollStep(RecoveryRangeClosePoll &task,
       if(!RecoveryHistoryRequest(task.binding.history,task.publisher_tag))return RecoveryClosePollStop(task);
       return RCP_PROGRESS;
    case RCP_HISTORY_READ:
-      if(!RecoveryHistoryRead(task.binding.history,task.history))return RCP_WAIT;
+      if(!RecoveryHistoryRead(task.binding.history,task.history))
+         return FileIsExist("RECOVERY_VERIFY\\"+task.binding.history.binding.nonce+".history") ?
+                RecoveryClosePollStop(task) : RCP_WAIT;
       if(!task.history.usable || !task.history.observed ||
          task.history.sequence<=task.binding.history_after)return RecoveryClosePollStop(task);
       task.state=RCP_INVENTORY_REQUEST;
@@ -91,10 +102,19 @@ RecoveryClosePollResult RecoveryRangeClosePollStep(RecoveryRangeClosePoll &task,
       return RCP_PROGRESS;
    case RCP_INVENTORY_READ: {
       RecoveryInventorySnapshot inv;
-      if(!RecoveryInvRead(v,inv))return RCP_WAIT;
-      if(inv.sequence<=task.history.sequence || !RecoveryAlternatingPumpSession(v) ||
-        !RCCPStageFromReports(task.before,task.binding,task.history,inv,facts,cfg.initial_sl_ticks,out))
-        return RecoveryClosePollStop(task);
+      if(!RecoveryInvRead(v,inv))
+         return FileIsExist("RECOVERY_VERIFY\\"+v.nonce+".snapshot") ? RecoveryClosePollStop(task) : RCP_WAIT;
+      if(inv.sequence<=task.history.sequence || !RecoveryAlternatingPumpSession(v))
+         return RecoveryClosePollStop(task);
+      RCCloseCheckpoint observed;
+      const RCEvidenceResult status=RCCPObserveFromReports(task.before,task.binding,task.history,inv,facts,
+                                                           cfg.initial_sl_ticks,observed,true);
+      if(status!=RCE_FULLY_CLASSIFIED && status!=RCE_CLOSED_UNCLASSIFIED)return RecoveryClosePollStop(task);
+      if(!RecoveryMoneyEnqueue(task.binding,task.history,observed))
+         Print("RECOVERY: confirmed close has no monetary journal entry; amount unresolved.");
+      RCRange after;RCClosePlan plan;
+      if(status!=RCE_FULLY_CLASSIFIED || !RCCPDerive(observed,after,plan))return RecoveryClosePollStop(task);
+      out=observed;
       task.verified_sequence=(ulong)inv.sequence;
       task.state=RCP_DONE;
       return RCP_PROOF;

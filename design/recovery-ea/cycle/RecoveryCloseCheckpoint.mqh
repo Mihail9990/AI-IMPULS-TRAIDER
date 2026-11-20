@@ -49,15 +49,28 @@ bool RCCPStageFromWire(const RCRange &before,const RCCloseWireBinding &binding,
    return true;
 }
 
+RCEvidenceResult RCCPObserveFromReports(const RCRange &before,const RCCloseWireBinding &binding,
+                       const RecoveryHistorySnapshot &history,const RecoveryInventorySnapshot &inventory,
+                       const RCProtectionFact &protection[],const long reentry_distance,
+                       RCCloseCheckpoint &out,const bool include_unclassified=false) {
+   out.key.scope=0;
+   RCCloseCheckpoint candidate;
+   const RCEvidenceResult status=RCBuildCloseFromReports(before,binding,history,inventory,protection,
+                                                         candidate.proof,include_unclassified);
+   if(status!=RCE_FULLY_CLASSIFIED && status!=RCE_CLOSED_UNCLASSIFIED)return status;
+   candidate.key=binding.key;candidate.before=before;candidate.reentry_distance=reentry_distance;
+   out=candidate;
+   return status;
+}
+
 bool RCCPStageFromReports(const RCRange &before,const RCCloseWireBinding &binding,
                        const RecoveryHistorySnapshot &history,const RecoveryInventorySnapshot &inventory,
                        const RCProtectionFact &protection[],const long reentry_distance,
                        RCCloseCheckpoint &out) {
    out.key.scope=0;
    RCCloseCheckpoint candidate;
-   if(RCBuildCloseFromReports(before,binding,history,inventory,protection,candidate.proof)
+   if(RCCPObserveFromReports(before,binding,history,inventory,protection,reentry_distance,candidate)
       !=RCE_FULLY_CLASSIFIED)return false;
-   candidate.key=binding.key;candidate.before=before;candidate.reentry_distance=reentry_distance;
    RCRange after;
    RCClosePlan plan;
    if(!RCCPDerive(candidate,after,plan))return false;

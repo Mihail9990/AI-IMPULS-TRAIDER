@@ -9,7 +9,8 @@ HERE=Path(__file__).resolve().parent
 class SupportRuntimeCompat(unittest.TestCase):
     def test_one_watch_one_support_and_delayed_confirmation(self):
         header=(HERE/"RecoverySupportRuntime.mqh").read_text()
-        header="\n".join(l for l in header.splitlines() if not l.startswith("#include"))
+        retry=(HERE/"RecoveryProofRetry.mqh").read_text()
+        header=retry+"\n"+"\n".join(l for l in header.splitlines() if not l.startswith("#include"))
         header=re.sub(r"\(string\)([\w.]+)",r"std::to_string(\1)",header)
         source=(HERE/"test_support_runtime.cpp").read_text().replace(
             '#include "SupportRuntimeUnderTest"',header)

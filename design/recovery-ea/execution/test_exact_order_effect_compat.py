@@ -36,9 +36,8 @@ class ExactOrderEffectCompat(unittest.TestCase):
         units = ado[ado.index("bool RecoveryAdoptionUnsigned"):ado.index("bool RecoveryAdoptionBound")]
         adapter = (HERE/"RecoveryExactOrderEffect.mqh").read_text().split("// Transport entry point;",1)[0]+"\n#endif\n"
         adapter = adapter.replace("(string)binding.request.binding.magic","std::to_string(binding.request.binding.magic)")
-        prefix = SHIM + f'\n#include <cmath>\n#include "{CYCLE/"RecoveryCycle.mqh"}"\n'
+        prefix = SHIM + '\n#include <cmath>\nusing ulong=std::uint64_t;\n#include "RecoveryCycle.mqh"\n'
         prefix += """
-using ulong=std::uint64_t;
 double StringToDouble(const string &s){return std::stod(s);}
 bool MathIsValidNumber(double n){return std::isfinite(n);}
 double MathRound(double n){return std::round(n);}
@@ -126,7 +125,7 @@ int main() {{
             exe = cpp.with_suffix("")
             cpp.write_text(prefix+body+main)
             subprocess.run([compiler,"-std=c++17","-Wall","-Wextra","-Werror","-fsanitize=undefined",
-                            str(cpp),"-o",str(exe)],check=True)
+                            "-I",str(CYCLE),str(cpp),"-o",str(exe)],check=True)
             subprocess.run([str(exe)],check=True)
 
 

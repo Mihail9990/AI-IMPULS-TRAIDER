@@ -133,4 +133,16 @@ bool RecoveryLiveSessionPublish(const RecoveryLiveSession &s,const RecoverySessi
      {FileDelete(tmp);return false;}
    return true;
   }
+// Rotate the panel generation only when the new ready state can be published.
+// The verifier/watcher remain bound to this boot, and old mailbox files remain scoped.
+bool RecoveryLiveNextGeneration(RecoveryLiveSession &s,const RecoverySessionContext &live)
+  {
+   if(!RecoveryLiveSessionCurrent(s,live))return false;
+   const string previous=s.mail.generation_id;
+   const string next=RecoveryLiveUuid("next-generation",previous);
+   if(!RecoveryPanelCommandUUID(next) || next==previous)return false;
+   s.mail.generation_id=next;
+   if(RecoveryLiveSessionPublish(s,live,REC_CONTROL_IDLE))return true;
+   s.mail.generation_id=previous;return false;
+  }
 #endif

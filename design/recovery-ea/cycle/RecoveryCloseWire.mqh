@@ -49,7 +49,8 @@ bool RCAnchorType(const ulong type,const int side) {
 // The typed snapshots must have been read for the exact challenges in b.
 RCEvidenceResult RCBuildCloseFromReports(const RCRange &r,const RCCloseWireBinding &b,
                                       const RecoveryHistorySnapshot &hist,const RecoveryInventorySnapshot &inv,
-                                      const RCProtectionFact &protection[],RCCloseProof &proof) {
+                                      const RCProtectionFact &protection[],RCCloseProof &proof,
+                                      const bool include_unclassified=false) {
    RCClearCloseProof(proof);
    if(!RCCloseWireScope(b) || !RCBound(r,b.key.generation,b.key.range_id) ||
       !RCValidSide(r.side) || !RCBoundedPositive(r.filled_steps) ||
@@ -115,7 +116,7 @@ RCEvidenceResult RCBuildCloseFromReports(const RCRange &r,const RCCloseWireBindi
       } else return RCE_UNRESOLVED; // no close-by, netting reversal or unsupported entry semantics
    }
    if(h.observed_entry_steps!=anchor_initial-anchor_remainder)return RCE_UNRESOLVED;
-   return RCBuildCloseProof(r,b.key,h,i,exits,protection,proof);
+   return RCBuildCloseProof(r,b.key,h,i,exits,protection,proof,include_unclassified);
 }
 
 RCEvidenceResult RCBuildCloseFromWire(const RCRange &r,const RCCloseWireBinding &b,

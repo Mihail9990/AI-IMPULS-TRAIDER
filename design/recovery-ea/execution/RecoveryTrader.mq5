@@ -118,6 +118,7 @@ int OnInit()
 void RecoveryTraderStop()
   {
    EventKillTimer();
+   RecoveryMoneyFlushPending();
    if(TraderOwned)RecoveryChartStop(TraderRuntime);
    TraderOwned=false;
   }
@@ -140,7 +141,10 @@ bool RecoveryTraderCurrent(RecoverySessionContext &live)
 void OnTimer()
   {
    RecoverySessionContext live;
-   if(RecoveryTraderCurrent(live))RecoveryChartOnTimer(TraderRuntime,live);
+   if(RecoveryTraderCurrent(live)) {
+      RecoveryChartOnTimer(TraderRuntime,live);
+      RecoveryMoneyJournalTimer(live.login,live.server,live.symbol);
+   }
   }
 
 void OnTradeTransaction(const MqlTradeTransaction &transaction,

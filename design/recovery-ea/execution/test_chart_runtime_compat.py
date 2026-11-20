@@ -86,6 +86,7 @@ struct RecoverySupportRuntime {int x;};
 enum {RCP_IDLE,RCP_DONE,RCP_UNRESOLVED,RC_INITIAL_LEVEL,RC_SUPPORT_LEVEL,RC_SUPPORT_SL,RC_FULL_SL,RR_ALT_CLOSE_APPLIED};
 enum RecoveryClosePollResult{RCP_PROOF};
 struct RecoveryRangeClosePoll{int state;ulong verified_sequence;};
+void RecoveryRearmCloseRead(RecoveryRangeClosePoll&){}
 struct RCCloseCheckpoint {int value,before,proof;struct {ulong scope;} key;};
 enum {RSCO_IDLE,RSCO_REQUEST,RSCO_READ,RSCO_STAGED,RSCO_DISPATCHED};
 struct RecoverySupportCloseOwner{int phase,reentry;RecoveryIntentKey key;ulong working_sequence;};
@@ -393,6 +394,17 @@ void RecoveryRangeOwnerOrdinaryTrade(RecoveryRangeOwner& u,const RecoveryPanelCo
  if(u.phase==RRO_ORDINARY&&event.range==u.id)++u.received;
 }
 """
+SHIM+=r"""
+struct RecoveryFinalLeg {bool attempted;};
+bool ready_to_finish=false;
+int generation_changes=0;
+bool RecoveryFinalStep(RecoveryFinalLeg&,RecoveryRangeOwner&,RecoveryPanelControl&,const RecoverySessionLifecycle&,
+ const RecoverySessionContext&,const RecoverySessionIntentScope&,const RecoveryInventoryScope&,
+ RecoveryEvidenceOwner&,const RecoveryRangeClosePoll& poll,const RCCloseCheckpoint& close,double,double){
+ return ready_to_finish&&poll.state==RCP_DONE&&close.proof==RC_FULL_SL;
+}
+bool RecoveryLiveNextGeneration(RecoveryLiveSession&,const RecoverySessionContext&){++generation_changes;return true;}
+"""
 TEST=r"""
 #include "RecoveryChartRuntime.mqh"
 int main(){
@@ -510,6 +522,23 @@ int main(){
  pending_proof=true;
  assert(RecoveryChartOnTimer(wait,live)&&pending_calls==3&&wait.panel.mode==REC_CONTROL_ADOPTED&&pending_opening==1);
  assert(wait.adopted.seeded&&!wait.panel.configured[0]&&!wait.panel.configured[1]);
+ wait.adopted.ordinary.phase=RRO_FINAL;
+ auto& final_range=wait.adopted.backing.ranges[0];
+ final_range.initial_sl=399920;final_range.cycle.actual_entry_ticks=400000;
+ const auto gen=wait.settings.generation;const auto old_arms=reverse_sends;
+ closing=false;const int before_watch=support_ticks;
+ assert(RecoveryChartOnTimer(wait,live)&&support_ticks==before_watch+1);
+ closing=true;close_type=RC_FULL_SL;
+ assert(RecoveryChartOnTimer(wait,live)&&wait.panel.mode==REC_CONTROL_ADOPTED);
+ ready_to_finish=true;
+ assert(RecoveryChartOnTimer(wait,live)&&wait.panel.mode==REC_CONTROL_IDLE&&!wait.adopted.seeded);
+ assert(wait.settings.generation==gen+1&&generation_changes==1&&reverse_sends==old_arms);
+ assert(RecoveryChartOnTimer(wait,live)&&wait.panel.mode==REC_CONTROL_IDLE&&generation_changes==1);
+ RecoveryChartOnTrade(wait,live,{1}); // delayed event from the exhausted cycle
+ assert(wait.panel.mode==REC_CONTROL_IDLE&&!wait.adopted.seeded);
+ closing=false;manual_proof=false;manual_attempt=false;manual_arm=true;
+ assert(RecoveryChartOnTimer(wait,live)&&wait.panel.mode==REC_CONTROL_MANUAL_WAIT&&!wait.adopted.seeded);
+
  RecoveryChartStop(wait);
 
 }

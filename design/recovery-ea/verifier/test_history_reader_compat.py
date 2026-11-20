@@ -84,7 +84,7 @@ class HistoryReaderCompat(unittest.TestCase):
 
     def test_transport_is_create_only_and_no_trade_api(self):
         source = (HOME / "RecoveryHistoryReader.mqh").read_text()
-        self.assertIn("FileMove(temp,0,final,0)", source)
+        self.assertIn("FileMove(temp,0,request_path,0)", source)
         self.assertIn('FileIsExist(prefix+".history")', source)
         self.assertIsNone(re.search(
             r"\b(?:FILE_REWRITE|OrderSend(?:Async)?|CTrade|TRADE_ACTION_\w+|PositionClose\w*)\b",

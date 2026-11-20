@@ -111,6 +111,12 @@ int main(){
  assert(files[state].find("pending_wait")!=string::npos);
  assert(RecoveryLiveSessionPublish(a,live,REC_CONTROL_ADOPTED));
  assert(files[state].find("active")!=string::npos);
+ const auto old_generation=a.mail.generation_id;
+ fail_move=true;
+ assert(!RecoveryLiveNextGeneration(a,live)&&a.mail.generation_id==old_generation);
+ fail_move=false;
+ assert(RecoveryLiveNextGeneration(a,live)&&a.mail.generation_id!=old_generation&&a.mail.boot_id==first);
+ assert(files[state].find(a.mail.generation_id)!=string::npos&&files[state].find("ready")!=string::npos);
  connected=false;
  assert(!RecoveryLiveSessionCurrent(a,live)&&!RecoveryLiveSessionPublish(a,live,REC_CONTROL_IDLE));
  RecoveryLiveSessionStop(a);assert(!writer_open&&a.mail.boot_id.empty()&&!files.count(state));

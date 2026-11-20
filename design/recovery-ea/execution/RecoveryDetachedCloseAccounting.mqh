@@ -62,7 +62,11 @@ RecoveryDetachedCloseResult RecoveryDetachedCloseAccountingTimer(RecoveryDetache
                                   scratch,panel.settings,tick,step))return RDC_IDLE;
     return RDC_PROGRESS;
  }
- if(task.polls[at].state==RCP_DONE || task.polls[at].state==RCP_UNRESOLVED)return RDC_IDLE;
+ if(task.polls[at].state==RCP_DONE)return RDC_IDLE;
+ if(task.polls[at].state==RCP_UNRESOLVED) {
+    RecoveryRearmCloseRead(task.polls[at]);
+    return RDC_IDLE;
+ }
  if(!RecoveryAlternatingSameSession(task.polls[at].binding.inventory,verifier_context))
     return RDC_UNRESOLVED;
  RCProtectionFact facts[2];

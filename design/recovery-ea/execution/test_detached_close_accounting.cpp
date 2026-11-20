@@ -33,6 +33,7 @@ struct RecoveryRangeClosePoll {
  struct {RecoveryInventoryScope inventory;} binding;
  ulong position;
 };
+void RecoveryRearmCloseRead(RecoveryRangeClosePoll&){}
 const ulong older=9007199254740997ULL,newer=9007199254740999ULL,still_owned=9007199254741001ULL;
 bool old_failed=false;
 int merged=0,steps=0;

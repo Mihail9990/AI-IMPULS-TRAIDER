@@ -16,6 +16,7 @@
 #include "RecoverySupportGapOwner.mqh"
 #include "RecoverySupportMoveFill.mqh"
 #include "RecoveryDetachedCloseAccounting.mqh"
+#include "RecoveryFinalLeg.mqh"
 
 struct RecoveryChartRuntime {
  RecoveryLiveSession live_session;
@@ -40,6 +41,7 @@ struct RecoveryChartRuntime {
  RecoverySupportGapOwner gap[2];
  RecoverySupportMoveFill fast_survivor[2];
  RecoveryDetachedCloseAccounting detached_close[2];
+ RecoveryFinalLeg final_leg[2];
  ulong close_position[2];
  string watcher_epoch;
  long watcher_chart;
@@ -52,10 +54,9 @@ struct RecoveryChartRuntime {
 
 // In-session trading chart controller, not a release entrypoint. Remaining
 // owner paths (manual adoption and manual close/cancel) are wired apart.
-void RecoveryChartStop(RecoveryChartRuntime &chart)
+void RecoveryChartClearCycle(RecoveryChartRuntime &chart)
   {
-   RecoveryLiveSessionStop(chart.live_session);
-   ZeroMemory(chart.panel);ZeroMemory(chart.verifier);ZeroMemory(chart.manual);ZeroMemory(chart.adopted);ZeroMemory(chart.manual_fast);RecoveryManualPendingChartReset(chart.pending_manual);
+   ZeroMemory(chart.panel);ZeroMemory(chart.manual);ZeroMemory(chart.adopted);ZeroMemory(chart.manual_fast);RecoveryManualPendingChartReset(chart.pending_manual);
    ZeroMemory(chart.oco);ZeroMemory(chart.losing_stop);
    chart.cancel_started=false;chart.cancel_skipped=false;chart.cancel_result=ROC_WAIT;
    for(int i=0;i<2;i++) {
@@ -64,10 +65,17 @@ void RecoveryChartStop(RecoveryChartRuntime &chart)
     ZeroMemory(chart.support_exit[i]);ZeroMemory(chart.reentry[i]);
     ZeroMemory(chart.dual[i]);ZeroMemory(chart.rotation[i]);
     ZeroMemory(chart.gap[i]);ZeroMemory(chart.fast_survivor[i]);
-    ZeroMemory(chart.detached_close[i]);
+    ZeroMemory(chart.detached_close[i]);ZeroMemory(chart.final_leg[i]);
     chart.close_position[i]=0;
     chart.reverse_probe_position[i]=0;
  }
+  }
+
+void RecoveryChartStop(RecoveryChartRuntime &chart)
+  {
+   RecoveryLiveSessionStop(chart.live_session);
+   RecoveryChartClearCycle(chart);
+   ZeroMemory(chart.verifier);
    ZeroMemory(chart.settings);
    chart.tick=0;chart.step=0;chart.publish_needed=false;chart.watcher_epoch="";chart.watcher_chart=0;
   }
@@ -213,11 +221,14 @@ void RecoveryChartSupportTimer(RecoveryChartRuntime &chart,const RecoverySession
    if(chart.close_poll[i].state==RCP_IDLE &&
       !RecoveryBeginRangeClosePoll(chart.close_poll[i],chart.verifier,chart.live_session.lifecycle,
            live,verifier,range,panel.settings,chart.tick,chart.step))return;
-   if(chart.close_poll[i].state==RCP_UNRESOLVED)return;
+   if(chart.close_poll[i].state==RCP_UNRESOLVED) {
+      RecoveryRearmCloseRead(chart.close_poll[i]);
+      return;
+   }
    if(chart.close_poll[i].state==RCP_DONE)
      {
       const RCCloseCheckpoint verified=chart.close_proof[i];
-      if(RCClassifyClose(verified.before,verified.proof)==RC_SUPPORT_SL)
+      if(owner.phase!=RRO_FINAL && RCClassifyClose(verified.before,verified.proof)==RC_SUPPORT_SL)
         {
          if(chart.support_exit[i].phase==RSCO_IDLE &&
             !RecoveryBeginSupportCloseOwner(chart.support_exit[i],owner,panel,
@@ -235,7 +246,7 @@ void RecoveryChartSupportTimer(RecoveryChartRuntime &chart,const RecoverySession
       range.support_stage==2 && range.live_sl==range.cycle.actual_entry_ticks ? range.live_sl : 0,facts[1]);
    const RecoveryClosePollResult closed=RecoveryRangeClosePollStep(chart.close_poll[i],
       chart.live_session.lifecycle,live,range,panel.settings,facts,chart.close_proof[i]);
-   if(closed==RCP_PROOF && owner.revision<ULONG_MAX &&
+   if(closed==RCP_PROOF && owner.phase!=RRO_FINAL && owner.revision<ULONG_MAX &&
       RCClassifyClose(chart.close_proof[i].before,chart.close_proof[i].proof)==RC_FULL_SL &&
       RRRecordAlternatingClose(owner.ledger,chart.close_proof[i])==RR_ALT_CLOSE_APPLIED)
       ++owner.revision;
@@ -366,7 +377,17 @@ void RecoveryChartOrdinaryTimer(RecoveryChartRuntime &chart,const RecoverySessio
   {
    if(owner.phase==RRO_FINAL)
      {
+      if(panel.ranges[i].cycle.position_id!=0)RecoveryChartSupportTimer(chart,live,scope,verifier,i,owner,panel);
       RecoveryChartDetachedTimer(chart,live,scope,verifier,i,owner,panel,true);
+      if(RecoveryFinalStep(chart.final_leg[i],owner,panel,chart.live_session.lifecycle,live,
+           scope,verifier,chart.verifier,chart.close_poll[i],chart.close_proof[i],chart.tick,chart.step) &&
+         manual && chart.panel.mode==REC_CONTROL_ADOPTED && chart.settings.generation<(ulong)LONG_MAX &&
+         RecoveryLiveNextGeneration(chart.live_session,live))
+        {
+         RecoveryChartClearCycle(chart);
+         chart.settings.generation++;
+         chart.publish_needed=false;
+        }
       return;
      }
    if(owner.phase!=RRO_ORDINARY)return;

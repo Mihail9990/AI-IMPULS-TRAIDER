@@ -96,8 +96,8 @@ class ExactWireCompat(unittest.TestCase):
         self.assertIn("ScanChannel(OrderSearchHandle,OrderSearchFilename,VERIFIER_EXACT_ORDER)",verifier)
         self.assertIn("PublishExact(nonce,generation,anchor)",verifier)
         self.assertIn('WriteReport(nonce,".order",',verifier)
-        self.assertIn('const string final=prefix+".ord"',reader)
-        self.assertIn("FileMove(temp,0,final,0)",reader)
+        self.assertIn('const string request_path=prefix+".ord"',reader)
+        self.assertIn("FileMove(temp,0,request_path,0)",reader)
         self.assertNotRegex(reader, r"\b(?:FILE_REWRITE|OrderSend(?:Async)?|CTrade)\b")
 
 

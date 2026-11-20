@@ -77,6 +77,14 @@ int main() {
  deals={deal(r,100,1,3987,4000,RC_MANUAL),deal(r,101,6,3990,4050,RC_MANUAL)};
  assert(build()==RCE_FULLY_CLASSIFIED && RCClassifyClose(r,proof)==RC_MANUAL_EXIT);
  deals[0].reason=RC_SL;assert(build()==RCE_UNRESOLVED);
+ assert(RCBuildCloseProof(r,k,h,i,deals,stops,proof,true)==RCE_CLOSED_UNCLASSIFIED);
+ assert(proof.independently_verified&&proof.exited_steps==r.filled_steps&&RCClassifyClose(r,proof)==RC_UNRESOLVED);
+ deals[0].reason=RC_TP;deals[1].reason=RC_TP;
+ assert(RCBuildCloseProof(r,k,h,i,deals,stops,proof,true)==RCE_FULLY_CLASSIFIED);
+ assert(RCClassifyClose(r,proof)==RC_TP_EXIT&&!RCApplyClose(r,proof,70,plan));
+ i.present=true;i.observed_position_id=r.position_id;i.remaining_steps=1;
+ assert(RCBuildCloseProof(r,k,h,i,deals,stops,proof,true)==RCE_UNRESOLVED&&!proof.independently_verified);
+ i.present=false;i.observed_position_id=0;i.remaining_steps=0;
  deals[0].reason=0;deals[1].reason=0;assert(build()==RCE_UNRESOLVED);
  deals={deal(r,103,7,3990,4000)};
  assert(build()==RCE_FULLY_CLASSIFIED && RCApplyClose(r,proof,70,plan));
