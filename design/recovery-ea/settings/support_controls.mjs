@@ -14,7 +14,7 @@ export function wireSupportSettings(form, {initial, editable, onSave}) {
   }
   function submit(event) {
     event.preventDefault();
-    if (idle) onSave({support_threshold: threshold.value});
+    if (idle) return onSave({support_threshold: threshold.value});
   }
   form.addEventListener('submit', submit);
   update();

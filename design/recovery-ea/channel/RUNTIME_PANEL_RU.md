@@ -51,13 +51,30 @@ handle @recoveryEA {
 В комплекте для запуска нужны эти файлы, исходные `web/session.js`
 и `runtime/web_session.py`, а также существующие `channel.py`,
 `web_handoff.py` и `recovery_ranges.*`.
-Форма не включает настройки SL, историю сделок или другие возможности
-предыдущей панели. Данные в тестах записывались только во временную очередь
+Подключён один порог переноса SL на фактическую цену входа. По умолчанию
+форма видна, но выключена: `app_from_env()` не объявляет себя владельцем
+состояния EA. Без него защищённый маршрут `/api/recovery/ea/support-settings`
+отвечает 503; 0.40 в пустом поле означает только значение по умолчанию.
+Нельзя передавать в этот маршрут предположительно idle состояние из
+`Channel.state()`.
+
+Когда один подтверждённый владелец резервирования действительно существует,
+он может явно передать `support_store=` при вызове `create_panel_app()`.
+Использовать `SupportStore` из модуля
+`importlib.import_module('design.recovery-ea.settings.support_store')`
+с тем же замком и проверкой состояния/шага, что и при резервировании
+поколения. Более подробно: `../settings/SUPPORT_RUNTIME_RU.md`.
+В исходных файлах запуска нужны `settings/support_*.py`,
+`settings/support_controls.html`, `settings/support_controls.mjs` и
+`settings/support_panel.mjs`.
+Сохранение принимает один порог и ревизию через проверку сессии, Origin и
+CSRF. Не включает запуск торговли или просмотр истории.
+Данные в тестах записывались только во временную очередь
 с имитацией статуса EA. Запуск MT5 и HTTPS на VPS не проверялись.
 
 Из корня проекта (POSIX-оболочка):
 
 ```sh
 PYTHONPATH=.:design/recovery-ea/channel python -m unittest -v test_runtime_panel test_channel test_web_handoff
-node --test design/recovery-ea/channel/test_recovery_ranges.mjs
+node --test design/recovery-ea/channel/test_recovery_ranges.mjs design/recovery-ea/settings/test_support*.mjs
 ```

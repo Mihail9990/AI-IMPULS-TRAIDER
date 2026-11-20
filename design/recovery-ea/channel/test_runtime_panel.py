@@ -1,6 +1,8 @@
+from importlib import import_module
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import RLock
 from unittest import TestCase, main
 from uuid import uuid4
 
@@ -12,6 +14,8 @@ from runtime_panel import create_panel_app
 URL = 'https://vps.example'
 EA = '/api/recovery/ea'
 SESSION = '/api/recovery/session'
+SUPPORT = EA + '/support-settings'
+prefs = import_module('design.recovery-ea.settings.support_store')
 KEY = 'offline-test-panel-key-no-production' * 2
 
 
@@ -52,7 +56,8 @@ class PanelAssemblyTest(TestCase):
         self.assertIn('Подтвердить и отправить', home.text)
         self.assertIn("frame-ancestors 'none'", home.headers['content-security-policy'])
         self.assertEqual(home.headers['cache-control'], 'no-store')
-        for file in ('runtime_panel.mjs', 'runtime_panel.css', 'recovery_ranges.mjs', 'session.js'):
+        for file in ('runtime_panel.mjs', 'runtime_panel.css', 'recovery_ranges.mjs', 'session.js',
+                     'support_controls.mjs', 'support_panel.mjs'):
             route = '/recovery/assets/' + file
             asset = self.client.get(route)
             self.assertEqual(asset.status_code, 200)
@@ -115,6 +120,53 @@ class PanelAssemblyTest(TestCase):
         self.assertEqual(status.json()['reason'], 'no_receipt')
         self.assertFalse(self.client.get(route + '?expected_boot=' + str(uuid4()),
                           headers=self.headers).json()['retry_allowed'])
+
+    def test_settings_markup_and_defaults_without_authoritative_owner(self):
+        self.assertIn('name="support_threshold"', self.client.get('/recovery').text)
+        self.assertNotIn('support_first_enabled', self.client.get('/recovery').text)
+        self.assertEqual(self.client.get(SUPPORT, headers=self.headers).status_code, 401)
+        csrf = self.login().json()['csrf']
+        self.assertEqual(self.client.get(SUPPORT, headers=self.headers).status_code, 503)
+        put = self.client.put(SUPPORT, headers={**self.headers, 'X-Recovery-CSRF': csrf},
+                              json={'revision': 0, 'support_threshold': '0.45'})
+        self.assertEqual(put.status_code, 503)
+        self.assertFalse(self.command.exists())
+
+    def test_explicit_owner_projection_save_auth_csrf_and_active_interlock(self):
+        active = False
+        prefs_path = self.root / 'support.json'
+        lock = RLock()
+
+        def observe():
+            self.assertTrue(lock._is_owned())
+            return prefs.SettingsContext('0.01', active)
+
+        store = prefs.SupportStore(prefs_path, lock, observe)
+        app = create_panel_app(KEY, URL, self.channel, support_store=store)
+        self.client = TestClient(app, base_url=URL)
+        csrf = self.login().json()['csrf']
+        get = self.client.get(SUPPORT, headers=self.headers)
+        self.assertEqual(get.json(), {'revision': 0, 'editable': True, 'support_threshold': '0.40'})
+        payload = {'revision': 0, 'support_threshold': '0.450'}
+        self.assertEqual(self.client.put(SUPPORT, headers=self.headers, json=payload).status_code, 403)
+        headers = {**self.headers, 'X-Recovery-CSRF': csrf}
+        self.assertEqual(self.client.put(SUPPORT, headers={**headers, 'Origin': 'https://wrong.example'},
+                                         json=payload).status_code, 403)
+        self.assertEqual(self.client.put(SUPPORT, headers={**headers, 'Authorization': 'Bearer ' + KEY},
+                                         json=payload).status_code, 401)
+        self.assertEqual(self.client.post(SUPPORT, headers=headers, json=payload).status_code, 403)
+        self.assertFalse(prefs_path.exists())
+        result = self.client.put(SUPPORT, headers=headers, json=payload)
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json(), {'revision': 1, 'editable': True, 'support_threshold': '0.450'})
+        self.assertEqual(json.loads(prefs_path.read_text())['settings'], {'support_threshold': '0.450'})
+        with lock:
+            active = True
+        self.assertFalse(self.client.get(SUPPORT, headers=self.headers).json()['editable'])
+        self.assertEqual(self.client.put(SUPPORT, headers=headers, json={
+            'revision': 1, 'support_threshold': '0.50',
+        }).status_code, 409)
+        self.assertFalse(self.command.exists())
 
     def test_logout_denies_following_request(self):
         csrf = self.login().json()['csrf']

@@ -17,6 +17,7 @@ WRITE={'/api/recovery/ranges','/api/recovery/cancel','/api/recovery/lot-schedule
        '/api/recovery/ranges/1/close-cancel','/api/recovery/ranges/2/close-cancel'}
 
 _EA_API='/api/recovery/ea/'
+_EA_SUPPORT=_EA_API+'support-settings'
 _EA_WRITE={_EA_API+name for name in ('configure_ranges','manual_wait','manual_cancel')}
 _UUID='[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}'
 _EA_STATUS=re.compile(_EA_API+'commands/'+_UUID)
@@ -90,7 +91,8 @@ class BrowserSessions:
                 if _EA_BOOT_QUERY.fullmatch(query) is None:return await deny(400)
             elif query:return await deny(400)
             allowed=(poll or (method=='GET' and path==_EA_API+'state')
-                     or (method=='POST' and path in _EA_WRITE))
+                     or (method=='POST' and path in _EA_WRITE)
+                     or (method in ('GET','PUT') and path==_EA_SUPPORT))
         else:
             if query:return await deny(400)
             allowed=method=='GET' and path=='/api/recovery/state'
@@ -121,7 +123,7 @@ class BrowserSessions:
         else:
             session=active(now)
             if not session:return await deny()
-            if method=='POST' and not good_csrf(session):return await deny(403)
+            if (method=='POST' or (ea_panel and method=='PUT')) and not good_csrf(session):return await deny(403)
         # Only admitted clients may trigger the broker-context read; avoid blocking
         # the API event loop while the native session lock is held by the scheduler.
         checked_mode=self.mode

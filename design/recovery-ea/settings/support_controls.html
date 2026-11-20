@@ -2,8 +2,10 @@
 <form class="support-settings" aria-label="Перенос стоп-лосса RECOVERY">
   <label>
     Порог переноса SL на цену входа
-    <input name="support_threshold" type="text" inputmode="decimal" value="0.40"
-           autocomplete="off" required>
+    <input name="support_threshold" type="text" inputmode="decimal" placeholder="0.40"
+           autocomplete="off" disabled>
   </label>
-  <button type="submit">Сохранить</button>
+  <button type="submit" disabled>Сохранить</button>
+  <button type="button" data-support-refresh>Обновить настройку</button>
+  <output data-support-status role="status" aria-live="polite"></output>
 </form>

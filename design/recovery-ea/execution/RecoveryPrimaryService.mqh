@@ -10,17 +10,13 @@ struct RecoveryPrimaryOpenResult {
  RecoveryIntentKey sl_key,reverse_key;
 };
 
-// Called after the independent verifier reports have arrived. Read exact
-// evidence, commit the opening pair in the current session, then submit its
-// opposite STOP at the configured distance from the actual fill. The live
-// position's SL is observed, never changed merely to align the new trigger.
-bool RecoveryOpenVerifiedPrimary(
+// Both input paths require the exact current session, and a prior journal
+// receipt for the immutable primary action while it is still staged.
+bool RecoveryPrimaryOpenBound(
     const RecoveryPrimaryFillBinding &binding,const RecoverySessionLifecycle &session,
     const RecoverySessionContext &live,const RecoverySessionIntentScope &scope,
-    RRRangeState &range,const RRSettings &cfg,RROpeningPair &opening,
-    RRAlternationLedger &ledger,RecoveryPrimaryOpenResult &out)
+    const RRRangeState &range)
   {
-   ZeroMemory(out);
    if(!RecoveryPrimarySession(session,live,scope) || binding.scope!=scope.scope ||
       binding.inventory.executor_epoch!=scope.executor_epoch ||
       binding.inventory.login!=scope.login || binding.inventory.server!=scope.server ||
@@ -35,8 +31,19 @@ bool RecoveryOpenVerifiedPrimary(
            binding.volume_step,primary) || RecoveryIntentLookup(primary,ticket)!=RI_TICKET ||
            ticket!=(string)binding.exact.order_ticket) return false;
      }
-   RRFilled fill;
-   if(!RecoveryReadPrimaryFill(range,cfg,binding,fill))return false;
+   return true;
+}
+
+// Input MUST be the normalized result of this binding's independent
+// exact/history/inventory reader or its pump, never an ACK or local hint.
+bool RecoveryOpenVerifiedPrimaryProof(
+    const RecoveryPrimaryFillBinding &binding,const RecoverySessionLifecycle &session,
+    const RecoverySessionContext &live,const RecoverySessionIntentScope &scope,const RRFilled &fill,
+    RRRangeState &range,const RRSettings &cfg,RROpeningPair &opening,
+    RRAlternationLedger &ledger,RecoveryPrimaryOpenResult &out)
+  {
+   ZeroMemory(out);
+   if(!RecoveryPrimaryOpenBound(binding,session,live,scope,range))return false;
    RRRangeState next=range;
    RROpeningPair pair=opening;
    RRAlternationLedger chain=ledger;
@@ -48,5 +55,19 @@ bool RecoveryOpenVerifiedPrimary(
    out.disposition=RecoveryDispatchOpeningPair(range,opening,out.sl_key,out.reverse_key,
                            binding.price_tick,binding.volume_step,out.receipts);
    return true; // even if unresolved: the staged pair must not be submitted again
+  }
+// Compatibility path when a caller already has all verified messages on
+// disk. The primary pump should use the proof-fed path, avoiding a second read.
+bool RecoveryOpenVerifiedPrimary(
+    const RecoveryPrimaryFillBinding &binding,const RecoverySessionLifecycle &session,
+    const RecoverySessionContext &live,const RecoverySessionIntentScope &scope,
+    RRRangeState &range,const RRSettings &cfg,RROpeningPair &opening,
+    RRAlternationLedger &ledger,RecoveryPrimaryOpenResult &out)
+  {
+   ZeroMemory(out);
+   if(!RecoveryPrimaryOpenBound(binding,session,live,scope,range))return false;
+   RRFilled fill;
+   if(!RecoveryReadPrimaryFill(range,cfg,binding,fill))return false;
+   return RecoveryOpenVerifiedPrimaryProof(binding,session,live,scope,fill,range,cfg,opening,ledger,out);
   }
 #endif

@@ -34,6 +34,6 @@ test('markup exposes just the entry relocation price threshold', () => {
   assert.deepEqual([...html.matchAll(/<input\s+name="([^"]+)"/gu)].map((m) => m[1]),
     ['support_threshold']);
   assert.match(html, /На цену входа|на цену входа/u);
-  assert.match(html, /value="0\.40"/u);
+  assert.match(html, /placeholder="0\.40"/u);
   assert.doesNotMatch(html, /checkbox|0\.25|support_first/u);
 });

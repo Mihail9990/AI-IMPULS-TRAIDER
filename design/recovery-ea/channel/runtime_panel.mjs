@@ -1,5 +1,6 @@
 import './session.js';
 import {wireRecoveryRanges} from './recovery_ranges.mjs';
+import {mountSupportSettings} from './support_panel.mjs';
 
 const sessionApi = window.RecoverySession;
 const login = document.getElementById('login');
@@ -24,7 +25,7 @@ async function panelRequest(path, init) {
   const method = init.method || 'GET';
   const headers = new Headers(init.headers);
   headers.set('X-Recovery-Session', '1');
-  if (method === 'POST') headers.set('X-Recovery-CSRF', current.csrf);
+  if (method === 'POST' || method === 'PUT') headers.set('X-Recovery-CSRF', current.csrf);
   headers.delete('Authorization');
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
@@ -44,6 +45,12 @@ async function panelRequest(path, init) {
 }
 
 const ranges = wireRecoveryRanges(panel.querySelector('.recovery-ranges'), {request: panelRequest});
+const support = mountSupportSettings(panel.querySelector('.support-settings'), {request: panelRequest});
+
+async function refreshPanel() {
+  await Promise.all([ranges.refresh(), support.refresh()]);
+}
+
 
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -53,7 +60,7 @@ form.addEventListener('submit', async (event) => {
   keyInput.value = '';
   try {
     show(await sessionApi.login(value), '');
-    await ranges.refresh();
+    await refreshPanel();
   } catch {
     show(null, 'Вход не подтверждён.');
   } finally {
@@ -77,7 +84,7 @@ logout.addEventListener('click', async () => {
 sessionBusy = true;
 try {
   show(await sessionApi.restore(), '');
-  await ranges.refresh();
+  await refreshPanel();
 } catch {
   show(null, 'Войди в панель.');
 } finally {
