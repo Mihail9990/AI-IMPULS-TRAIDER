@@ -119,4 +119,30 @@ int main() {
  assert(adoption.backing.ranges[0].phase==RR_ACTIVE && adoption.backing.ranges[0].opposite.ticket==51);
  assert(adoption.ordinary.ledger.positions[0].confirmed_initial_sl==399924 && adoption.ordinary.revision==2);
  assert(!RecoveryManualPendingConfirmPair(adoption,p,{},{},{},request,effects));
+
+ // BUY 4000.00 -> 4000.10, with no pending-side SL established.
+ p.original.side=1;
+ h.rows[1].replace(h.rows[1].find("400002"),6,"400010");
+ h.rows[2].replace(h.rows[2].find("400008"),6,"400010");
+ i.rows[0].replace(i.rows[0].find("400004"),6,"400010");
+ assert(RecoveryManualPendingFillFold(p,11,h,i,p.proof));
+ s={};pair={};ledger={};
+ assert(RecoveryManualPendingOpening(p,cfg,s,pair,ledger));
+ assert(pair.sl_required && pair.sl.sl_ticks==399930 && pair.reverse.side==-1 &&
+        pair.reverse.entry_ticks==399930 && pair.reverse.sl_ticks==400010);
+ assert(!RecoveryManualPendingOpening(p,cfg,s,pair,ledger));
+ // SELL 4000.00 -> 3999.90, mirrored broker geometry.
+ p.original.side=-1;p.target_sl=400080;
+ h.rows[0].replace(h.rows[0].find("\t4\t4")+1,1,"5");
+ for(int n=1;n<=2;n++) {
+   h.rows[n].replace(h.rows[n].find("BUY"),3,"SELL");
+   h.rows[n].replace(h.rows[n].find("400010"),6,"399990");
+ }
+ i.rows[0].replace(i.rows[0].find("BUY"),3,"SELL");
+ i.rows[0].replace(i.rows[0].find("400010"),6,"399990");
+ assert(RecoveryManualPendingFillFold(p,11,h,i,p.proof));
+ s={};pair={};ledger={};
+ assert(RecoveryManualPendingOpening(p,cfg,s,pair,ledger));
+ assert(pair.sl_required && pair.sl.sl_ticks==400070 && pair.reverse.side==1 &&
+        pair.reverse.entry_ticks==400070 && pair.reverse.sl_ticks==399990);
 }

@@ -5,7 +5,8 @@ HERE=Path(__file__).resolve().parent
 CYCLE=Path(os.getenv("RECOVERY_CYCLE_DIR", str(HERE.parent/"cycle")))
 if not CYCLE.exists():
     CYCLE=Path("/workspace/shared/recovery-actual-integrated/cycle")
-header=(HERE/"RecoveryManualPendingFill.mqh").read_text()
+header=next(path for path in (HERE/"RecoveryManualPendingFill.mqh",
+    Path("/workspace/shared/recovery-actual-integrated/execution/RecoveryManualPendingFill.mqh")) if path.exists()).read_text()
 terms=header[header.index("bool RecoveryManualPendingFillTerms"):header.index("bool RecoveryManualPendingFillBegin")]
 fold=header[header.index("bool RecoveryManualPendingFillFold"):header.index("RecoveryManualPendingFillResult RecoveryManualPendingFillStop")].replace("string f[];", "std::vector<string> f;")
 stage=header[header.index("bool RecoveryManualPendingOpening"):header.index("// Private ordinary owner projection")]

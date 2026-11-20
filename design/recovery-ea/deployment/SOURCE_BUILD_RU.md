@@ -10,16 +10,18 @@
 с проверяемыми исходниками.
 
 ```powershell
-$Commit = '020a13cd5d7ff70365663f3ff0331445f7504562'
+$Commit = (git rev-parse HEAD).Trim() # checkout заранее закреплён на переданном коммите
 $Deploy = 'design\recovery-ea\deployment'
-$Archive = Join-Path $env:TEMP 'recovery-ea-diagnostic.zip'
-$Results = Join-Path $env:TEMP 'recovery-ea-compile-results'
+$Build = Join-Path $env:TEMP ('recovery-ea-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $Build | Out-Null
+$Archive = Join-Path $Build 'candidate-src.zip'
+$Results = Join-Path $Build 'compile-results'
 $MetaEditor = 'C:\Program Files\MetaTrader 5\metaeditor64.exe'  # Укажи свой путь
-$PackJson = py -3 "$Deploy\source_build.py" package --repo . --commit $Commit --out $Archive
+$PackJson = py -3 "$Deploy\source_build.py" package --repo . --commit $Commit --out $Archive --trader execution/RecoveryTrader.mq5
 if ($LASTEXITCODE -ne 0) { throw 'ZIP сборки не создан' }
 $Pack = $PackJson | ConvertFrom-Json
 & "$Deploy\Compile-RecoverySources.ps1" -MetaEditor $MetaEditor -Archive $Archive `
-  -Commit $Commit -ArchiveSha256 $Pack.zip_sha256 -Results $Results
+  -Commit $Commit -ArchiveSha256 $Pack.zip_sha256 -Results $Results -Mode candidate
 ```
 
 Для передачи ZIP с другого компьютера берите SHA-256 у доверенного
@@ -28,20 +30,13 @@ $Pack = $PackJson | ConvertFrom-Json
 исходника. При повторении задайте **новые** пути к ZIP и папке результата:
 инструменты не перезаписывают существующие результаты.
 
-По умолчанию компилируются `RecoveryVerifier.mq5`,
-`RecoveryPriceWatcher.mq5` и `RecoveryCompileProbe.mq5`. Последний проверяет,
-что модули собираются вместе; он не заменяет торговый EA и не отправляет
-ордера. ZIP содержит только выбранные исходники и их локальные зависимости
-из указанного коммита, без правок из рабочей папки.
-
-В режиме `candidate` допускаются ровно три входных файла по фиксированным
+Режим `candidate` допускает ровно три входных файла по фиксированным
 путям: `verifier/RecoveryVerifier.mq5`, `watcher/RecoveryPriceWatcher.mq5`,
-`execution/RecoveryTrader.mq5`. Торговый EA должен уже находиться в выбранном
-коммите. Для кандидата выберите новый путь ZIP и результатов, замените
-хеш коммита на нужный и в команде упаковки добавьте
-`--trader execution/RecoveryTrader.mq5`, а для PowerShell-компиляции
-`-Mode candidate`. Другие входные файлы кандидата не принимаются.
-Манифест схемы 2 обязателен: ZIP прежней двухрольной схемы нужно собрать заново.
+`execution/RecoveryTrader.mq5`. Советники не запускаются при компиляции.
+ZIP содержит только исходники и их локальные зависимости из указанного
+коммита, без правок из рабочей папки. Манифест схемы 2 обязателен.
+Сборка внутреннего диагностического скрипта не является заменой сборки
+этих трёх советников или частью комплекта для установки.
 
 Упаковка и распаковка проверяют, что ZIP содержит ровно зависимости из
 локальных строк `#include "...mqh"` для указанных целей. Лишние исходники,

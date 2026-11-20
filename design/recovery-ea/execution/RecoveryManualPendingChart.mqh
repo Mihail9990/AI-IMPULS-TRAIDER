@@ -1,6 +1,7 @@
 #ifndef RECOVERY_MANUAL_PENDING_CHART_MQH
 #define RECOVERY_MANUAL_PENDING_CHART_MQH
 #include "RecoveryManualPendingFill.mqh"
+#include "RecoveryManualPendingEarly.mqh"
 #include "RecoveryInventoryRequest.mqh"
 
 enum RecoveryPendingChartState {
@@ -10,6 +11,7 @@ struct RecoveryManualPendingChart {
  RecoveryPendingChartState state;
  RecoveryManualPendingOwner origin;
  RecoveryManualPendingFill fill;
+ RecoveryManualPendingEarly early;
  RecoveryInventoryScope initial, confirm;
  RecoveryInventoryScope fill_history,fill_inventory,opening_confirm;
  string tag;
@@ -62,7 +64,8 @@ bool RecoveryManualPendingChartTimer(RecoveryManualPendingChart &task,RecoveryMa
     return false;
  if(task.state==RMPCH_IDLE) {
     ulong hint;
-    if(!RecoveryPendingChartManualOrder(live.symbol,hint))return false;
+    if(!RecoveryPendingChartManualOrder(live.symbol,hint) ||
+       !RecoveryCaptureManualPendingEarly(hint,live,tick,step,task.early))return false;
     if(verifier.serial==ULONG_MAX)return false;
     const ulong serial=verifier.serial+1;
     const string id=scope.executor_epoch+":"+(string)hint+":"+(string)serial;
@@ -86,12 +89,15 @@ bool RecoveryManualPendingChartTimer(RecoveryManualPendingChart &task,RecoveryMa
     RecoveryInventorySnapshot initial;
     if(!RecoveryInvRead(task.initial,initial))return false;
     RecoveryManualPendingCandidate candidate;
-    if(!RecoveryFindManualPending(initial,task.initial,0,0,tick,step,candidate) ||
-       candidate.ticket!=task.hint ||
-       !RecoveryPrepareManualPending(task.origin,true,life,live,scope,cfg,task.initial,initial,0,
-                                    candidate.ticket,tick,step)) {
-       task.state=RMPCH_IDLE;return false;
-    }
+    if(RecoveryFindManualPending(initial,task.initial,0,0,tick,step,candidate)) {
+       if(candidate.ticket!=task.hint || !RecoveryManualPendingEarlyTerms(candidate,task.early.original) ||
+          !RecoveryPrepareManualPending(task.origin,true,life,live,scope,cfg,task.initial,initial,0,
+                                       candidate.ticket,tick,step) ||
+          task.origin.time_type!=task.early.time_type || task.origin.expiration!=task.early.expiration) {
+          RecoveryManualPendingChartReset(task);return false;
+       }
+    } else if(!RecoveryPrepareManualPendingEarly(task.origin,true,life,live,scope,cfg,task.initial,
+                                                   initial,task.early,tick,step))return false;
     task.state=RMPCH_BOUND;
  }
  if(task.state!=RMPCH_BOUND)return false;
