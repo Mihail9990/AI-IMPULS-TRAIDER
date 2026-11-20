@@ -1,0 +1,4 @@
+local_time,timestamp_source,source,event,result,reason
+02:03:33.555,receipt_file_mtime,desktop_receipt,start,applied,confirmed
+02:06:21.177,receipt_file_mtime,desktop_receipt,manual_wait,applied,confirmed
+02:07:04.758,log_timestamp,python_supervisor,MT5 verifier notification received,INFO,

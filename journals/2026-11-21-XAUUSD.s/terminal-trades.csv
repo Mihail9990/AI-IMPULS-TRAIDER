@@ -1,0 +1,272 @@
+chain,local_time,source,event,stage,order_ref,position_ref,deal_ref,terminal_message
+C1,02:07:04.778,Trades,deal,executed,O075,,D067,deal #D067 sell 0.01 XAUUSD.s at 3525.97 done (based on order #O075)
+C1,02:07:05.166,Trades,modify_position_sl_tp,request,,O075,,"modify #O075 sell 0.01 XAUUSD.s sl: 0.00, tp: 0.00 -> sl: 3526.77, tp: 0.00"
+C1,02:07:05.200,Trades,modify_position_sl_tp,accepted,,O075,,"accepted modify #O075 sell 0.01 XAUUSD.s sl: 0.00, tp: 0.00 -> sl: 3526.77, tp: 0.00"
+C1,02:07:05.202,Trades,modify_position_sl_tp,done,,O075,,"modify #O075 sell 0.01 XAUUSD.s -> sl: 3526.77, tp: 0.00 done in 43.893 ms"
+C1,02:07:05.232,Trades,place_stop,request,,,,buy stop 0.01 XAUUSD.s at 3526.77 sl: 3525.97
+C1,02:07:05.268,Trades,place_stop,accepted,,,,accepted buy stop 0.01 XAUUSD.s at 3526.77 sl: 3525.97
+C1,02:07:05.270,Trades,place_stop,done,O048,,,order #O048 buy stop 0.01 / 0.01 XAUUSD.s at 3526.77 done in 44.882 ms
+C1,02:07:08.942,Trades,deal,executed,O048,,D044,deal #D044 buy 0.01 XAUUSD.s at 3526.79 done (based on order #O048)
+C1,02:07:08.952,Trades,deal,executed,O036,,D045,deal #D045 buy 0.01 XAUUSD.s at 3526.79 done (based on order #O036)
+C1,02:07:09.522,Trades,place_stop,request,,,,sell stop 0.01 XAUUSD.s at 3525.99 sl: 3526.79
+C1,02:07:09.559,Trades,place_stop,accepted,,,,accepted sell stop 0.01 XAUUSD.s at 3525.99 sl: 3526.79
+C1,02:07:09.565,Trades,place_stop,done,O046,,,order #O046 sell stop 0.01 / 0.01 XAUUSD.s at 3525.99 done in 52.331 ms
+C1,02:07:16.023,Trades,deal,executed,O045,,D014,deal #D014 sell 0.01 XAUUSD.s at 3525.88 done (based on order #O045)
+C1,02:07:16.032,Trades,deal,executed,O046,,D028,deal #D028 sell 0.01 XAUUSD.s at 3525.88 done (based on order #O046)
+C1,02:07:16.580,Trades,place_stop,request,,,,buy stop 0.01 XAUUSD.s at 3526.68 sl: 3525.88
+C1,02:07:16.620,Trades,place_stop,accepted,,,,accepted buy stop 0.01 XAUUSD.s at 3526.68 sl: 3525.88
+C1,02:07:16.621,Trades,place_stop,done,O024,,,order #O024 buy stop 0.01 / 0.01 XAUUSD.s at 3526.68 done in 49.983 ms
+C1,02:07:17.766,Trades,deal,executed,O024,,D030,deal #D030 buy 0.01 XAUUSD.s at 3526.71 done (based on order #O024)
+C1,02:07:18.443,Trades,deal,executed,O006,,D020,deal #D020 buy 0.01 XAUUSD.s at 3526.85 done (based on order #O006)
+C1,02:07:18.506,Trades,place_stop,request,,,,sell stop 0.01 XAUUSD.s at 3525.91 sl: 3526.71
+C1,02:07:18.542,Trades,place_stop,accepted,,,,accepted sell stop 0.01 XAUUSD.s at 3525.91 sl: 3526.71
+C1,02:07:18.546,Trades,place_stop,done,O053,,,order #O053 sell stop 0.01 / 0.01 XAUUSD.s at 3525.91 done in 47.725 ms
+C1,02:07:19.606,Trades,modify_position_sl_tp,request,,O024,,"modify #O024 buy 0.01 XAUUSD.s sl: 3525.88, tp: 0.00 -> sl: 3526.71, tp: 0.00"
+C1,02:07:19.639,Trades,modify_position_sl_tp,accepted,,O024,,"accepted modify #O024 buy 0.01 XAUUSD.s sl: 3525.88, tp: 0.00 -> sl: 3526.71, tp: 0.00"
+C1,02:07:19.642,Trades,modify_position_sl_tp,done,,O024,,"modify #O024 buy 0.01 XAUUSD.s -> sl: 3526.71, tp: 0.00 done in 43.562 ms"
+C1,02:07:58.314,Trades,deal,executed,O060,,D053,deal #D053 sell 0.01 XAUUSD.s at 3526.72 done (based on order #O060)
+C1,02:07:58.593,Trades,place_stop,request,,,,buy stop 0.01 XAUUSD.s at 3527.51 sl: 3526.71
+C1,02:07:58.628,Trades,place_stop,accepted,,,,accepted buy stop 0.01 XAUUSD.s at 3527.51 sl: 3526.71
+C1,02:07:58.630,Trades,place_stop,done,O038,,,order #O038 buy stop 0.01 / 0.01 XAUUSD.s at 3527.51 done in 44.767 ms
+C1,02:09:01.942,Trades,deal,executed,O053,,D046,deal #D046 sell 0.01 XAUUSD.s at 3525.11 done (based on order #O053)
+C1,02:09:02.526,Trades,modify_stop,request,O038,,,"modify order #O038 buy stop 0.01 XAUUSD.s at 3527.51 sl: 3526.71 tp: 0.00 -> 3525.91, sl: 3525.11 tp: 0.00"
+C1,02:09:02.560,Trades,modify_stop,accepted,O038,,,"accepted modify order #O038 buy stop 0.01 XAUUSD.s at 3527.51 sl: 3526.71 tp: 0.00 -> 3525.91, sl: 3525.11 tp: 0.00"
+C1,02:09:02.563,Trades,modify_stop,done,O038,,,"modify #O038 buy stop 0.01 XAUUSD.s -> price: 3525.91, sl: 3525.11, tp: 0.00 done in 45.135 ms"
+C1,02:09:24.494,Trades,deal,executed,O038,,D006,deal #D006 buy 0.01 XAUUSD.s at 3525.99 done (based on order #O038)
+C1,02:09:25.080,Trades,place_stop,request,,,,sell stop 0.02 XAUUSD.s at 3525.19 sl: 3525.99
+C1,02:09:25.115,Trades,place_stop,accepted,,,,accepted sell stop 0.02 XAUUSD.s at 3525.19 sl: 3525.99
+C1,02:09:25.117,Trades,place_stop,done,O010,,,order #O010 sell stop 0.02 / 0.02 XAUUSD.s at 3525.19 done in 44.606 ms
+C1,02:09:26.566,Trades,modify_position_sl_tp,request,,O038,,"modify #O038 buy 0.01 XAUUSD.s sl: 3525.11, tp: 0.00 -> sl: 3525.99, tp: 0.00"
+C1,02:09:26.599,Trades,modify_position_sl_tp,accepted,,O038,,"accepted modify #O038 buy 0.01 XAUUSD.s sl: 3525.11, tp: 0.00 -> sl: 3525.99, tp: 0.00"
+C1,02:09:26.602,Trades,modify_position_sl_tp,done,,O038,,"modify #O038 buy 0.01 XAUUSD.s -> sl: 3525.99, tp: 0.00 done in 43.278 ms"
+C1,02:09:34.455,Trades,deal,executed,O020,,D065,deal #D065 buy 0.01 XAUUSD.s at 3526.69 done (based on order #O020)
+C1,02:09:52.601,Trades,deal,executed,O031,,D062,deal #D062 sell 0.01 XAUUSD.s at 3525.97 done (based on order #O031)
+C1,02:09:52.920,Trades,place_stop,request,,,,buy stop 0.01 XAUUSD.s at 3526.79 sl: 3525.99
+C1,02:09:52.956,Trades,place_stop,accepted,,,,accepted buy stop 0.01 XAUUSD.s at 3526.79 sl: 3525.99
+C1,02:09:52.961,Trades,place_stop,done,O054,,,order #O054 buy stop 0.01 / 0.01 XAUUSD.s at 3526.79 done in 49.506 ms
+C1,02:10:03.204,Trades,deal,executed,O010,,D021,deal #D021 sell 0.02 XAUUSD.s at 3525.03 done (based on order #O010)
+C1,02:10:03.703,Trades,modify_stop,request,O054,,,"modify order #O054 buy stop 0.01 XAUUSD.s at 3526.79 sl: 3525.99 tp: 0.00 -> 3525.83, sl: 3525.03 tp: 0.00"
+C1,02:10:03.740,Trades,modify_stop,accepted,O054,,,"accepted modify order #O054 buy stop 0.01 XAUUSD.s at 3526.79 sl: 3525.99 tp: 0.00 -> 3525.83, sl: 3525.03 tp: 0.00"
+C1,02:10:03.741,Trades,modify_stop,done,O054,,,"modify #O054 buy stop 0.01 XAUUSD.s -> price: 3525.83, sl: 3525.03, tp: 0.00 done in 45.230 ms"
+C1,02:10:06.625,Trades,modify_position_sl_tp,request,,O010,,"modify #O010 sell 0.02 XAUUSD.s sl: 3525.99, tp: 0.00 -> sl: 3525.03, tp: 0.00"
+C1,02:10:06.659,Trades,modify_position_sl_tp,accepted,,O010,,"accepted modify #O010 sell 0.02 XAUUSD.s sl: 3525.99, tp: 0.00 -> sl: 3525.03, tp: 0.00"
+C1,02:10:06.667,Trades,modify_position_sl_tp,done,,O010,,"modify #O010 sell 0.02 XAUUSD.s -> sl: 3525.03, tp: 0.00 done in 50.262 ms"
+C1,02:10:15.687,Trades,deal,executed,O073,,D033,deal #D033 buy 0.02 XAUUSD.s at 3524.05 done (based on order #O073)
+C1,02:10:16.010,Trades,cancel_stop,request,O054,,,cancel order #O054 buy stop 0.01 XAUUSD.s at 3525.83 sl: 3525.03
+C1,02:10:16.045,Trades,cancel_stop,accepted,O054,,,accepted cancel order #O054 buy stop 0.01 XAUUSD.s at 3525.83 sl: 3525.03
+C1,02:10:16.047,Trades,cancel_stop,done,O054,,,cancel #O054 buy stop 0.01 XAUUSD.s at market done in 44.762 ms
+C2,02:11:28.586,Trades,deal,executed,O027,,D057,deal #D057 buy 0.01 XAUUSD.s at 3520.89 done (based on order #O027)
+C2,02:11:28.824,Trades,modify_position_sl_tp,request,,O027,,"modify #O027 buy 0.01 XAUUSD.s sl: 0.00, tp: 0.00 -> sl: 3520.09, tp: 0.00"
+C2,02:11:28.860,Trades,modify_position_sl_tp,accepted,,O027,,"accepted modify #O027 buy 0.01 XAUUSD.s sl: 0.00, tp: 0.00 -> sl: 3520.09, tp: 0.00"
+C2,02:11:28.863,Trades,modify_position_sl_tp,done,,O027,,"modify #O027 buy 0.01 XAUUSD.s -> sl: 3520.09, tp: 0.00 done in 46.709 ms"
+C2,02:11:28.898,Trades,place_stop,request,,,,sell stop 0.01 XAUUSD.s at 3520.09 sl: 3520.89
+C2,02:11:28.938,Trades,place_stop,accepted,,,,accepted sell stop 0.01 XAUUSD.s at 3520.09 sl: 3520.89
+C2,02:11:28.940,Trades,place_stop,done,O047,,,order #O047 sell stop 0.01 / 0.01 XAUUSD.s at 3520.09 done in 50.197 ms
+C2,02:12:00.579,Trades,modify_position_sl_tp,request,,O027,,"modify #O027 buy 0.01 XAUUSD.s sl: 3520.09, tp: 0.00 -> sl: 3520.89, tp: 0.00"
+C2,02:12:00.613,Trades,modify_position_sl_tp,accepted,,O027,,"accepted modify #O027 buy 0.01 XAUUSD.s sl: 3520.09, tp: 0.00 -> sl: 3520.89, tp: 0.00"
+C2,02:12:00.615,Trades,modify_position_sl_tp,done,,O027,,"modify #O027 buy 0.01 XAUUSD.s -> sl: 3520.89, tp: 0.00 done in 43.403 ms"
+C2,02:12:10.459,Trades,deal,executed,O003,,D010,deal #D010 sell 0.01 XAUUSD.s at 3521.74 done (based on order #O003)
+C2,02:12:10.679,Trades,cancel_stop,request,O047,,,cancel order #O047 sell stop 0.01 XAUUSD.s at 3520.09 sl: 3520.89
+C2,02:12:10.714,Trades,cancel_stop,accepted,O047,,,accepted cancel order #O047 sell stop 0.01 XAUUSD.s at 3520.09 sl: 3520.89
+C2,02:12:10.717,Trades,cancel_stop,done,O047,,,cancel #O047 sell stop 0.01 XAUUSD.s at market done in 45.622 ms
+C3,02:12:34.789,Trades,deal,executed,O059,,D059,deal #D059 sell 0.01 XAUUSD.s at 3521.62 done (based on order #O059)
+C3,02:12:35.106,Trades,modify_position_sl_tp,request,,O059,,"modify #O059 sell 0.01 XAUUSD.s sl: 0.00, tp: 0.00 -> sl: 3522.42, tp: 0.00"
+C3,02:12:35.139,Trades,modify_position_sl_tp,accepted,,O059,,"accepted modify #O059 sell 0.01 XAUUSD.s sl: 0.00, tp: 0.00 -> sl: 3522.42, tp: 0.00"
+C3,02:12:35.143,Trades,modify_position_sl_tp,done,,O059,,"modify #O059 sell 0.01 XAUUSD.s -> sl: 3522.42, tp: 0.00 done in 44.147 ms"
+C3,02:12:35.171,Trades,place_stop,request,,,,buy stop 0.01 XAUUSD.s at 3522.42 sl: 3521.62
+C3,02:12:35.206,Trades,place_stop,accepted,,,,accepted buy stop 0.01 XAUUSD.s at 3522.42 sl: 3521.62
+C3,02:12:35.209,Trades,place_stop,done,O002,,,order #O002 buy stop 0.01 / 0.01 XAUUSD.s at 3522.42 done in 46.258 ms
+C3,02:12:39.514,Trades,deal,executed,O009,,D013,deal #D013 buy 0.01 XAUUSD.s at 3522.42 done (based on order #O009)
+C3,02:12:39.543,Trades,deal,executed,O002,,D012,deal #D012 buy 0.01 XAUUSD.s at 3522.43 done (based on order #O002)
+C3,02:12:40.027,Trades,place_stop,request,,,,sell stop 0.01 XAUUSD.s at 3521.63 sl: 3522.43
+C3,02:12:40.062,Trades,place_stop,accepted,,,,accepted sell stop 0.01 XAUUSD.s at 3521.63 sl: 3522.43
+C3,02:12:40.065,Trades,place_stop,done,O018,,,order #O018 sell stop 0.01 / 0.01 XAUUSD.s at 3521.63 done in 45.814 ms
+C3,02:12:46.596,Trades,modify_position_sl_tp,request,,O002,,"modify #O002 buy 0.01 XAUUSD.s sl: 3521.62, tp: 0.00 -> sl: 3522.43, tp: 0.00"
+C3,02:12:46.630,Trades,modify_position_sl_tp,accepted,,O002,,"accepted modify #O002 buy 0.01 XAUUSD.s sl: 3521.62, tp: 0.00 -> sl: 3522.43, tp: 0.00"
+C3,02:12:46.633,Trades,modify_position_sl_tp,done,,O002,,"modify #O002 buy 0.01 XAUUSD.s -> sl: 3522.43, tp: 0.00 done in 44.159 ms"
+C3,02:12:49.052,Trades,deal,executed,O058,,D001,deal #D001 sell 0.01 XAUUSD.s at 3521.81 done (based on order #O058)
+C3,02:12:49.413,Trades,place_stop,request,,,,buy stop 0.01 XAUUSD.s at 3523.23 sl: 3522.43
+C3,02:12:49.449,Trades,place_stop,accepted,,,,accepted buy stop 0.01 XAUUSD.s at 3523.23 sl: 3522.43
+C3,02:12:49.453,Trades,place_stop,done,O034,,,order #O034 buy stop 0.01 / 0.01 XAUUSD.s at 3523.23 done in 48.091 ms
+C3,02:13:00.450,Trades,deal,executed,O034,,D061,deal #D061 buy 0.01 XAUUSD.s at 3523.25 done (based on order #O034)
+C3,02:13:00.932,Trades,modify_stop,request,O018,,,"modify order #O018 sell stop 0.01 XAUUSD.s at 3521.63 sl: 3522.43 tp: 0.00 -> 3522.45, sl: 3523.25 tp: 0.00"
+C3,02:13:00.966,Trades,modify_stop,accepted,O018,,,"accepted modify order #O018 sell stop 0.01 XAUUSD.s at 3521.63 sl: 3522.43 tp: 0.00 -> 3522.45, sl: 3523.25 tp: 0.00"
+C3,02:13:00.973,Trades,modify_stop,done,O018,,,"modify #O018 sell stop 0.01 XAUUSD.s -> price: 3522.45, sl: 3523.25, tp: 0.00 done in 50.257 ms"
+C3,02:13:01.620,Trades,deal,executed,O061,,D027,deal #D027 sell 0.01 XAUUSD.s at 3522.07 done (based on order #O061)
+C3,02:13:01.624,Trades,deal,executed,O018,,D068,deal #D068 sell 0.01 XAUUSD.s at 3522.07 done (based on order #O018)
+C3,02:13:02.236,Trades,place_stop,request,,,,buy stop 0.01 XAUUSD.s at 3522.87 sl: 3522.07
+C3,02:13:02.272,Trades,place_stop,accepted,,,,accepted buy stop 0.01 XAUUSD.s at 3522.87 sl: 3522.07
+C3,02:13:02.275,Trades,place_stop,done,O072,,,order #O072 buy stop 0.01 / 0.01 XAUUSD.s at 3522.87 done in 46.197 ms
+C3,02:13:07.577,Trades,modify_position_sl_tp,request,,O018,,"modify #O018 sell 0.01 XAUUSD.s sl: 3523.25, tp: 0.00 -> sl: 3522.07, tp: 0.00"
+C3,02:13:07.611,Trades,modify_position_sl_tp,accepted,,O018,,"accepted modify #O018 sell 0.01 XAUUSD.s sl: 3523.25, tp: 0.00 -> sl: 3522.07, tp: 0.00"
+C3,02:13:07.618,Trades,modify_position_sl_tp,done,,O018,,"modify #O018 sell 0.01 XAUUSD.s -> sl: 3522.07, tp: 0.00 done in 49.126 ms"
+C3,02:13:11.166,Trades,deal,executed,O015,,D008,deal #D008 buy 0.01 XAUUSD.s at 3522.40 done (based on order #O015)
+C3,02:13:11.538,Trades,place_stop,request,,,,sell stop 0.01 XAUUSD.s at 3521.27 sl: 3522.07
+C3,02:13:11.575,Trades,place_stop,accepted,,,,accepted sell stop 0.01 XAUUSD.s at 3521.27 sl: 3522.07
+C3,02:13:11.586,Trades,place_stop,done,O057,,,order #O057 sell stop 0.01 / 0.01 XAUUSD.s at 3521.27 done in 57.345 ms
+C3,02:13:32.013,Trades,deal,executed,O057,,D038,deal #D038 sell 0.01 XAUUSD.s at 3521.15 done (based on order #O057)
+C3,02:13:32.573,Trades,modify_stop,request,O072,,,"modify order #O072 buy stop 0.01 XAUUSD.s at 3522.87 sl: 3522.07 tp: 0.00 -> 3521.95, sl: 3521.15 tp: 0.00"
+C3,02:13:32.606,Trades,modify_stop,accepted,O072,,,"accepted modify order #O072 buy stop 0.01 XAUUSD.s at 3522.87 sl: 3522.07 tp: 0.00 -> 3521.95, sl: 3521.15 tp: 0.00"
+C3,02:13:32.609,Trades,modify_stop,done,O072,,,"modify #O072 buy stop 0.01 XAUUSD.s -> price: 3521.95, sl: 3521.15, tp: 0.00 done in 44.037 ms"
+C3,02:13:35.596,Trades,modify_position_sl_tp,request,,O057,,"modify #O057 sell 0.01 XAUUSD.s sl: 3522.07, tp: 0.00 -> sl: 3521.15, tp: 0.00"
+C3,02:13:35.630,Trades,modify_position_sl_tp,accepted,,O057,,"accepted modify #O057 sell 0.01 XAUUSD.s sl: 3522.07, tp: 0.00 -> sl: 3521.15, tp: 0.00"
+C3,02:13:35.633,Trades,modify_position_sl_tp,done,,O057,,"modify #O057 sell 0.01 XAUUSD.s -> sl: 3521.15, tp: 0.00 done in 44.185 ms"
+C3,02:13:37.963,Trades,deal,executed,O028,,D060,deal #D060 buy 0.01 XAUUSD.s at 3521.21 done (based on order #O028)
+C3,02:13:38.192,Trades,place_stop,request,,,,sell stop 0.01 XAUUSD.s at 3520.35 sl: 3521.15
+C3,02:13:38.229,Trades,place_stop,accepted,,,,accepted sell stop 0.01 XAUUSD.s at 3520.35 sl: 3521.15
+C3,02:13:38.233,Trades,place_stop,done,O014,,,order #O014 sell stop 0.01 / 0.01 XAUUSD.s at 3520.35 done in 48.701 ms
+C3,02:13:51.157,Trades,deal,executed,O014,,D034,deal #D034 sell 0.01 XAUUSD.s at 3520.41 done (based on order #O014)
+C3,02:13:51.706,Trades,modify_stop,request,O072,,,"modify order #O072 buy stop 0.01 XAUUSD.s at 3521.95 sl: 3521.15 tp: 0.00 -> 3521.21, sl: 3520.41 tp: 0.00"
+C3,02:13:51.740,Trades,modify_stop,accepted,O072,,,"accepted modify order #O072 buy stop 0.01 XAUUSD.s at 3521.95 sl: 3521.15 tp: 0.00 -> 3521.21, sl: 3520.41 tp: 0.00"
+C3,02:13:51.743,Trades,modify_stop,done,O072,,,"modify #O072 buy stop 0.01 XAUUSD.s -> price: 3521.21, sl: 3520.41, tp: 0.00 done in 44.157 ms"
+C3,02:13:52.662,Trades,deal,executed,O072,,D002,deal #D002 buy 0.01 XAUUSD.s at 3521.25 done (based on order #O072)
+C3,02:13:52.689,Trades,deal,executed,O023,,D015,deal #D015 buy 0.01 XAUUSD.s at 3521.25 done (based on order #O023)
+C3,02:13:53.296,Trades,place_stop,request,,,,sell stop 0.01 XAUUSD.s at 3520.45 sl: 3521.25
+C3,02:13:53.339,Trades,place_stop,accepted,,,,accepted sell stop 0.01 XAUUSD.s at 3520.45 sl: 3521.25
+C3,02:13:53.343,Trades,place_stop,done,O032,,,order #O032 sell stop 0.01 / 0.01 XAUUSD.s at 3520.45 done in 56.710 ms
+C3,02:13:58.952,Trades,deal,executed,O032,,D018,deal #D018 sell 0.01 XAUUSD.s at 3520.41 done (based on order #O032)
+C3,02:13:59.023,Trades,deal,executed,O025,,D005,deal #D005 sell 0.01 XAUUSD.s at 3520.40 done (based on order #O025)
+C3,02:13:59.590,Trades,place_stop,request,,,,buy stop 0.02 XAUUSD.s at 3521.21 sl: 3520.41
+C3,02:13:59.625,Trades,place_stop,accepted,,,,accepted buy stop 0.02 XAUUSD.s at 3521.21 sl: 3520.41
+C3,02:13:59.627,Trades,place_stop,done,O055,,,order #O055 buy stop 0.02 / 0.02 XAUUSD.s at 3521.21 done in 44.342 ms
+C3,02:14:21.585,Trades,modify_position_sl_tp,request,,O032,,"modify #O032 sell 0.01 XAUUSD.s sl: 3521.25, tp: 0.00 -> sl: 3520.41, tp: 0.00"
+C3,02:14:21.619,Trades,modify_position_sl_tp,accepted,,O032,,"accepted modify #O032 sell 0.01 XAUUSD.s sl: 3521.25, tp: 0.00 -> sl: 3520.41, tp: 0.00"
+C3,02:14:21.622,Trades,modify_position_sl_tp,done,,O032,,"modify #O032 sell 0.01 XAUUSD.s -> sl: 3520.41, tp: 0.00 done in 43.861 ms"
+C3,02:14:36.678,Trades,deal,executed,O026,,D019,deal #D019 buy 0.01 XAUUSD.s at 3520.46 done (based on order #O026)
+C3,02:14:36.983,Trades,place_stop,request,,,,sell stop 0.01 XAUUSD.s at 3519.61 sl: 3520.41
+C3,02:14:37.023,Trades,place_stop,accepted,,,,accepted sell stop 0.01 XAUUSD.s at 3519.61 sl: 3520.41
+C3,02:14:37.029,Trades,place_stop,done,O071,,,order #O071 sell stop 0.01 / 0.01 XAUUSD.s at 3519.61 done in 54.636 ms
+C3,02:14:56.588,Trades,deal,executed,O055,,D024,deal #D024 buy 0.02 XAUUSD.s at 3522.26 done (based on order #O055)
+C3,02:14:57.044,Trades,modify_stop,request,O071,,,"modify order #O071 sell stop 0.01 XAUUSD.s at 3519.61 sl: 3520.41 tp: 0.00 -> 3521.46, sl: 3522.26 tp: 0.00"
+C3,02:14:57.077,Trades,modify_stop,accepted,O071,,,"accepted modify order #O071 sell stop 0.01 XAUUSD.s at 3519.61 sl: 3520.41 tp: 0.00 -> 3521.46, sl: 3522.26 tp: 0.00"
+C3,02:14:57.081,Trades,modify_stop,done,O071,,,"modify #O071 sell stop 0.01 XAUUSD.s -> price: 3521.46, sl: 3522.26, tp: 0.00 done in 44.345 ms"
+C3,02:15:00.401,Trades,deal,executed,O071,,D016,deal #D016 sell 0.01 XAUUSD.s at 3521.38 done (based on order #O071)
+C3,02:15:00.940,Trades,place_stop,request,,,,buy stop 0.02 XAUUSD.s at 3522.18 sl: 3521.38
+C3,02:15:00.978,Trades,place_stop,accepted,,,,accepted buy stop 0.02 XAUUSD.s at 3522.18 sl: 3521.38
+C3,02:15:00.983,Trades,place_stop,done,O033,,,order #O033 buy stop 0.02 / 0.02 XAUUSD.s at 3522.18 done in 51.047 ms
+C3,02:15:08.808,Trades,deal,executed,O033,,D004,deal #D004 buy 0.02 XAUUSD.s at 3522.25 done (based on order #O033)
+C3,02:15:09.085,Trades,deal,executed,O005,,D029,deal #D029 buy 0.01 XAUUSD.s at 3522.24 done (based on order #O005)
+C3,02:15:09.340,Trades,place_stop,request,,,,sell stop 0.02 XAUUSD.s at 3521.45 sl: 3522.25
+C3,02:15:09.376,Trades,place_stop,accepted,,,,accepted sell stop 0.02 XAUUSD.s at 3521.45 sl: 3522.25
+C3,02:15:09.379,Trades,place_stop,done,O064,,,order #O064 sell stop 0.02 / 0.02 XAUUSD.s at 3521.45 done in 47.004 ms
+C3,02:15:16.595,Trades,modify_position_sl_tp,request,,O055,,"modify #O055 buy 0.02 XAUUSD.s sl: 3520.41, tp: 0.00 -> sl: 3522.26, tp: 0.00"
+C3,02:15:16.629,Trades,modify_position_sl_tp,accepted,,O055,,"accepted modify #O055 buy 0.02 XAUUSD.s sl: 3520.41, tp: 0.00 -> sl: 3522.26, tp: 0.00"
+C3,02:15:16.630,Trades,modify_position_sl_tp,done,,O055,,"modify #O055 buy 0.02 XAUUSD.s -> sl: 3522.26, tp: 0.00 done in 42.428 ms"
+C3,02:15:17.602,Trades,modify_position_sl_tp,request,,O033,,"modify #O033 buy 0.02 XAUUSD.s sl: 3521.38, tp: 0.00 -> sl: 3522.25, tp: 0.00"
+C3,02:15:17.637,Trades,modify_position_sl_tp,accepted,,O033,,"accepted modify #O033 buy 0.02 XAUUSD.s sl: 3521.38, tp: 0.00 -> sl: 3522.25, tp: 0.00"
+C3,02:15:17.640,Trades,modify_position_sl_tp,done,,O033,,"modify #O033 buy 0.02 XAUUSD.s -> sl: 3522.25, tp: 0.00 done in 45.704 ms"
+C3,02:15:22.004,Trades,deal,executed,O016,,D056,deal #D056 sell 0.02 XAUUSD.s at 3522.16 done (based on order #O016)
+C3,02:15:22.029,Trades,deal,executed,O008,,D003,deal #D003 sell 0.02 XAUUSD.s at 3522.16 done (based on order #O008)
+C3,02:15:22.352,Trades,place_stop,request,,,,buy stop 0.02 XAUUSD.s at 3523.05 sl: 3522.25
+C3,02:15:22.388,Trades,place_stop,accepted,,,,accepted buy stop 0.02 XAUUSD.s at 3523.05 sl: 3522.25
+C3,02:15:22.391,Trades,place_stop,done,O012,,,order #O012 buy stop 0.02 / 0.02 XAUUSD.s at 3523.05 done in 46.759 ms
+C3,02:15:23.324,Trades,deal,executed,O012,,D055,deal #D055 buy 0.02 XAUUSD.s at 3523.04 done (based on order #O012)
+C3,02:15:24.128,Trades,deal,executed,O065,,D041,deal #D041 sell 0.02 XAUUSD.s at 3522.29 done (based on order #O065)
+C3,02:15:31.367,Trades,deal,executed,O064,,D009,deal #D009 sell 0.02 XAUUSD.s at 3521.38 done (based on order #O064)
+C3,02:15:32.253,Trades,place_stop,request,,,,buy stop 0.03 XAUUSD.s at 3522.18 sl: 3521.38
+C3,02:15:32.290,Trades,place_stop,accepted,,,,accepted buy stop 0.03 XAUUSD.s at 3522.18 sl: 3521.38
+C3,02:15:32.294,Trades,place_stop,done,O050,,,order #O050 buy stop 0.03 / 0.03 XAUUSD.s at 3522.18 done in 49.324 ms
+C3,02:15:40.140,Trades,deal,executed,O066,,D049,deal #D049 buy 0.02 XAUUSD.s at 3522.45 done (based on order #O066)
+C3,02:15:40.154,Trades,deal,executed,O050,,D064,deal #D064 buy 0.03 XAUUSD.s at 3522.45 done (based on order #O050)
+C3,02:15:40.773,Trades,place_stop,request,,,,sell stop 0.03 XAUUSD.s at 3521.65 sl: 3522.45
+C3,02:15:40.810,Trades,place_stop,accepted,,,,accepted sell stop 0.03 XAUUSD.s at 3521.65 sl: 3522.45
+C3,02:15:40.827,Trades,place_stop,done,O044,,,order #O044 sell stop 0.03 / 0.03 XAUUSD.s at 3521.65 done in 63.910 ms
+C3,02:15:44.167,Trades,deal,executed,O044,,D063,deal #D063 sell 0.03 XAUUSD.s at 3521.67 done (based on order #O044)
+C3,02:15:44.695,Trades,place_stop,request,,,,buy stop 0.04 XAUUSD.s at 3522.47 sl: 3521.67
+C3,02:15:44.731,Trades,place_stop,accepted,,,,accepted buy stop 0.04 XAUUSD.s at 3522.47 sl: 3521.67
+C3,02:15:44.734,Trades,place_stop,done,O074,,,order #O074 buy stop 0.04 / 0.04 XAUUSD.s at 3522.47 done in 46.095 ms
+C3,02:15:47.084,Trades,deal,executed,O074,,D069,deal #D069 buy 0.04 XAUUSD.s at 3522.60 done (based on order #O074)
+C3,02:15:47.116,Trades,deal,executed,O035,,D026,deal #D026 buy 0.03 XAUUSD.s at 3522.62 done (based on order #O035)
+C3,02:15:48.971,Trades,deal,executed,O070,,D007,deal #D007 sell 0.04 XAUUSD.s at 3521.49 done (based on order #O070)
+C3,02:15:49.230,Trades,deal,executed,O004,,D035,deal #D035 sell 0.03 XAUUSD.s at 3521.09 done (based on order #O004)
+C3,02:16:09.500,Trades,place_stop,request,,,,sell stop 0.04 XAUUSD.s at 3521.80 sl: 3522.60
+C3,02:16:09.536,Trades,place_stop,accepted,,,,accepted sell stop 0.04 XAUUSD.s at 3521.80 sl: 3522.60
+C3,02:16:09.539,Trades,place_stop,done,O011,,,order #O011 sell stop 0.04 / 0.04 XAUUSD.s at 3521.80 done in 46.647 ms
+C4,02:26:32.407,Trades,deal,executed,O017,,D042,deal #D042 sell 0.01 XAUUSD.s at 3517.26 done (based on order #O017)
+C4,02:26:32.920,Trades,modify_position_sl_tp,request,,O017,,"modify #O017 sell 0.01 XAUUSD.s sl: 0.00, tp: 0.00 -> sl: 3518.06, tp: 0.00"
+C4,02:26:32.954,Trades,modify_position_sl_tp,accepted,,O017,,"accepted modify #O017 sell 0.01 XAUUSD.s sl: 0.00, tp: 0.00 -> sl: 3518.06, tp: 0.00"
+C4,02:26:32.956,Trades,modify_position_sl_tp,done,,O017,,"modify #O017 sell 0.01 XAUUSD.s -> sl: 3518.06, tp: 0.00 done in 43.224 ms"
+C4,02:26:33.003,Trades,place_stop,request,,,,buy stop 0.01 XAUUSD.s at 3518.06 sl: 3517.26
+C4,02:26:33.043,Trades,place_stop,accepted,,,,accepted buy stop 0.01 XAUUSD.s at 3518.06 sl: 3517.26
+C4,02:26:33.047,Trades,place_stop,done,O029,,,order #O029 buy stop 0.01 / 0.01 XAUUSD.s at 3518.06 done in 52.209 ms
+C4,02:26:35.052,Trades,deal,executed,O029,,D039,deal #D039 buy 0.01 XAUUSD.s at 3518.04 done (based on order #O029)
+C4,02:26:35.074,Trades,deal,executed,O042,,D036,deal #D036 buy 0.01 XAUUSD.s at 3518.04 done (based on order #O042)
+C4,02:26:35.599,Trades,place_stop,request,,,,sell stop 0.01 XAUUSD.s at 3517.24 sl: 3518.04
+C4,02:26:35.636,Trades,place_stop,accepted,,,,accepted sell stop 0.01 XAUUSD.s at 3517.24 sl: 3518.04
+C4,02:26:35.639,Trades,place_stop,done,O040,,,order #O040 sell stop 0.01 / 0.01 XAUUSD.s at 3517.24 done in 47.255 ms
+C4,02:26:37.621,Trades,modify_position_sl_tp,request,,O029,,"modify #O029 buy 0.01 XAUUSD.s sl: 3517.26, tp: 0.00 -> sl: 3518.04, tp: 0.00"
+C4,02:26:37.656,Trades,modify_position_sl_tp,accepted,,O029,,"accepted modify #O029 buy 0.01 XAUUSD.s sl: 3517.26, tp: 0.00 -> sl: 3518.04, tp: 0.00"
+C4,02:26:37.662,Trades,modify_position_sl_tp,done,,O029,,"modify #O029 buy 0.01 XAUUSD.s -> sl: 3518.04, tp: 0.00 done in 48.726 ms"
+C4,02:26:48.559,Trades,deal,executed,O030,,D040,deal #D040 sell 0.01 XAUUSD.s at 3517.92 done (based on order #O030)
+C4,02:26:48.895,Trades,place_stop,request,,,,buy stop 0.01 XAUUSD.s at 3518.84 sl: 3518.04
+C4,02:26:48.930,Trades,place_stop,accepted,,,,accepted buy stop 0.01 XAUUSD.s at 3518.84 sl: 3518.04
+C4,02:26:48.932,Trades,place_stop,done,O052,,,order #O052 buy stop 0.01 / 0.01 XAUUSD.s at 3518.84 done in 43.938 ms
+C4,02:27:02.838,Trades,deal,executed,O052,,D023,deal #D023 buy 0.01 XAUUSD.s at 3519.10 done (based on order #O052)
+C4,02:27:03.378,Trades,modify_stop,request,O040,,,"modify order #O040 sell stop 0.01 XAUUSD.s at 3517.24 sl: 3518.04 tp: 0.00 -> 3518.30, sl: 3519.10 tp: 0.00"
+C4,02:27:03.412,Trades,modify_stop,accepted,O040,,,"accepted modify order #O040 sell stop 0.01 XAUUSD.s at 3517.24 sl: 3518.04 tp: 0.00 -> 3518.30, sl: 3519.10 tp: 0.00"
+C4,02:27:03.429,Trades,modify_stop,done,O040,,,"modify #O040 sell stop 0.01 XAUUSD.s -> price: 3518.30, sl: 3519.10, tp: 0.00 done in 60.516 ms"
+C4,02:27:25.626,Trades,deal,executed,O040,,D054,deal #D054 sell 0.01 XAUUSD.s at 3518.27 done (based on order #O040)
+C4,02:27:26.112,Trades,place_stop,request,,,,buy stop 0.01 XAUUSD.s at 3519.07 sl: 3518.27
+C4,02:27:26.184,Trades,place_stop,accepted,,,,accepted buy stop 0.01 XAUUSD.s at 3519.07 sl: 3518.27
+C4,02:27:26.187,Trades,place_stop,done,O068,,,order #O068 buy stop 0.01 / 0.01 XAUUSD.s at 3519.07 done in 90.222 ms
+C4,02:27:32.629,Trades,deal,executed,O001,,D043,deal #D043 sell 0.01 XAUUSD.s at 3517.91 done (based on order #O001)
+C4,02:27:43.602,Trades,modify_position_sl_tp,request,,O040,,"modify #O040 sell 0.01 XAUUSD.s sl: 3519.10, tp: 0.00 -> sl: 3518.27, tp: 0.00"
+C4,02:27:43.637,Trades,modify_position_sl_tp,accepted,,O040,,"accepted modify #O040 sell 0.01 XAUUSD.s sl: 3519.10, tp: 0.00 -> sl: 3518.27, tp: 0.00"
+C4,02:27:43.645,Trades,modify_position_sl_tp,done,,O040,,"modify #O040 sell 0.01 XAUUSD.s -> sl: 3518.27, tp: 0.00 done in 51.639 ms"
+C4,02:30:09.469,Trades,deal,executed,O013,,D022,deal #D022 buy 0.01 XAUUSD.s at 3515.78 done (based on order #O013)
+C4,02:30:09.796,Trades,cancel_stop,request,O068,,,cancel order #O068 buy stop 0.01 XAUUSD.s at 3519.07 sl: 3518.27
+C4,02:30:09.832,Trades,cancel_stop,accepted,O068,,,accepted cancel order #O068 buy stop 0.01 XAUUSD.s at 3519.07 sl: 3518.27
+C4,02:30:09.838,Trades,cancel_stop,done,O068,,,cancel #O068 buy stop 0.01 XAUUSD.s at market done in 50.369 ms
+C5,02:43:55.344,Trades,deal,executed,O021,,D050,deal #D050 sell 0.01 XAUUSD.s at 3506.96 done (based on order #O021)
+C5,02:43:55.676,Trades,modify_position_sl_tp,request,,O021,,"modify #O021 sell 0.01 XAUUSD.s sl: 0.00, tp: 0.00 -> sl: 3507.76, tp: 0.00"
+C5,02:43:55.713,Trades,modify_position_sl_tp,accepted,,O021,,"accepted modify #O021 sell 0.01 XAUUSD.s sl: 0.00, tp: 0.00 -> sl: 3507.76, tp: 0.00"
+C5,02:43:55.716,Trades,modify_position_sl_tp,done,,O021,,"modify #O021 sell 0.01 XAUUSD.s -> sl: 3507.76, tp: 0.00 done in 47.694 ms"
+C5,02:43:55.769,Trades,place_stop,request,,,,buy stop 0.01 XAUUSD.s at 3507.76 sl: 3506.96
+C5,02:43:55.805,Trades,place_stop,accepted,,,,accepted buy stop 0.01 XAUUSD.s at 3507.76 sl: 3506.96
+C5,02:43:55.809,Trades,place_stop,done,O022,,,order #O022 buy stop 0.01 / 0.01 XAUUSD.s at 3507.76 done in 48.560 ms
+C5,02:44:53.666,Trades,modify_position_sl_tp,request,,O021,,"modify #O021 sell 0.01 XAUUSD.s sl: 3507.76, tp: 0.00 -> sl: 3506.96, tp: 0.00"
+C5,02:44:53.700,Trades,modify_position_sl_tp,accepted,,O021,,"accepted modify #O021 sell 0.01 XAUUSD.s sl: 3507.76, tp: 0.00 -> sl: 3506.96, tp: 0.00"
+C5,02:44:53.707,Trades,modify_position_sl_tp,done,,O021,,"modify #O021 sell 0.01 XAUUSD.s -> sl: 3506.96, tp: 0.00 done in 48.061 ms"
+C5,02:45:47.285,Trades,deal,executed,O007,,D011,deal #D011 buy 0.01 XAUUSD.s at 3507.11 done (based on order #O007)
+C5,02:45:47.567,Trades,place_stop,request,,,,sell stop 0.01 XAUUSD.s at 3506.16 sl: 3506.96
+C5,02:45:47.603,Trades,place_stop,accepted,,,,accepted sell stop 0.01 XAUUSD.s at 3506.16 sl: 3506.96
+C5,02:45:47.604,Trades,place_stop,done,O051,,,order #O051 sell stop 0.01 / 0.01 XAUUSD.s at 3506.16 done in 43.660 ms
+C5,02:46:00.395,Trades,deal,executed,O051,,D037,deal #D037 sell 0.01 XAUUSD.s at 3506.14 done (based on order #O051)
+C5,02:46:00.924,Trades,modify_stop,request,O022,,,"modify order #O022 buy stop 0.01 XAUUSD.s at 3507.76 sl: 3506.96 tp: 0.00 -> 3506.94, sl: 3506.14 tp: 0.00"
+C5,02:46:00.958,Trades,modify_stop,accepted,O022,,,"accepted modify order #O022 buy stop 0.01 XAUUSD.s at 3507.76 sl: 3506.96 tp: 0.00 -> 3506.94, sl: 3506.14 tp: 0.00"
+C5,02:46:00.960,Trades,modify_stop,done,O022,,,"modify #O022 buy stop 0.01 XAUUSD.s -> price: 3506.94, sl: 3506.14, tp: 0.00 done in 42.539 ms"
+C5,02:46:07.612,Trades,modify_position_sl_tp,request,,O051,,"modify #O051 sell 0.01 XAUUSD.s sl: 3506.96, tp: 0.00 -> sl: 3506.14, tp: 0.00"
+C5,02:46:07.646,Trades,modify_position_sl_tp,accepted,,O051,,"accepted modify #O051 sell 0.01 XAUUSD.s sl: 3506.96, tp: 0.00 -> sl: 3506.14, tp: 0.00"
+C5,02:46:07.647,Trades,modify_position_sl_tp,done,,O051,,"modify #O051 sell 0.01 XAUUSD.s -> sl: 3506.14, tp: 0.00 done in 42.088 ms"
+C5,02:46:10.636,Trades,deal,executed,O043,,D070,deal #D070 buy 0.01 XAUUSD.s at 3506.18 done (based on order #O043)
+C5,02:46:10.925,Trades,place_stop,request,,,,sell stop 0.01 XAUUSD.s at 3505.34 sl: 3506.14
+C5,02:46:10.960,Trades,place_stop,accepted,,,,accepted sell stop 0.01 XAUUSD.s at 3505.34 sl: 3506.14
+C5,02:46:10.963,Trades,place_stop,done,O019,,,order #O019 sell stop 0.01 / 0.01 XAUUSD.s at 3505.34 done in 46.086 ms
+C5,02:46:21.601,Trades,deal,executed,O019,,D025,deal #D025 sell 0.01 XAUUSD.s at 3505.29 done (based on order #O019)
+C5,02:46:22.222,Trades,modify_stop,request,O022,,,"modify order #O022 buy stop 0.01 XAUUSD.s at 3506.94 sl: 3506.14 tp: 0.00 -> 3506.09, sl: 3505.29 tp: 0.00"
+C5,02:46:22.256,Trades,modify_stop,accepted,O022,,,"accepted modify order #O022 buy stop 0.01 XAUUSD.s at 3506.94 sl: 3506.14 tp: 0.00 -> 3506.09, sl: 3505.29 tp: 0.00"
+C5,02:46:22.259,Trades,modify_stop,done,O022,,,"modify #O022 buy stop 0.01 XAUUSD.s -> price: 3506.09, sl: 3505.29, tp: 0.00 done in 44.776 ms"
+C5,02:46:38.090,Trades,deal,executed,O049,,D058,deal #D058 buy 0.01 XAUUSD.s at 3506.37 done (based on order #O049)
+C5,02:46:38.100,Trades,deal,executed,O022,,D051,deal #D051 buy 0.01 XAUUSD.s at 3506.37 done (based on order #O022)
+C5,02:46:38.739,Trades,place_stop,request,,,,sell stop 0.01 XAUUSD.s at 3505.57 sl: 3506.37
+C5,02:46:38.776,Trades,place_stop,accepted,,,,accepted sell stop 0.01 XAUUSD.s at 3505.57 sl: 3506.37
+C5,02:46:38.779,Trades,place_stop,done,O041,,,order #O041 sell stop 0.01 / 0.01 XAUUSD.s at 3505.57 done in 47.409 ms
+C5,02:46:42.160,Trades,deal,executed,O041,,D017,deal #D017 sell 0.01 XAUUSD.s at 3505.55 done (based on order #O041)
+C5,02:46:42.750,Trades,place_stop,request,,,,buy stop 0.01 XAUUSD.s at 3506.35 sl: 3505.55
+C5,02:46:42.790,Trades,place_stop,accepted,,,,accepted buy stop 0.01 XAUUSD.s at 3506.35 sl: 3505.55
+C5,02:46:42.798,Trades,place_stop,done,O056,,,order #O056 buy stop 0.01 / 0.01 XAUUSD.s at 3506.35 done in 57.161 ms
+C5,02:46:44.975,Trades,deal,executed,O056,,D066,deal #D066 buy 0.01 XAUUSD.s at 3506.45 done (based on order #O056)
+C5,02:46:45.100,Trades,deal,executed,O063,,D048,deal #D048 buy 0.01 XAUUSD.s at 3506.43 done (based on order #O063)
+C5,02:46:45.817,Trades,place_stop,request,,,,sell stop 0.01 XAUUSD.s at 3505.65 sl: 3506.45
+C5,02:46:45.852,Trades,place_stop,accepted,,,,accepted sell stop 0.01 XAUUSD.s at 3505.65 sl: 3506.45
+C5,02:46:45.854,Trades,place_stop,done,O037,,,order #O037 sell stop 0.01 / 0.01 XAUUSD.s at 3505.65 done in 44.653 ms
+C5,02:46:55.293,Trades,deal,executed,O037,,D052,deal #D052 sell 0.01 XAUUSD.s at 3505.53 done (based on order #O037)
+C5,02:46:55.420,Trades,deal,executed,O069,,D032,deal #D032 sell 0.01 XAUUSD.s at 3505.58 done (based on order #O069)
+C5,02:46:55.959,Trades,place_stop,request,,,,buy stop 0.02 XAUUSD.s at 3506.33 sl: 3505.53
+C5,02:46:55.997,Trades,place_stop,accepted,,,,accepted buy stop 0.02 XAUUSD.s at 3506.33 sl: 3505.53
+C5,02:46:56.002,Trades,place_stop,done,O062,,,order #O062 buy stop 0.02 / 0.02 XAUUSD.s at 3506.33 done in 51.916 ms
+C5,02:47:01.079,Trades,deal,executed,O067,,D031,deal #D031 buy 0.01 XAUUSD.s at 3505.94 done (based on order #O067)
+C5,02:47:01.420,Trades,cancel_stop,request,O062,,,cancel order #O062 buy stop 0.02 XAUUSD.s at 3506.33 sl: 3505.53
+C5,02:47:01.455,Trades,cancel_stop,accepted,O062,,,accepted cancel order #O062 buy stop 0.02 XAUUSD.s at 3506.33 sl: 3505.53
+C5,02:47:01.457,Trades,cancel_stop,done,O062,,,cancel #O062 buy stop 0.02 XAUUSD.s at market done in 43.756 ms
+C5,02:47:02.276,Trades,deal,executed,O039,,D047,deal #D047 sell 0.01 XAUUSD.s at 3505.00 done (based on order #O039)
