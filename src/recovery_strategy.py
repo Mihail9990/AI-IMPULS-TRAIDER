@@ -6,6 +6,7 @@ import json
 import sqlite3
 import threading
 import time
+from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -73,8 +74,9 @@ class RecoveryStrategy:
             self.last_read = 0.0
             self.last_lease = 0.0
             self.lease_signature = None
+            self.cap_instance = None
             self.bank = []
-            self.distance = self.threshold = 0
+            self.distance = self.threshold = self.cap_distance = 0
             self.unresolved = False
             self.move_wait = ""
             self.foreign = False
@@ -97,6 +99,8 @@ class RecoveryStrategy:
         b = self.b
         distance = units(settings["initial_sl_distance"], b.tick)
         threshold = units(settings["support_threshold"], b.tick)
+        self.cap_distance = min(distance, int(Decimal('0.80') // b.tick))
+        checked(self.cap_distance > 0, "settings_off_grid")
         bank = [units(value, b.step) for value in settings["lot_schedule"]]
         checked(
             distance > 0
@@ -508,8 +512,23 @@ class RecoveryStrategy:
         rows = []
         status = b.helpers.sl_status()
         checked(status.get("trade_allowed") is True, "sl_helper_permission")
+        if self.cap_instance != status["instance"] or not self.running:
+            try:
+                cap_status = b.helpers.cap_status()
+                checked(cap_status["instance"] == status["instance"], "sl_cap_helper_unavailable")
+                self.cap_instance = status["instance"]
+            except (Wait, HelperUnavailable):
+                # A replacement helper cannot accept new owners until verified.
+                # Keep servicing a chain already admitted under a verified helper.
+                if (self.running and self.cap_instance
+                        and (self.s["leg"] or self.s["detached"] or self.s["pending"])):
+                    return
+                raise Wait("sl_cap_helper_unavailable")
         current = [self.s["leg"]] if self.s["leg"] else []
         for p in current + self.s["detached"]:
+            if 'risk_cap_ticks' not in p:
+                p['risk_cap_ticks'] = self._risk_cap(p)
+                self.save()
             if status["run_id"] == self.run_id:
                 for r in status["rows"]:
                     if (
@@ -557,9 +576,10 @@ class RecoveryStrategy:
                         side=p["side"],
                         entry_ticks=p["entry_ticks"],
                         advance_ticks=self.threshold,
+                        risk_cap_ticks=p['risk_cap_ticks'],
                     )
                 )
-        signature = tuple((p["position_id"], p["ticket"], p["advance_ticks"]) for p in rows)
+        signature = tuple((p['position_id'], p['ticket'], p['advance_ticks'], p['risk_cap_ticks']) for p in rows)
         now = time.monotonic()
         if self.running and publish and (signature != self.lease_signature or now - self.last_lease >= 1.0):
             b.helpers.register(rows, self.run_id)
@@ -592,7 +612,17 @@ class RecoveryStrategy:
                 else:
                     self.reason = ""
                     if self.running:
-                        self._step()
+                        prior = self.s["leg"]
+                        try:
+                            self._step()
+                        finally:
+                            # Publish a newly identified fill after its RECOVERY dispatch,
+                            # including a dispatch that is already waiting for readback.
+                            if self.s["leg"] is not None and self.s["leg"] is not prior:
+                                try:
+                                    self._lease()
+                                except (Wait, HelperUnavailable):
+                                    pass  # Normal polling retries the helper lease.
                     else:
                         self._reconcile_paused_close()
             except (Wait, HelperUnavailable) as exc:
@@ -603,14 +633,21 @@ class RecoveryStrategy:
                     "trading_permission",
                     "inventory_unavailable",
                     "sl_helper_permission",
+                    "sl_cap_helper_unavailable",
                     "history_helper_scope",
                     "verifier_binding",
                 ):
                     self.available = False
             return self.snapshot()
 
+    def _risk_cap(self, p):
+        target = p['entry_ticks'] - sign(p['side']) * self.cap_distance
+        checked(target > 0, 'settings_off_grid')
+        return target
+
     def _leg(self, p, rung, initial):
-        return dict(p, rung=rung, initial=initial, be_proven=False, orders={}, close=None)
+        return dict(p, rung=rung, initial=initial, risk_cap_ticks=self._risk_cap(p),
+                    be_proven=False, orders={}, close=None)
 
     def _protect(self, leg):
         b = self.b
@@ -620,7 +657,10 @@ class RecoveryStrategy:
         if sl > 0:
             return
         key = f"{self.s['epoch']}:{leg['position_id']}:initial"
-        self._effect(key, b.protect(p, leg["initial"]))
+        # Python only installs an absent stop. The helper alone tightens a live stop.
+        cap = leg.get('risk_cap_ticks') or self._risk_cap(leg)
+        target = max(leg['initial'], cap) if leg['side'] == 'BUY' else min(leg['initial'], cap)
+        self._effect(key, b.protect(p, target))
         # The immutable reverse STOP may be staged following acceptance of the SL request.
         # The next matching broker/verifier inventory still has to prove the position effect.
 

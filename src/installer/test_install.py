@@ -52,6 +52,8 @@ class InstallerTests(unittest.TestCase):
                 self.assertNotIn("machine.json", z.namelist())
                 self.assertIn("trade_wakeup.py", z.namelist())
                 self.assertIn("control_process.py", z.namelist())
+                self.assertIn(b'#include "RecoveryPriceStage.mqh"', z.read("mql/RecoveryPythonSL.mq5"))
+                self.assertEqual(z.read("mql/RecoveryPriceStage.mqh"), (SOURCE/"mql/RecoveryPriceStage.mqh").read_bytes())
                 self.assertTrue(all(not n.endswith((".whl",".ex5",".jsonl",".sqlite3")) for n in z.namelist()))
             kit = root/"kit"
             with ZipFile(package) as z:
@@ -99,6 +101,19 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual((base/"recovery-profile.json").read_bytes(),before)
                 self.assertFalse((local/"status.json").exists())
                 self.assertFalse((local/"python-runtime.log").exists())
+                helper = data/"MQL5/Experts/RECOVERY-Python/RecoveryPythonSL.ex5"
+                expected_helper = helper.read_bytes()
+                previous_helper = b"EX5 synthetic previous build"
+                helper.write_bytes(previous_helper)
+                with self.assertRaisesRegex(ValueError, r"RecoveryPythonSL\.ex5"):
+                    install.prepare_data(kit,local,cfg)
+                self.assertEqual(helper.read_bytes(), previous_helper)
+                backup = root/"previous-role.ex5"
+                helper.rename(backup)
+                install.prepare_data(kit,local,cfg)
+                self.assertEqual(helper.read_bytes(), expected_helper)
+                self.assertEqual(backup.read_bytes(), previous_helper)
+                self.assertEqual(db.read_bytes(), previous_db)
                 mismatch=local/"presets/RecoveryPythonSL.set"
                 changed=mismatch.read_bytes()+("ExpectedOther=x\r\n").encode("utf-16-le")
                 mismatch.write_bytes(changed)

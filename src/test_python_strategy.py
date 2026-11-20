@@ -328,7 +328,10 @@ class Verifier:
         return dict(login=17, server="test", symbol="X", order=row)
 
     def sl_status(self):
-        return dict(run_id=self.run, trade_allowed=self.trade_allowed, rows=list(self.proven.values()))
+        return dict(instance='synthetic-sl', run_id=self.run, trade_allowed=self.trade_allowed, rows=list(self.proven.values()))
+
+    def cap_status(self):
+        return dict(instance='synthetic-sl', run_id=self.run, rows=[])
 
     def register(self, rows, run_id):
         self.registry = rows
@@ -375,6 +378,72 @@ class StrategyTest(unittest.TestCase):
         self.tick(4)
         self.assertEqual(self.e.snapshot()["mode"], "active")
         return p, self.owned()[0]
+
+    def test_cap_initial_market_uses_limit_and_preserves_recovery_distance(self):
+        for dist, cap in (("1.20", 80), ("0.50", 50)):
+            with self.subTest(distance=dist):
+                settings = dict(self.e.s["settings"], initial_sl_distance=dist)
+                self.assertTrue(self.e.update_settings(settings))
+                p, counter = self.adopt()
+                self.assertEqual(p.sl, 100 - cap / 100)
+                self.assertEqual(counter.price_open, 100 - float(dist))
+                self.assertEqual(self.helper.registry[0]["risk_cap_ticks"], 10000 - cap)
+                self.api.closep(p, 0)
+                self.tick(4)
+                self.assertTrue(self.e.control("manual_cancel"))
+                self.assertTrue(self.e.control("pause"))
+
+    def test_cap_lease_for_manual_successor_and_detached(self):
+        self.arm()
+        p = self.api.market(0, 100, 97.0)
+        self.tick(3)
+        self.assertEqual(self.helper.registry[0]["risk_cap_ticks"], 9920)
+        reverse = self.owned()[0]
+        self.assertEqual(reverse.price_open, 97)
+        nxt = self.api.fill(reverse.ticket, 96.5)
+        self.tick(3)
+        self.assertEqual({r["position_id"]: r["risk_cap_ticks"] for r in self.helper.registry},
+                         {p.identifier: 9920, nxt.identifier: 9730})
+        self.assertFalse(self.e.s["leg"]["be_proven"])
+        self.assertFalse(any(q["action"] == self.api.TRADE_ACTION_SLTP for q in self.api.requests))
+
+    def test_cap_market_pending_adopts_actual_fill(self):
+        self.arm("manual_pending_wait")
+        o = self.api.pending(self.api.ORDER_TYPE_BUY_STOP, 102, sl=101.2)
+        self.tick()
+        p = self.api.fill(o.ticket, 102.5)
+        self.tick(3)
+        self.assertEqual(self.e.s["leg"]["initial"], 10120)
+        self.assertEqual(self.e.s["leg"]["risk_cap_ticks"], 10170)
+        self.assertEqual(self.helper.registry[0]["position_id"], p.identifier)
+
+    def test_replaced_cap_helper_blocks_new_bind_but_preserves_existing_recovery(self):
+        self.arm()
+        self.helper.sl_status = lambda: dict(instance="another", run_id=self.helper.run, rows=[],
+                                              trade_allowed=True)
+        self.api.market()
+        self.tick()
+        self.assertIsNone(self.e.s["leg"])
+        self.assertEqual(self.e.reason, "sl_cap_helper_unavailable")
+        self.helper.cap_status = lambda: dict(instance="another", rows=[])
+        self.tick(3)
+        p = next(iter(self.api.p.values()))
+        first = self.owned()[0]
+        self.helper.sl_status = lambda: dict(instance="third", run_id=self.helper.run, rows=[],
+                                              trade_allowed=True)
+        self.api.closep(p, 4)
+        self.api.fill(first.ticket)
+        self.tick(4)
+        self.assertEqual(self.e.s["leg"]["rung"], 2)
+        self.assertEqual(len(self.owned()), 1)
+
+    def test_cap_rounds_towards_entry(self):
+        from decimal import Decimal
+        self.e.b.tick = Decimal("0.25")
+        cfg = dict(self.e.s["settings"], initial_sl_distance="1.25", support_threshold="0.50")
+        self.e._grid(cfg)
+        self.assertEqual(self.e.cap_distance, 3)
+        self.assertEqual(self.e._risk_cap({"entry_ticks": 400, "side": "BUY"}), 397)
 
     def test_market_full_sl_reflected_then_manual_close_and_cancel_rearms(self):
         p, reverse = self.adopt(1)

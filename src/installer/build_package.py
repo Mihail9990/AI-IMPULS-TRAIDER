@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import os
+import re
 import tempfile
 from urllib.parse import urlsplit
 from urllib.request import urlopen
@@ -78,17 +79,23 @@ def build(source, binaries, wheels, out):
     out.mkdir(exist_ok=True, parents=True)
     setup = out / ("RECOVERY-Python-Windows-" + build_id + ".zip")
     sources = out / ("RECOVERY-Python-Source-" + build_id + ".zip")
-    archive(setup, files)
     source_files = {name: payload["app/"+name] for name in RUNTIME}
     for path in sorted(source.glob("test_*.py")):
         source_files[path.name] = path
-    for path in sorted((source / "mql").glob("*")):
-        if path.suffix in (".mq5", ".mqh"):
-            source_files["mql/" + path.name] = path
+    mql = {p.name: p.read_bytes() for p in (source / "mql").iterdir() if p.suffix in (".mq5", ".mqh")}
+    for stem in HELPERS:
+        if stem + ".mq5" not in mql:
+            raise ValueError("Missing MQL helper source: " + stem)
+    for name, data in mql.items():
+        for include in re.findall(r'^\s*#\s*include\s*"([^"\r\n]+)"', data.decode("utf-8-sig"), re.MULTILINE):
+            if include not in mql:
+                raise ValueError(f"Missing packaged MQL include in {name}: {include}")
+        source_files["mql/" + name] = data
     for path in sorted(installer.iterdir()):
         if path.is_file() and path.suffix.lower() in (".py", ".cmd", ".txt"):
             source_files["installer/" + path.name] = bootstrap_files.get(path.name, path)
     source_files["binary-manifest.json"] = files["manifest.json"]
+    archive(setup, files)
     archive(sources, source_files)
     sums = out / ("RECOVERY-Python-" + build_id + "-SHA256.txt")
     sums.write_text("".join(digest(p) + "  " + p.name + "\n" for p in (setup, sources)), encoding="ascii")

@@ -1,26 +1,26 @@
 {
   "format": 1,
-  "build": "c89c953f211f01bb",
+  "build": "98fe241ccd57a411",
   "files": {
     "app/control_host.py": "565fa90ed17bd8c96c3c0c38a933cc1be6153c9faf9b9d0f0033cad7593839ab",
     "app/control_process.py": "95aad911e277af7c7494c7039c6e4a6a9955133bad1153cee88ff7b480db829c",
     "app/ipc_files.py": "840b82980e04087c96e9edaf48e262ba03af70b256d801f123f116e2f63677ba",
     "app/local_settings.py": "862c1ef0f9ed9295a7a5aa7b0678e5573fd2ce964c451fcf463a14c4a312f617",
     "app/python_supervisor.py": "dc323345d5a6fa0bd764a861810b8b3b3f3308f836b908a2210cb22effa2a4da",
-    "app/recovery_book.py": "98a4c4434ed9e9541ff81da7b4e40f286e39ade6171ac5b8e872ea9cad83380c",
-    "app/recovery_desktop.pyw": "3560fc5e72596a4e5d7a9f6b148cd3bbee93f605cdc1b6d2d2e5b4c99f986fe9",
-    "app/recovery_helpers.py": "86927f68bbdad282b34a1c50a12b1587ad3eacfb4220ec414dfd98f85abab89e",
-    "app/recovery_strategy.py": "9180a0aa9685da2a7ba7ea293acdfa7c783c8bf80ef8003683a644d673d7ef72",
+    "app/recovery_book.py": "000be265d30d1f11221d36ea8a7e05d383d7adcd2cdc7e7881f266ed3d8a68bc",
+    "app/recovery_desktop.pyw": "bc95d5d0b1832a9bad05f9399b323275afaa1a1a9577b984d771fe6d600068dd",
+    "app/recovery_helpers.py": "51d8e34033f1e8fa1f5be032fd7cf0f0fc82d7d13537b884aadf66af38cc95a6",
+    "app/recovery_strategy.py": "1d420c07b06b9c5796829528de66d29f6dab1844f236469a1c3051364216b23b",
     "app/trade_wakeup.py": "392f45cf3184fc187c0ba556df3eb881464d536133e4531dc66ac35ef940a8f0",
-    "helpers/RecoveryPythonSL.ex5": "d2511d8572f636b71cb48fd30598f0bdac623488a36a775fcf814dcf43621e36",
+    "helpers/RecoveryPythonSL.ex5": "ac936031c2e0f7ef411565d1592950ac80eaf607a5ad8cac9d2dc0f979319b02",
     "helpers/RecoveryPythonVerifier.ex5": "52a7fd31c8d5898bbe456be6807c8fa39e8675c077d95db96d520c878288e8d9",
     "wheels/metatrader5-5.0.6231-cp313-cp313-win_amd64.whl": "3a8c8349ce691a4ef05e314afc034ad82f4dbb19415efc7442af5ea075d5e797",
     "wheels/numpy-2.5.5-cp313-cp313-win_amd64.whl": "e0608d1585557b68dcb6a70a41654f7536567960afad79d91752d2863b242b68"
   },
   "bootstrap": {
     "Install.cmd": "8a6ee7a6f824bf41bec577e1e33d1b3eb84bec82cf7b5e83d8d7006e8cd61c4e",
-    "install.py": "f334ece7cd4b6e85ac337683eb64c348751824490c48ce1d1fbc8032df042034",
+    "install.py": "8daae2bde8aee4a2d1cf5be14b0c4f6794c71f1b62531f9f0c3d97b5292d371f",
     "package_spec.py": "2d5076f5e5e540c3942d9b49c048e876779d54a9e8816537763d6648bcee8394",
-    "README_RU.txt": "0368e225ecb7d39e2b77200ee9f00680b112c17c12f57d6edfc89d382cea67af"
+    "README_RU.txt": "9537bebc998309230ff65a48a69aa570868b818a2249bd21d640a08792d44e70"
   }
 }

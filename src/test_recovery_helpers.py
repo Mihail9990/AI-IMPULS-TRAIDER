@@ -20,6 +20,7 @@ class HelpersTest(unittest.TestCase):
         self.clock=patch.object(bridge,"_uptime",return_value=10000)
         self.clock.start();self.addCleanup(self.clock.stop)
         self.verifier();self.write("sl-status.tsv","PYSL1",self.sl,["ok","-",0,0,1])
+        self.write("sl-cap-status.tsv", "PYSC1", self.sl, ["ok", "-", 0, 0])
 
     def write(self,name,schema,instance,fields,rows=(),stamp=10000):
         header=[schema,self.h.scope,12,"TEST","X",instance,1,stamp,*fields]
@@ -52,11 +53,11 @@ class HelpersTest(unittest.TestCase):
         with self.assertRaises(bridge.HelperUnavailable):self.h.snapshot()
 
     def test_register_replace_drop_and_single_writer(self):
-        p=dict(position_id=11,ticket=12,magic=0,opened_msc=900,entry_ticks=10000,advance_ticks=40,side="BUY")
+        p=dict(position_id=11,ticket=12,magic=0,opened_msc=900,entry_ticks=10000,advance_ticks=40,risk_cap_ticks=9920,side="BUY")
         self.assertEqual(self.h.register([p],self.run),self.sl)
         path=self.h.directory/"sl-register.tsv"
         original=path.read_bytes()
-        self.assertIn(b"\t10000\t16000\t1\nR\t11\t12\t0\t900\tBUY\t10000\t40\nEND\n",original)
+        self.assertIn(b"\t10000\t16000\t1\nR\t11\t12\t0\t900\tBUY\t10000\t40\t9920\nEND\n",original)
         with self.assertRaises(bridge.HelperUnavailable):self.h.register([],"e"*32)
         self.assertEqual(path.read_bytes(),original)
         with self.assertRaises(ValueError):self.h.register([p,p],self.run)
@@ -64,6 +65,19 @@ class HelpersTest(unittest.TestCase):
         self.assertTrue(path.read_bytes().endswith(b"\t0\nEND\n"))
         with bridge._register_lock(self.h.directory/"register.lock"):
             with self.assertRaises(bridge.HelperUnavailable):self.h.register([p],self.run)
+
+    def test_cap_readback_and_legacy_lease_ownership(self):
+        self.write("sl-cap-status.tsv", "PYSC1", self.sl, ["ok", self.run, 16000, 1],
+                   ["C\t11\t12\t9920\t9870\tpending"])
+        report = self.h.cap_status()
+        self.assertEqual(report["rows"], [dict(position_id=11, ticket=12, risk_cap_ticks=9920,
+                                               sl_ticks=9870, status="pending")])
+        self.assertEqual(report["run_id"], self.run)
+        old = "PYREG1\t" + "\t".join(map(str, [self.h.scope,12,"TEST","X",self.sl,
+                                              "e"*32, 9999, 15000, 1]))
+        (self.h.directory/"sl-register.tsv").write_bytes((old+"\nEND\n").encode())
+        with self.assertRaises(bridge.HelperUnavailable):
+            self.h.register([], self.run)
 
     def test_stop_confirmed_or_archived(self):
         for status in ("confirmed","protected","last_confirmed","last_protected","changed","pending","rejected"):
@@ -131,6 +145,7 @@ class HelpersTest(unittest.TestCase):
         self.assertNotEqual(req.read_bytes(),before)
         self.sl="2"*32;self.write("sl-status.tsv","PYSL1",self.sl,["ok","-",0,0,0])
         self.assertFalse(self.h.sl_status()["trade_allowed"])
+        self.write("sl-cap-status.tsv","PYSC1",self.sl,["ok","-",0,0])
         self.assertEqual(self.h.register([],self.run),self.sl)
 
 

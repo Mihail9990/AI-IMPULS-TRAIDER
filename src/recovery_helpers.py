@@ -226,6 +226,28 @@ class Helpers:
         return dict(meta, run_id="" if run=="-" else run, lease_until_ms=_uint(until), rows=result,
                     trade_allowed=allowed=="1")
 
+    def cap_status(self):
+        meta, head, rows = self._read("sl-cap-status.tsv", "PYSC1", 12)
+        state, run, until, count = head
+        if (state != "ok" or (run != "-" and not HEX.fullmatch(run))
+                or len(rows) != _uint(count) or len(rows) > 24):
+            raise HelperUnavailable("Нет подтверждения помощника ограничения SL")
+        result = []
+        for row in rows:
+            if (len(row) != 6 or row[0] != "C" or row[5] not in {
+                    "legacy", "missing", "unknown", "within", "waiting", "pending", "rejected",
+                    "blocked", "inactive", "no_stop", "be_pending"}):
+                raise HelperUnavailable("Повреждена строка ограничения SL")
+            pid, ticket, target, observed = map(_uint, row[1:5])
+            if not pid or not ticket or (not target and row[5] != "legacy"):
+                raise HelperUnavailable("Повреждена привязка ограничения SL")
+            result.append(dict(position_id=pid, ticket=ticket, risk_cap_ticks=target,
+                               sl_ticks=observed, status=row[5]))
+        if len({r['position_id'] for r in result}) != len(result):
+            raise HelperUnavailable("Повтор позиции в отчёте ограничения SL")
+        self._cap_instance = meta["instance"]
+        return dict(meta, run_id="" if run == "-" else run, lease_until_ms=_uint(until), rows=result)
+
     def register(self, positions, run_id):
         if not HEX.fullmatch(run_id):
             raise ValueError("Процессу требуется идентификатор из 32 hex символов")
@@ -235,22 +257,28 @@ class Helpers:
                     ("position_id","ticket","magic","opened_msc","entry_ticks","advance_ticks")]
             if p["side"] not in ("BUY","SELL") or pid in ids or ticket in tickets or len(rows)>=24:
                 raise ValueError("Некорректный или повторный владелец позиции")
+            cap = _uint(p["risk_cap_ticks"], True)
+            if not (cap < entry if p["side"] == "BUY" else cap > entry):
+                raise ValueError("Стоп должен находиться со стороны исходного риска")
             ids.add(pid); tickets.add(ticket)
-            rows.append("\t".join(map(str, ("R",pid,ticket,magic,opened,p["side"],entry,advance))))
+            rows.append("\t".join(map(str, ("R",pid,ticket,magic,opened,p["side"],entry,advance,cap))))
         try:
             with _register_lock(self.directory / "register.lock"):
                 status = self.sl_status()
+                if (getattr(self, "_cap_instance", None) != status["instance"]
+                        and self.cap_status()["instance"] != status["instance"]):
+                    raise HelperUnavailable("Сменился экземпляр помощника SL")
                 now = _uptime()
                 current_path = self.directory / "sl-register.tsv"
                 if current_path.exists():
                     with open_shared_read(current_path) as current:
                         existing = current.readline(2048).rstrip(b"\n").decode("utf-8").split("\t")
-                    if (len(existing)==10 and existing[:6] == ["PYREG1",self.scope,str(self.login),
+                    if (len(existing)==10 and existing[0] in ("PYREG1","PYREG2") and existing[1:6] == [self.scope,str(self.login),
                             self.server,self.symbol,status["instance"]] and existing[6]!=run_id and
                             HEX.fullmatch(existing[6]) and _uint(existing[7])<=now<_uint(existing[8]) and
                             _uint(existing[8])-_uint(existing[7])<=LEASE_MS and _uint(existing[9])>0):
                         raise HelperUnavailable("Регистрация позиции ещё принадлежит другому процессу")
-                header = ("PYREG1",self.scope,self.login,self.server,self.symbol,status["instance"],run_id,now,
+                header = ("PYREG2",self.scope,self.login,self.server,self.symbol,status["instance"],run_id,now,
                           now+LEASE_MS,len(rows))
                 wire = ("\t".join(map(str,header))+"\n"+"\n".join(rows+["END",""])).encode("utf-8")
                 with tempfile.NamedTemporaryFile(dir=self.directory,delete=False) as temp:

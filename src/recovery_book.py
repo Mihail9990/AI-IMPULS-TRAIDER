@@ -410,9 +410,19 @@ class Broker:
             # the scoped helper acknowledgement and independently reported DEAL_SL
             # together identify the move away from the original risk level.
             supported = p.get("be_proven") or (p.get("be_ack") and p["initial"] != p["entry_ticks"])
-            if supported and levels == {p["entry_ticks"]}:
+            entry, initial = p["entry_ticks"], p["initial"]
+            direction = 1 if p["side"] == "BUY" else -1
+            cap = p.get("risk_cap_ticks", 0)
+            risk_levels = set()
+            if initial > 0 and (entry - initial) * direction > 0:
+                risk_levels.add(initial)
+                # A fill can race the tightening request. Both broker levels may
+                # appear in the exit deals of the same partially filled stop.
+                if cap > 0 and 0 < (entry - cap) * direction < (entry - initial) * direction:
+                    risk_levels.add(cap)
+            if supported and levels == {entry}:
                 cause = "support"
-            elif levels == {p["initial"]} and p["initial"] > 0:
+            elif levels <= risk_levels:
                 cause = "full"
             else:
                 raise Wait("unconfirmed_stop_level")

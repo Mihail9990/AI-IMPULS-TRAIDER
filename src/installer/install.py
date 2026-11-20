@@ -275,7 +275,7 @@ def prepare_data(root, private, cfg):
         src=root/"helpers"/(helper+".ex5")
         dest=experts/src.name
         if dest.exists() and (dest.is_symlink() or digest(dest)!=digest(src)):
-            raise ValueError("Уже установлен другой "+src.name+". Сверьте версию и сохраните прежний файл отдельно.")
+            raise ValueError("Уже установлен другой "+src.name+". Перенесите его в резервную папку по инструкции в README_RU.txt и повторите установку.")
         if not dest.exists(): writes.append((dest,src.read_bytes()))
         preset=presets/(helper+".set")
         if preset.exists() and (preset.is_symlink() or read_preset(preset)!=values):
