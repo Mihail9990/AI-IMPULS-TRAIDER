@@ -135,6 +135,61 @@ def result_counts(raw):
     return tuple(map(int,matches[0]))
 
 
+def executable_sha256(path):
+    with path.open("rb") as binary:
+        return hashlib.file_digest(binary, "sha256").hexdigest()
+
+
+def numeric_version(ms, ls):
+    return ".".join(str(x) for x in (ms >> 16, ms & 0xffff, ls >> 16, ls & 0xffff))
+
+
+def file_product_version(path):
+    """Read the installed PE's language-neutral VS_FIXEDFILEINFO via Win32."""
+    import ctypes
+    from ctypes import wintypes
+
+    version = ctypes.WinDLL("version.dll", winmode=0x800)  # System32 only
+    size_of = version.GetFileVersionInfoSizeW
+    size_of.argtypes = (wintypes.LPCWSTR, ctypes.POINTER(wintypes.DWORD))
+    size_of.restype = wintypes.DWORD
+    get_info = version.GetFileVersionInfoW
+    get_info.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p)
+    get_info.restype = wintypes.BOOL
+    query = version.VerQueryValueW
+    query.argtypes = (ctypes.c_void_p, wintypes.LPCWSTR,
+                      ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.UINT))
+    query.restype = wintypes.BOOL
+    size = size_of(str(path), None)
+    if not 0 < size <= 4 * MAX_FILE:
+        raise ValueError("MetaEditor version resource unavailable")
+    data = ctypes.create_string_buffer(size)
+    if not get_info(str(path), 0, size, data):
+        raise ValueError("MetaEditor version resource unreadable")
+    value, length = ctypes.c_void_p(), wintypes.UINT()
+    info_type = ctypes.c_uint32 * 13
+    if not query(data, "\\", ctypes.byref(value), ctypes.byref(length)):
+        raise ValueError("MetaEditor fixed version unavailable")
+    if not value.value or length.value != ctypes.sizeof(info_type):
+        raise ValueError("Invalid MetaEditor fixed version length")
+    if not ctypes.addressof(data) <= value.value <= ctypes.addressof(data)+size-length.value:
+        raise ValueError("Invalid MetaEditor fixed version location")
+    info = ctypes.cast(value, ctypes.POINTER(info_type)).contents
+    if info[0] != 0xfeef04bd or not (info[2] or info[3]) or not (info[4] or info[5]):
+        raise ValueError("Invalid MetaEditor fixed version resource")
+    return numeric_version(info[2], info[3]), numeric_version(info[4], info[5])
+
+
+def compiler_provenance(editor):
+    digest = executable_sha256(editor)
+    file_version, product_version = file_product_version(editor)
+    if not all(re.fullmatch(r"[0-9]+(?:\.[0-9]+){3}", v) for v in (file_version, product_version)):
+        raise ValueError("Invalid MetaEditor numeric version")
+    if executable_sha256(editor) != digest:
+        raise ValueError("MetaEditor changed while reading version")
+    return {"sha256": digest, "file_version": file_version, "product_version": product_version}
+
+
 def compile_sources(archive, commit, archive_hash, editor, results, require_mode="diagnostic"):
     if sys.platform != "win32":
         raise RuntimeError("Native MetaEditor build requires Windows")
@@ -144,9 +199,10 @@ def compile_sources(archive, commit, archive_hash, editor, results, require_mode
     manifest,sources=read_package(archive,commit,archive_hash)
     if manifest["mode"] != require_mode:
         raise ValueError("Archive mode does not match requested compile")
+    compiler = compiler_provenance(editor)
     results.mkdir(exist_ok=False)
     report={"commit":commit,"archive_sha256":archive_hash,"mode":manifest["mode"],
-            "status":"compile_only_not_deployment","targets":[]}
+            "status":"compile_only_not_deployment","compiler":compiler,"targets":[]}
     with tempfile.TemporaryDirectory(prefix="recovery-ea-compile-") as d:
         root=Path(d)
         for p,b in sources.items():
@@ -160,10 +216,18 @@ def compile_sources(archive, commit, archive_hash, editor, results, require_mode
             log, exe = src.with_suffix(".log"), src.with_suffix(".ex5")
             output_name = name.replace("/", "__")
             try:
+                info["reason"] = "compiler_provenance_changed_or_unreadable"
+                if executable_sha256(editor) != compiler["sha256"]:
+                    raise ValueError("Compiler changed before invocation")
+                info["reason"] = "compiler_process_failed"
                 command = subprocess.list2cmdline([str(editor)]) + f' /compile:"{src}" /log'
                 proc=subprocess.run(command, executable=str(editor),
                                     cwd=root,timeout=180,check=False)
                 info["process_exit_code"]=proc.returncode
+                info["reason"] = "compiler_provenance_changed_or_unreadable"
+                if executable_sha256(editor) != compiler["sha256"]:
+                    raise ValueError("Compiler changed during invocation")
+                info["reason"] = "unverified_compiler_output"
                 if not log.is_file():
                     raise ValueError("Missing fresh compilation log")
                 raw=log.read_bytes()
@@ -175,8 +239,13 @@ def compile_sources(archive, commit, archive_hash, editor, results, require_mode
                 (results/(output_name+".ex5")).write_bytes(artifact)
                 info["ex5_sha256"]=hashlib.sha256(artifact).hexdigest()
                 info["status"]="compiled"
-            except (ValueError,OSError,subprocess.SubprocessError) as exc:
-                info["reason"]=str(exc)
+                del info["reason"]
+            except subprocess.TimeoutExpired:
+                info["reason"] = "compiler_timeout"
+            except (ValueError,OSError,subprocess.SubprocessError):
+                # Native errors may embed personal or machine paths. Keep only
+                # the stable reason above; raw compiler logs are separate files.
+                pass
             report["targets"].append(info)
     (results/"compile-report.json").write_text(json.dumps(report,indent=2)+"\n",encoding="utf-8")
     return report

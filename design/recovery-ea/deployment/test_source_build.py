@@ -1,3 +1,5 @@
+import ctypes
+from ctypes import wintypes
 import hashlib
 import json
 from pathlib import Path
@@ -5,11 +7,11 @@ import re
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import zipfile
 
 from source_build import (BASE, DIAGNOSTIC, compile_sources, package, read_package,
-                          result_counts, validated_path)
+                          file_product_version, result_counts, validated_path)
 
 
 def sha(path):
@@ -102,13 +104,60 @@ class BuildTest(unittest.TestCase):
             if good:
                 path.with_suffix(".ex5").write_bytes(b"fake-ex5")
             return subprocess.CompletedProcess(command,1)
-        with patch("source_build.sys.platform","win32"), patch("source_build.subprocess.run",side_effect=fake):
+        with patch("source_build.sys.platform","win32"), patch("source_build.file_product_version",return_value=("5.0.0.6308","5.0.0.6307")), patch("source_build.subprocess.run",side_effect=fake):
             output=self.root/"out"
             report=compile_sources(self.archive,self.commit,sha(self.archive),ed,output)
             self.assertEqual([r["status"] for r in report["targets"]],["compiled","failed"])
             self.assertEqual(len(list(output.glob("*.ex5"))),1)
             self.assertEqual(len(list(output.glob("*.log"))),2)
-            self.assertEqual(json.loads((output/"compile-report.json").read_text())["status"],"compile_only_not_deployment")
+            payload = (output/"compile-report.json").read_text()
+            self.assertNotIn(str(self.root), payload)
+            self.assertEqual(json.loads(payload)["status"],"compile_only_not_deployment")
+            self.assertEqual(report["compiler"], {"sha256":sha(ed), "file_version":"5.0.0.6308", "product_version":"5.0.0.6307"})
+
+    def test_actual_fixed_version_fields_not_reported_on_invalid_resource(self):
+        ver = (ctypes.c_uint32*13)(0xfeef04bd,0,0x50000,6308,0x50000,6307,*([0]*7))
+        api = Mock()
+        api.GetFileVersionInfoSizeW.return_value = ctypes.sizeof(ver)
+        def load(_path, _reserved, size, buf):
+            ctypes.memmove(buf, ver, size)
+            return 1
+        def query(buf, node, value, length):
+            self.assertEqual(node, "\\")
+            ctypes.cast(value, ctypes.POINTER(ctypes.c_void_p)).contents.value = ctypes.addressof(buf)
+            ctypes.cast(length, ctypes.POINTER(wintypes.UINT)).contents.value = ctypes.sizeof(ver)
+            return 1
+        api.GetFileVersionInfoW.side_effect = load
+        api.VerQueryValueW.side_effect = query
+        with patch("ctypes.WinDLL",return_value=api,create=True):
+            self.assertEqual(file_product_version(self.root/"unused"),("5.0.0.6308","5.0.0.6307"))
+            ver[0] = 0
+            with self.assertRaises(ValueError):
+                file_product_version(self.root/"unused")
+
+    def test_executable_changed_and_sensitive_exception_not_disclosed(self):
+        package(self.repo,self.commit,self.archive)
+        ed=self.root/"MetaEditor64.exe"
+        ed.write_bytes(b"original")
+        def changed(command, **kwargs):
+            ed.write_bytes(b"different")
+            return subprocess.CompletedProcess(command,0)
+        def throws(command, **kwargs):
+            raise OSError(str(self.root/"private-machine"))
+        with patch("source_build.sys.platform","win32"), patch("source_build.file_product_version",return_value=("5.0.0.6308","5.0.0.6308")):
+            with patch("source_build.subprocess.run", side_effect=changed) as fake:
+                report=compile_sources(self.archive,self.commit,sha(self.archive),ed,self.root/"changed")
+                self.assertEqual(len(list((self.root/"changed").glob("*.ex5"))),0)
+                self.assertEqual(fake.call_count,1)
+                self.assertTrue(all(x["reason"]=="compiler_provenance_changed_or_unreadable" for x in report["targets"]))
+            with patch("source_build.subprocess.run", side_effect=throws):
+                report=compile_sources(self.archive,self.commit,sha(self.archive),ed,self.root/"throws")
+                self.assertNotIn(str(self.root), json.dumps(report))
+                self.assertTrue(all(x["reason"]=="compiler_process_failed" for x in report["targets"]))
+        with patch("source_build.sys.platform","win32"), patch("source_build.file_product_version", side_effect=ValueError("Unavailable")):
+            with self.assertRaises(ValueError):
+                compile_sources(self.archive,self.commit,sha(self.archive),ed,self.root/"unavailable")
+            self.assertFalse((self.root/"unavailable").exists())
 
 if __name__=="__main__":
     unittest.main()

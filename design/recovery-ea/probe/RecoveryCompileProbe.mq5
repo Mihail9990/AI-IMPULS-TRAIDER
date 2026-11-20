@@ -3,6 +3,8 @@
 #property description "Compile integration of RECOVERY modules; never submits orders."
 
 #include "../execution/RecoveryActionRequest.mqh"
+#include "../execution/RecoveryDispatch.mqh"
+#include "../execution/RecoveryExactOrderEffect.mqh"
 #include "../execution/RecoveryAdoptionInventory.mqh"
 #include "../execution/RecoveryIntentRestart.mqh"
 #include "../verifier/RecoveryExactOrderReader.mqh"
