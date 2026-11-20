@@ -1,5 +1,5 @@
 #property strict
-#property version "0.11"
+#property version "0.12"
 // Offline integration source. Terminal and broker reads only.
 input long ExpectedLogin=0;
 input string ExpectedServer="";
@@ -17,6 +17,19 @@ string SearchFilename="";
 long Sequence=0;
 long HistorySearchHandle=INVALID_HANDLE;
 string HistorySearchFilename="";
+long OrderSearchHandle=INVALID_HANDLE;
+string OrderSearchFilename="";
+enum VerifierChannel { VERIFIER_INVENTORY, VERIFIER_HISTORY, VERIFIER_EXACT_ORDER };
+string RequestSuffix(const VerifierChannel channel) {
+   if(channel==VERIFIER_HISTORY) return ".hist";
+   if(channel==VERIFIER_EXACT_ORDER) return ".ord";
+   return ".inv";
+}
+string ResponseSuffix(const VerifierChannel channel) {
+   if(channel==VERIFIER_HISTORY) return ".history";
+   if(channel==VERIFIER_EXACT_ORDER) return ".order";
+   return ".snapshot";
+}
 
 bool SafeText(const string value) {
    if(StringLen(value)<1 || StringLen(value)>100) return false;
@@ -59,6 +72,7 @@ void OnDeinit(const int reason) {
    EventKillTimer();
    CloseSearch();
    CloseCursor(HistorySearchHandle,HistorySearchFilename);
+   CloseCursor(OrderSearchHandle,OrderSearchFilename);
 }
 
 bool RecoveryHistoryId(const string value,ulong &number) {
@@ -75,10 +89,9 @@ bool RecoveryHistoryId(const string value,ulong &number) {
    return true;
 }
 bool LoadRequest(const string filename,string &nonce,string &generation,
-                 bool &history,ulong &position,ulong &anchor) {
+                 const VerifierChannel channel,ulong &position,ulong &anchor) {
    nonce=StringSubstr(filename,0,32);
-   history=filename==nonce+".hist";
-   if(!HexToken(nonce) || (!history && filename!=nonce+".inv")) return false;
+   if(!HexToken(nonce) || filename!=nonce+RequestSuffix(channel)) return false;
    position=0; anchor=0;
    int h=FileOpen(Mailbox+"\\"+filename,FILE_READ|FILE_BIN);
    if(h==INVALID_HANDLE) return false;
@@ -96,12 +109,16 @@ bool LoadRequest(const string filename,string &nonce,string &generation,
    if(StringToCharArray(line,canonical,0,WHOLE_ARRAY,CP_UTF8)!=end+1) return false;
    for(int i=0;i<end;i++) if(canonical[i]!=bytes[i]) return false;
    string f[];
-   const int count=history ? 12 : 10;
+   const int count=channel==VERIFIER_HISTORY ? 12 : (channel==VERIFIER_EXACT_ORDER ? 11 : 10);
+   string schema="RECOVERY_INVENTORY_REQUEST_V1";
+   if(channel==VERIFIER_HISTORY) schema="RECOVERY_HISTORY_REQUEST_V1";
+   if(channel==VERIFIER_EXACT_ORDER) schema="RECOVERY_EXACT_ORDER_REQUEST_V1";
    if(StringSplit(line,9,f)!=count) return false;
-   if(f[0]!=(history ? "RECOVERY_HISTORY_REQUEST_V1" : "RECOVERY_INVENTORY_REQUEST_V1") || f[1]!=nonce || f[2]!=ExecutorEpoch ||
+   if(f[0]!=schema || f[1]!=nonce || f[2]!=ExecutorEpoch ||
       f[3]!=VerifierEpoch || f[5]!=(string)ExpectedLogin || f[6]!=ExpectedServer ||
       f[7]!=ExpectedSymbol || f[8]!=(string)StrategyMagic || f[count-1]!="END") return false;
-   if(history && (!RecoveryHistoryId(f[9],position) || !RecoveryHistoryId(f[10],anchor))) return false;
+   if(channel==VERIFIER_HISTORY && (!RecoveryHistoryId(f[9],position) || !RecoveryHistoryId(f[10],anchor))) return false;
+   if(channel==VERIFIER_EXACT_ORDER && !RecoveryHistoryId(f[9],anchor)) return false;
    long gen=StringToInteger(f[4]);
    if(gen<0 || f[4]!=(string)gen) return false;
    generation=f[4];
@@ -207,6 +224,7 @@ void Publish(const string nonce,const string generation) {
    WriteReport(nonce,".snapshot",payload);
 }
 #include "RecoveryHistory.mqh"
+#include "RecoveryExactOrderWire.mqh"
 string ReportPrefix(const string schema,const string nonce,const string generation) {
    return schema+"\t"+nonce+"\t"+ExecutorEpoch+"\t"+VerifierEpoch+"\t"+
       generation+"\t"+(string)ExpectedLogin+"\t"+ExpectedServer+"\t"+ExpectedSymbol+"\t"+
@@ -237,24 +255,36 @@ void PublishHistory(const string nonce,const string generation,const ulong posit
    WriteReport(nonce,".history",payload);
 }
 
+void PublishExact(const string nonce,const string generation,const ulong ticket) {
+   RecoveryExactOrderScope scope;
+   scope.login=ExpectedLogin; scope.server=ExpectedServer; scope.symbol=ExpectedSymbol;
+   scope.magic=(ulong)StrategyMagic; scope.ticket=ticket;
+   RecoveryExactOrderObservation observation;
+   RecoveryObserveExactOrder(scope,observation);
+   if(!SessionOK()) return;
+   string body=RecoveryExactOrderResponseBody(scope,observation);
+   if(body=="") return;
+   WriteReport(nonce,".order",ReportPrefix("RECOVERY_EXACT_ORDER_V1",nonce,generation)+body);
+}
+
 void CloseCursor(long &handle,string &filename) {
    if(handle!=INVALID_HANDLE) FileFindClose(handle);
    handle=INVALID_HANDLE;
    filename="";
 }
-void ScanChannel(long &handle,string &filename,const bool expected_history) {
+void ScanChannel(long &handle,string &filename,const VerifierChannel channel) {
    if(handle==INVALID_HANDLE) {
-      handle=FileFindFirst(Mailbox+(expected_history ? "\\*.hist" : "\\*.inv"),filename);
+      handle=FileFindFirst(Mailbox+"\\*"+RequestSuffix(channel),filename);
       if(handle==INVALID_HANDLE) return;
    }
    for(int visited=0;visited<32;visited++) {
       string nonce,generation;
-      bool history;
       ulong position,anchor;
-      bool new_work=LoadRequest(filename,nonce,generation,history,position,anchor) && history==expected_history &&
-                    !FileIsExist(Mailbox+"\\"+nonce+(history ? ".history" : ".snapshot"));
+      bool new_work=LoadRequest(filename,nonce,generation,channel,position,anchor) &&
+                    !FileIsExist(Mailbox+"\\"+nonce+ResponseSuffix(channel));
       if(new_work) {
-         if(history) PublishHistory(nonce,generation,position,anchor);
+         if(channel==VERIFIER_HISTORY) PublishHistory(nonce,generation,position,anchor);
+         else if(channel==VERIFIER_EXACT_ORDER) PublishExact(nonce,generation,anchor);
          else Publish(nonce,generation);
       }
       if(!FileFindNext(handle,filename)) { CloseCursor(handle,filename); return; }
@@ -265,8 +295,10 @@ void OnTimer() {
    if(!SessionOK()) {
       CloseSearch();
       CloseCursor(HistorySearchHandle,HistorySearchFilename);
+      CloseCursor(OrderSearchHandle,OrderSearchFilename);
       return;
    }
-   ScanChannel(HistorySearchHandle,HistorySearchFilename,true);
-   ScanChannel(SearchHandle,SearchFilename,false);
+   ScanChannel(OrderSearchHandle,OrderSearchFilename,VERIFIER_EXACT_ORDER);
+   ScanChannel(HistorySearchHandle,HistorySearchFilename,VERIFIER_HISTORY);
+   ScanChannel(SearchHandle,SearchFilename,VERIFIER_INVENTORY);
 }
