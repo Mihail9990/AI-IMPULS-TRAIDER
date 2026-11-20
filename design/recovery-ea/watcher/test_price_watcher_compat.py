@@ -63,6 +63,30 @@ int main(){
   assert(!RecoveryPriceParse(live.substr(0,live.size()-1),s,0,out));
   assert(RecoveryPriceParse(head+"unavailable\t-1\t0.0000000000000000\tEND\n",s,0,out) &&
          out.usable && !out.observed && out.selected_quote.empty());
+  RecoveryPricePeak peak;
+  RecoveryPriceReset(peak);
+  assert(!RecoveryPriceReached(peak,1));
+  assert(RecoveryPriceAccumulate(peak,1,0,3000.10) && !RecoveryPriceReached(peak,1));
+  assert(RecoveryPriceAccumulate(peak,1,1,3000.35) && RecoveryPriceReached(peak,1));
+  assert(!RecoveryPriceAccumulate(peak,1,0,3000.10) && peak.selected==3000.35);
+  assert(RecoveryPriceAccumulate(peak,1,2,3000.60) && RecoveryPriceReached(peak,2));
+  assert(!RecoveryPriceAccumulate(peak,1,1,3000.50) && peak.selected==3000.60);
+  RecoveryPriceReset(peak);
+  assert(RecoveryPriceAccumulate(peak,-1,2,2999.40) && RecoveryPriceReached(peak,2));
+  assert(!RecoveryPriceAccumulate(peak,-1,2,2999.41) && peak.selected==2999.40);
+  assert(RecoveryPriceAccumulate(peak,-1,2,2999.30) && peak.selected==2999.30);
+  assert(!RecoveryPriceAccumulate(peak,-1,-1,2999.20) && peak.selected==2999.30);
+  assert(RecoveryPriceFollowText(s,0).empty());
+  assert(RecoveryPriceFollowText(s,2).find("\t2\t42\tEND\n")!=string::npos);
+
+  string v2=head;
+  v2.replace(0,string("RECOVERY_PRICE_V1").size(),"RECOVERY_PRICE_PEAK_V2");
+  assert(RecoveryPricePeakParse(v2+"1\tobserved\t1\t"+quote+"\tEND\n",s,8,1,out));
+  assert(!RecoveryPricePeakParse(v2+"1\tobserved\t1\t"+quote+"\tEND\n",s,8,2,out));
+  assert(!RecoveryPricePeakParse(v2+"2\tobserved\t1\t"+quote+"\tEND\n",s,8,2,out));
+  assert(!RecoveryPricePeakParse(v2+"2\tunavailable\t-1\t0.0000000000000000\tEND\n",s,8,2,out));
+  assert(RecoveryPricePeakParse(v2+"2\tobserved\t2\t"+DoubleToString(3000.61,16)+"\tEND\n",s,8,2,out));
+  assert(!RecoveryPricePeakParse(v2+"2\tobserved\t2\t"+DoubleToString(3000.61,16)+"\tEND\n",s,9,2,out));
   auto other=s;other.nonce[0]='9'; assert(!RecoveryPriceParse(live,other,0,out));
   other=s;other.watcher_epoch[0]='9'; assert(!RecoveryPriceParse(live,other,0,out));
   other=s;other.executor_epoch[0]='9'; assert(!RecoveryPriceParse(live,other,0,out));
@@ -85,9 +109,9 @@ class PriceWatcherCompat(unittest.TestCase):
         self.assertIsNotNone(compiler)
         inv = as_cpp((VERIFIER/"RecoveryInventoryReader.mqh").read_text())
         stage = (HERE/"RecoveryPriceStage.mqh").read_text()
-        reader = (HERE/"RecoveryPriceReader.mqh").read_text().split("bool RecoveryPriceRequest(",1)[0]+"\n#endif\n"
+        reader = (HERE/"RecoveryPriceReader.mqh").read_text().split("bool RecoveryPricePublishLocal(",1)[0]+"\n#endif\n"
         reader = re.sub(r"^#include .*\n","",reader,flags=re.M)
-        reader = re.sub(r"\(string\)(s\.\w+)",r"std::to_string(\1)",reader)
+        reader = re.sub(r"\(string\)(s\.\w+|desired_stage)",r"std::to_string(\1)",reader)
         reader = reader.replace("string f[];","std::vector<string> f;")
         with tempfile.TemporaryDirectory() as d:
             src = Path(d)/"watch.cpp"
@@ -103,7 +127,11 @@ class PriceWatcherCompat(unittest.TestCase):
         self.assertIn("POSITION_IDENTIFIER",src)
         self.assertIn("POSITION_PRICE_OPEN",src)
         self.assertIn("SymbolInfoTick(ExpectedSymbol,tick)",src)
-        self.assertIn('FileMove(temp,0,prefix+".quote",0)',src)
+        self.assertIn("FileMove(temp,0,prefix+suffix,0)",src)
+        self.assertIn("void OnTick()",src)
+        self.assertIn("RecoveryPriceAccumulate(Subs[i].peak",src)
+        self.assertIn("PriceWrite(Subs[i].query,Subs[i].peak.stage,Subs[i].peak.selected)",src)
+        self.assertIn('PriceLoad(Subs[i].query.nonce+".drop",drop,true,true)',src)
 
 
 if __name__=="__main__":

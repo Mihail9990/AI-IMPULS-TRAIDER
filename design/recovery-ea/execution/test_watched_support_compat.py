@@ -27,6 +27,9 @@ bool RecoveryAdoptionUnits(const string&s,double g,bool,long &n){double x=std::s
 bool RecoveryPriceParse(const string& s,const RecoveryPriceScope&,long after,RecoveryPriceSignal &out){
     out=response;return s=="exact" && response.sequence>after;}
 bool RecoveryPriceRead(const RecoveryPriceScope&s,long n,RecoveryPriceSignal &out){return RecoveryPriceParse("exact",s,n,out);}
+bool RecoveryPricePeakRead(const RecoveryPriceScope &key,ulong after,int desired,RecoveryPriceSignal &out){
+    return RecoveryPriceParse("exact",key,(long)after,out) && desired<=out.stage;
+}
 bool RRStage(RRRangeState &s,const RRSettings&,long bid,long ask,RRAction &out){
     assert(bid==ask);out.kind=4;s.pending=out;return true;}
 """
@@ -52,6 +55,10 @@ int main(){
     s.cycle.side=key.side=-1;s.live_sl=400080;
     response.selected_quote="3999.60";response.stage=2;
     assert(RecoveryReadWatchedSupport(s,cfg,key,1,.01,action));
+    s.pending.kind=0;s.support_stage=1;
+    assert(RecoveryReadWatchedPeak(s,cfg,key,1,.01,action));
+    s.pending.kind=0;s.support_stage=2;
+    assert(!RecoveryReadWatchedPeak(s,cfg,key,1,.01,action));
 }
 """
 class WatchedSupportTest(unittest.TestCase):

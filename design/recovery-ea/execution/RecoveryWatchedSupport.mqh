@@ -60,4 +60,16 @@ bool RecoveryReadWatchedSupport(RRRangeState &state,const RRSettings &cfg,
    return RecoveryPriceRead(scope,after_sequence,signal) &&
           RecoveryWatchedStage(signal,state,cfg,tick,out);
   }
+
+bool RecoveryReadWatchedPeak(RRRangeState &state,const RRSettings &cfg,
+                             const RecoveryPriceScope &scope,const ulong after_sequence,
+                             const double tick,RRAction &out)
+  {
+   RRClearAction(out);
+   if(state.support_stage<0 || state.support_stage>=2 ||
+      !RecoveryWatchedScope(state,cfg,scope,tick))return false;
+   RecoveryPriceSignal signal;
+   return RecoveryPricePeakRead(scope,after_sequence,state.support_stage+1,signal) &&
+          RecoveryWatchedStage(signal,state,cfg,tick,out);
+  }
 #endif
