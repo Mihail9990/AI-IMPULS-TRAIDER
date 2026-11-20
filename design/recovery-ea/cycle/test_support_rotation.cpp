@@ -112,4 +112,48 @@ int main() {
  s.entry.volume_steps=cfg.lot_steps[23];
  f=fill(s,s.entry,s.entry.entry_ticks,s.opposite.ticket);
  assert(!RRStageSupportRotation(s,cfg,f,s.opposite,p)&&s.phase==RR_WAIT&&!p.reserved);
+ // Single break-even mode: one in-place MODIFY, no SL write even if gapped.
+ auto single=cfg;single.support_first_ticks=0;single.support_offset_ticks=0;
+ for(int side : {-1,1}) for(bool reentry_wins : {false,true}) {
+    auto live=wait(single,side);
+    const auto winner=reentry_wins?live.entry:live.opposite;
+    const auto survivor=reentry_wins?live.opposite:live.entry;
+    const auto evidence=fill(live,winner,winner.entry_ticks+winner.side*7,survivor.ticket);
+    const long opened=evidence.entry.actual_entry_ticks;
+    RRSupportRotation rotation{};
+    assert(RRStageSupportRotation(live,single,evidence,survivor,rotation));
+    assert(rotation.actual_entry_only&&rotation.reserved&&rotation.move_required&&!rotation.sl_required);
+    assert(rotation.sl.kind==RR_NONE&&live.pending.kind==RR_MOVE_SUPPORT_OPPOSITE);
+    assert(live.initial_sl==winner.sl_ticks&&live.live_sl==winner.sl_ticks);
+    assert(RROppositeAnchor(live)==opened-winner.side*80);
+    assert(rotation.move.entry_ticks==opened-winner.side*80&&rotation.move.sl_ticks==opened);
+    assert(rotation.move.order_ticket==survivor.ticket&&rotation.move.volume_steps==survivor.volume_steps);
+    assert(RRSupportRotationRequestState(live,rotation,rotation.move,shadow));
+    assert(!RRSupportRotationRequestState(live,rotation,rotation.sl,shadow));
+    auto fake=rotation.move;fake.volume_steps++;
+    assert(RRConfirmSupportRotation(live,rotation,{fake,true,0})==RR_PAIR_CONFLICT);
+    assert(RRConfirmSupportRotation(live,rotation,{rotation.move,true,survivor.ticket})==RR_PAIR_CONFLICT);
+    assert(RRConfirmSupportRotation(live,rotation,{rotation.move,true,0})==RR_PAIR_CONFIRMED);
+    assert(!rotation.reserved&&live.phase==RR_ACTIVE&&live.opposite.ticket==survivor.ticket);
+    assert(live.opposite.sl_ticks==opened&&live.live_sl==winner.sl_ticks&&live.cycle.full_sl_count==4);
+    assert(RRConfirmSupportRotation(live,rotation,{rotation.move,true,0})==RR_PAIR_CONFLICT);
+    const auto &r=live.cycle;
+    RCCloseCheckpoint stop{};
+    stop.key={live.scope,77,r.generation,r.range_id,r.position_id,r.active_order};
+    stop.before=r;stop.reentry_distance=80;
+    stop.proof={r.generation,r.range_id,r.active_order,r.position_id,r.filled_steps,r.filled_steps,
+                0,true,true,RC_SL,winner.sl_ticks,RC_INITIAL_LEVEL,true};
+    assert(RRApplySessionClose(live,stop)&&live.phase==RR_WAIT&&live.cycle.full_sl_count==5);
+    assert(live.opposite.ticket==survivor.ticket&&live.entry.ticket==0);
+ }
+
+ s=wait(single,1);p={};
+ s.opposite.entry_ticks=400005;s.opposite.sl_ticks=400085;
+ f=fill(s,s.entry,400085,s.opposite.ticket);
+ const auto aligned_single=s.opposite;
+ assert(RRStageSupportRotation(s,single,f,aligned_single,p)&&p.actual_entry_only);
+ assert(!p.reserved&&!p.move_required&&!p.sl_required&&s.pending.kind==RR_NONE);
+ assert(s.phase==RR_ACTIVE&&s.live_sl==f.sl_ticks&&s.initial_sl==f.sl_ticks);
+ assert(RRKnownEqual(s.opposite,aligned_single)&&RROppositeAnchor(s)==400005);
+
 }

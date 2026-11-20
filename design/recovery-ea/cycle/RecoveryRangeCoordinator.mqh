@@ -41,6 +41,7 @@ struct RRRangeState {
  ulong scope,action_serial;
  int phase,primary_side,support_stage;
  long primary_ticks,initial_sl,live_sl,live_tp,reentry_ticks;
+ long opposite_anchor_ticks; // ordinary path; 0 uses the legacy initial SL anchor
  int reentry_side,reentry_slot;
  ulong position_ticket;
  RRKnownOrder entry,opposite,retire;
@@ -75,7 +76,7 @@ bool RRNewRange(RRRangeState &s,const RRSettings &cfg,const int rid,const int si
  s.cycle.requires_manual_ranges=false;s.cycle.active_order=0;s.cycle.position_id=0;s.cycle.side=0;
  s.cycle.filled_steps=0;s.cycle.actual_entry_ticks=0;
  s.cycle.last_closed_order=0;s.cycle.last_closed_position=0;
- s.support_stage=0;s.initial_sl=0;s.live_sl=0;s.live_tp=0;s.position_ticket=0;
+ s.support_stage=0;s.initial_sl=0;s.live_sl=0;s.live_tp=0;s.opposite_anchor_ticks=0;s.position_ticket=0;
  s.reentry_ticks=0;s.reentry_side=0;s.reentry_slot=0;
  RRClearKnown(s.entry);RRClearKnown(s.opposite);RRClearKnown(s.retire);RRClearAction(s.pending);
  return true;
@@ -103,6 +104,25 @@ bool RRPositionAction(const RRRangeState &s,const long sl,const int stage,RRActi
  return true;
 }
 
+long RROppositeAnchor(const RRRangeState &s) {
+ return s.opposite_anchor_ticks!=0 ? s.opposite_anchor_ticks : s.initial_sl;
+}
+
+// Ordinary route: stage a new opposite solely from the exact filled entry;
+// do not change the attached or live SL, and do not wait for an SL adjustment.
+bool RRAfterActualEntryNoSL(RRRangeState &s,const RRSettings &cfg) {
+ if(!RRValid(s,cfg) || !RCValidSide(s.cycle.side) ||
+    !RCBoundedPositive(s.cycle.actual_entry_ticks) ||
+    s.cycle.active_order==0 || s.cycle.position_id==0 || s.position_ticket==0 ||
+    s.entry.ticket!=0 || s.opposite.ticket!=0 || s.retire.ticket!=0 || s.pending.kind!=RR_NONE ||
+    s.reentry_slot!=0 || s.support_stage!=0 || s.opposite_anchor_ticks!=0) return false;
+ if(RCReverseSlot(s.cycle)==0) { s.phase=RR_ACTIVE;return true; }
+ const long anchor=s.cycle.actual_entry_ticks-s.cycle.side*cfg.initial_sl_ticks;
+ if(!RCBoundedPositive(anchor))return false;
+ s.opposite_anchor_ticks=anchor;s.phase=RR_ARM_REVERSE;
+ return true;
+}
+
 // Once staged, an UNKNOWN result leaves pending intact. Repeated polling does
 // not return the staged action as a fresh send instruction.
 bool RRStage(RRRangeState &s,const RRSettings &cfg,const long bid,const long ask,RRAction &out) {
@@ -119,9 +139,10 @@ bool RRStage(RRRangeState &s,const RRSettings &cfg,const long bid,const long ask
     if(s.retire.ticket>0) RRExactCancel(s.retire,a);
     else {
        const int slot=RCReverseSlot(s.cycle);
-       if(slot==0 || s.opposite.ticket!=0 || s.live_sl!=s.initial_sl)return false;
+       if(slot==0 || s.opposite.ticket!=0 ||
+          (s.opposite_anchor_ticks==0 && s.live_sl!=s.initial_sl))return false;
        a.kind=RR_REVERSE;
-       if(!RRMakeEntry(cfg,-s.cycle.side,s.initial_sl,slot,a))return false;
+       if(!RRMakeEntry(cfg,-s.cycle.side,RROppositeAnchor(s),slot,a))return false;
     }
  } else if(s.phase==RR_ACTIVE) {
     RCStopProposal p;
@@ -213,7 +234,7 @@ bool RRObserveFillCore(RRRangeState &s,const RRSettings &cfg,const RRFilled &f) 
     f.entry.side!=owned.side || f.sl_ticks!=owned.sl_ticks || f.working_other_ticket!=other.ticket)return false;
  const long sl=f.entry.actual_entry_ticks-f.entry.side*cfg.initial_sl_ticks;
  if(!RCBoundedPositive(sl) || !RCApplyEntry(s.cycle,f.entry))return false;
- s.position_ticket=f.position_ticket;s.initial_sl=sl;s.live_sl=f.sl_ticks;s.live_tp=f.tp_ticks;
+ s.position_ticket=f.position_ticket;s.initial_sl=sl;s.live_sl=f.sl_ticks;s.live_tp=f.tp_ticks;s.opposite_anchor_ticks=0;
  s.support_stage=0;s.retire=other;RRClearKnown(s.entry);RRClearKnown(s.opposite);
  s.reentry_side=0;s.reentry_slot=0;s.reentry_ticks=0;
  if(sl==s.live_sl)RRAfterProtection(s);
@@ -238,7 +259,7 @@ bool RRApplySessionClose(RRRangeState &s,const RCCloseCheckpoint &close) {
  if(s.retire.ticket!=0 || s.entry.ticket!=0)return false;
  RCClosePlan next;
  if(RCCPApply(close,s.cycle,next)!=RCCP_APPLIED)return false;
- s.position_ticket=0;s.support_stage=0;s.initial_sl=0;s.live_sl=0;s.live_tp=0;
+ s.position_ticket=0;s.support_stage=0;s.initial_sl=0;s.live_sl=0;s.live_tp=0;s.opposite_anchor_ticks=0;
  if(next.cancel_remaining_range_orders)
     s.phase=(s.opposite.ticket!=0)?RR_DRAIN:RR_DONE;
  else if(next.reentry_slot!=0) {

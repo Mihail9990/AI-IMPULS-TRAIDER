@@ -91,8 +91,8 @@ int main() {{
  assert(!RecoveryStagePrimaryOpening(s,cfg,b,wrong,opening,ledger)&&s.phase==RR_NEW&&!opening.reserved);
  assert(RecoveryStagePrimaryOpening(s,cfg,b,f,opening,ledger));
  assert(s.cycle.actual_entry_ticks==400005 && s.position_ticket=={TICKET}ULL &&
-        s.phase==RR_PROTECT && s.live_sl==399920 && s.initial_sl==399925);
- assert(opening.sl_required && opening.sl.kind==RR_INITIAL_SL && opening.sl.sl_ticks==399925);
+        s.phase==RR_ARM_REVERSE && s.live_sl==399920 && s.initial_sl==399920 && RROppositeAnchor(s)==399925);
+ assert(!opening.sl_required && opening.sl.kind==RR_NONE);
  assert(opening.reverse.kind==RR_REVERSE && opening.reverse.side==-1 &&
         opening.reverse.entry_ticks==399925 && opening.reverse.sl_ticks==400005);
  assert(ledger.strategy_slot==1 && ledger.confirmed_full_sl_count==0 && ledger.position_count==1);
@@ -104,7 +104,11 @@ int main() {{
  assert(reports({args(partial)}) && f.entry.filled_steps==1 && f.entry.planned_steps==2 && f.entry.remainder_reconciled);
  assert(RecoveryStagePrimaryOpening(s,cfg,b,f,opening,ledger));
  assert(s.cycle.filled_steps==1 && s.cycle.actual_entry_ticks==399995 &&
-        opening.reverse.entry_ticks==400075 && opening.sl_required);
+        opening.reverse.entry_ticks==400075 && !opening.sl_required);
+ new_range(1,false);
+ assert(reports({args((buy[0],buy[1],buy[2].replace("3999.2000000000000000","0.0000000000000000")))}) &&
+        f.sl_ticks==0 && RecoveryStagePrimaryOpening(s,cfg,b,f,opening,ledger));
+ assert(s.live_sl==0 && s.initial_sl==399920 && opening.reverse.entry_ticks==399925 && !opening.sl_required);
  new_range(1,false);
  b.routed.serial++;
  assert(!reports({args(buy)}));

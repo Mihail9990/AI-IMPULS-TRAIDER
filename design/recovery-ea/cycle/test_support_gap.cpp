@@ -95,4 +95,44 @@ int main() {
  assert(RRReleaseSupportGapToReentry(s,gap,working,true));
  assert(s.phase==RR_ARM_REENTRY&&s.cycle.full_sl_count==4&&RRKnownEqual(s.opposite,working));
  assert(RRStage(s,cfg,0,0,action)&&action.kind==RR_REENTRY&&action.entry_ticks==400080);
+ // Gap in the single-stage route: fixed opposite was already consumed.
+ // The attached SL stays where the broker set it, and the next order is
+ // anchored to actual fill even when the two prices differ.
+ auto single=cfg;single.support_first_ticks=0;single.support_offset_ticks=0;
+ for(int side : {-1,1}) for(bool close_first : {false,true}) {
+   auto live=supported(single,side);
+   constexpr long planned=400000;
+   live.opposite_anchor_ticks=planned-side*80+side*3;
+   live.opposite.entry_ticks=live.opposite_anchor_ticks;
+   live.opposite.sl_ticks=live.opposite.entry_ticks+side*80;
+   auto fixed=live.opposite;
+   auto f=fill(live,fixed,604,fixed.entry_ticks+fixed.side*13);
+   auto c=close(live);c.reentry_distance=97;
+   RRSupportGap g{};RROpeningPair pair{};RRAction only{};
+   auto before_breakeven=live;before_breakeven.support_stage=1;
+   assert(!RRStartSupportGap(before_breakeven,g));
+   before_breakeven=live;before_breakeven.live_sl-=side;
+   assert(!RRStartSupportGap(before_breakeven,g));
+   assert(RRStartSupportGap(live,g));
+   auto mismatched=live;mismatched.opposite_anchor_ticks++;
+   assert(!RRSupportGapBound(mismatched,g));
+   if(close_first) {
+      assert(RRStageSupportGapClose(live,g,c));
+      auto k=live;auto r=g;
+      assert(RRReleaseSupportGapToReentry(k,r,fixed,true));
+      assert(RRStage(k,single,0,0,only)&&only.kind==RR_REENTRY);
+      assert(only.entry_ticks==planned+side*97&&k.opposite.ticket==fixed.ticket);
+      assert(RRStageSupportGapFill(live,g,fixed,f));
+   } else {
+      assert(RRStageSupportGapFill(live,g,fixed,f));
+      assert(RRStageSupportGapClose(live,g,c));
+   }
+   assert(RRAdvanceSupportGap(live,single,g,pair,only)==RR_GAP_NEXT_PAIR);
+   assert(!pair.sl_required&&pair.sl.kind==RR_NONE&&only.kind==RR_NONE);
+   assert(live.initial_sl==fixed.sl_ticks&&live.live_sl==fixed.sl_ticks);
+   assert(live.entry.ticket==0&&live.cycle.full_sl_count==4);
+   assert(pair.reverse.entry_ticks==f.entry.actual_entry_ticks-fixed.side*80);
+   assert(pair.reverse.sl_ticks==f.entry.actual_entry_ticks&&pair.reverse.entry_ticks!=fixed.sl_ticks);
+ }
+
 }

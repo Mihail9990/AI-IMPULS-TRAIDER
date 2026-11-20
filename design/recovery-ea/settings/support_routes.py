@@ -45,6 +45,6 @@ def support_settings_router(store: SupportStore, require_panel_session) -> APIRo
         except SettingsUnavailable:
             return response({"detail": "Настройки сопровождения недоступны."}, 503)
         except (ValueError, UnicodeError, RecursionError):
-            return response({"detail": "Неверные значения или шаг цены."}, 422)
+            return response({"detail": "Неверный порог или шаг цены."}, 422)
 
     return router

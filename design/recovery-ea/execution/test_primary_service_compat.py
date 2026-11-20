@@ -24,8 +24,7 @@ bool RecoveryStagePrimaryOpening(RRRangeState& next,const RRSettings& cfg,const 
  p.reverse.kind=RR_REVERSE;p.reverse.side=-1;
  p.reverse.entry_ticks=399939;p.reverse.sl_ticks=p.reverse.entry_ticks+cfg.initial_sl_ticks;
  ++p.reverse.serial;
- p.sl=next.pending;p.sl.kind=RR_INITIAL_SL;p.sl.sl_ticks=p.reverse.entry_ticks;++p.sl.serial;
- ++p.reverse.serial;
+ RRClearAction(p.sl);p.sl_required=false;
  ledger.scope=next.scope;
  return true;
 }
@@ -39,8 +38,8 @@ struct RecoveryPairSendResult{int count;};
 int sends=0;
 RecoveryPairSendState RecoveryDispatchOpeningPair(const RRRangeState& s,const RROpeningPair& p,
   const RecoveryIntentKey& sl,const RecoveryIntentKey& reverse,double,double,RecoveryPairSendResult& result){
- assert(s.phase==RR_ARM_REVERSE&&p.reserved&&p.sl.sl_ticks==p.reverse.entry_ticks);
- assert(sl.id!=reverse.id);
+ assert(s.phase==RR_ARM_REVERSE&&p.reserved&&!p.sl_required&&p.sl.kind==RR_NONE);
+ assert(sl.id.empty()&&!reverse.id.empty());
  ++sends;result.count=1;
  return RPS_AWAIT_VERIFIER;
 }

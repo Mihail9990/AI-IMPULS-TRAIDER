@@ -94,15 +94,15 @@ bool RecoveryPrimaryFillFold(const RRRangeState &s,const RRSettings &cfg,
  const long required=wanted.volume_steps-remaining;
 
  ulong position_ticket=0;
- long actual=0;
+ long actual=0,live_sl=0;
  for(int i=0;i<inventory.position_count;i++) {
     if(StringSplit(inventory.rows[i],9,f)!=9 || f[0]!="P")return false;
     if(f[1]!=position)continue;
-    long volume,sl,tp;
+    long volume,tp;
     if(position_ticket!=0 || !RecoveryAdoptionUnsigned(f[2],position_ticket) || position_ticket==0 ||
        f[3]!=magic || f[4]!=side || !RecoveryAdoptionUnits(f[5],b.volume_step,false,volume) ||
        volume!=required || !RecoveryAdoptionUnits(f[6],b.price_tick,false,actual) ||
-       !RecoveryAdoptionUnits(f[7],b.price_tick,false,sl) || sl!=wanted.sl_ticks ||
+       !RecoveryAdoptionUnits(f[7],b.price_tick,true,live_sl) ||
        !RecoveryAdoptionUnits(f[8],b.price_tick,true,tp) || tp!=0)return false;
  }
  if(position_ticket==0)return false;
@@ -128,7 +128,7 @@ bool RecoveryPrimaryFillFold(const RRRangeState &s,const RRSettings &cfg,
     weighted_difference+=part;
  }
  if(filled!=required || weighted_difference!=0)return false;
- out.position_ticket=position_ticket;out.sl_ticks=wanted.sl_ticks;
+ out.position_ticket=position_ticket;out.sl_ticks=live_sl;
  out.entry.generation=s.cycle.generation;out.entry.range_id=s.cycle.range_id;
  out.entry.expected_order=wanted.ticket;out.entry.executed_order=wanted.ticket;
  out.entry.position_id=b.history.position_identifier;out.entry.side=wanted.side;
@@ -172,8 +172,20 @@ bool RecoveryStagePrimaryOpening(RRRangeState &s,const RRSettings &cfg,
     filled.action=b.routed;filled.created_order=wanted.ticket;filled.terminal_verified=true;
     if(!RRConfirm(next,filled))return false;
  }
- if(!RRObserveFill(next,cfg,f) || !RRStageOpeningPair(next,cfg,pair) ||
-    !RRStartAlternation(next,0,chain))return false;
+ // The order's original protective SL and current position SL are independent
+ // facts. The next ordinary order is priced only from the actual fill.
+ if(next.phase!=RR_WAIT || !RRKnownEqual(next.entry,wanted) ||
+    next.pending.kind!=RR_NONE || f.working_other_ticket!=0 ||
+    !f.independently_verified || !f.entry.independently_verified ||
+    !f.entry.history_complete || !f.entry.remainder_reconciled ||
+    f.position_ticket==0 || f.sl_ticks<0 || f.sl_ticks>RC_MAX_UNITS || f.tp_ticks!=0 ||
+    f.entry.side!=wanted.side || f.entry.planned_steps!=wanted.volume_steps ||
+    !RCBoundedPositive(f.entry.actual_entry_ticks) || !RCApplyEntry(next.cycle,f.entry))return false;
+ next.position_ticket=f.position_ticket;next.initial_sl=wanted.sl_ticks;
+ next.live_sl=f.sl_ticks;next.live_tp=f.tp_ticks;
+ next.support_stage=0;RRClearKnown(next.entry);
+ if(!RRAfterActualEntryNoSL(next,cfg) || !RRStageOpeningPair(next,cfg,pair) ||
+    pair.sl_required || !RRStartAlternation(next,0,chain))return false;
  s=next;opening=pair;ledger=chain;
  return true;
 }

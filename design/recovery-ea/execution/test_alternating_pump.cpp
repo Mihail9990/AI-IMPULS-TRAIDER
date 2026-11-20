@@ -9,7 +9,7 @@ template<class T> void ZeroMemory(T &out){out=T{};}
 bool MathIsValidNumber(double v){return std::isfinite(v);}
 bool RCValidSide(int v){return v==1 || v==-1;}
 bool RCBoundedPositive(long v){return v>0;}
-enum {RR_NONE,RR_REVERSE,RR_ACTIVE};
+enum {RR_NONE,RR_REVERSE,RR_ACTIVE,RR_SUPPORT_SL};
 struct RRAction {int kind,side;long entry_ticks,sl_ticks,volume_steps,tp_ticks;};
 struct RRKnownOrder {ulong ticket;int side;long entry_ticks,sl_ticks,volume_steps;};
 struct RRRangeState {
@@ -18,8 +18,9 @@ struct RRRangeState {
  int support_stage,reentry_slot,phase;
  RRKnownOrder entry,retire,opposite;
  RRAction pending;
- long initial_sl;
+ long initial_sl,opposite_anchor_ticks;
 };
+long RROppositeAnchor(const RRRangeState &s){return s.opposite_anchor_ticks>0 ? s.opposite_anchor_ticks : s.initial_sl;}
 struct RROpeningPair {bool reserved,reverse_verified;RRAction reverse;ulong reverse_ticket;};
 bool RROpeningBound(const RRRangeState &,const RROpeningPair &p){return p.reserved;}
 bool RRActionEqual(const RRAction &a,const RRAction &b){return a.kind==b.kind && a.side==b.side && a.entry_ticks==b.entry_ticks && a.sl_ticks==b.sl_ticks && a.tp_ticks==b.tp_ticks && a.volume_steps==b.volume_steps;}
@@ -102,6 +103,10 @@ int main(){
  assert(step()==RAP_PROGRESS && req_exact==1);
  for(int k=0;k<5;k++)assert(step()==RAP_WAIT && !obs.accepted && req_exact==1 && req_hist==0);
  exact_ready=true;
+ // A support update arriving while the pump waits must not break the exact,
+ // unchanged opposite order. It is not evidence of any predecessor exit.
+ s.opposite_anchor_ticks=399930;s.initial_sl=399950;s.support_stage=2;
+ s.pending.kind=RR_SUPPORT_SL;
  assert(step()==RAP_PROGRESS && req_hist==0);
  assert(step()==RAP_PROGRESS && req_hist==1);
  for(int k=0;k<5;k++)assert(step()==RAP_WAIT && req_hist==1 && req_inv==0);
@@ -112,6 +117,7 @@ int main(){
  inv_ready=true;
  assert(step()==RAP_PROOF && obs.accepted && obs.position==9007199254740999ULL);
  assert(step()==RAP_STOPPED && !obs.accepted && req_exact==1 && req_hist==1 && req_inv==1);
+ s.pending.kind=RR_NONE;s.opposite_anchor_ticks=0;s.initial_sl=399930;s.support_stage=0;
 
  // Only new fixtures reuse tokens here to exercise isolated branches.
  p={};begin();publication_ok=false;

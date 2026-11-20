@@ -16,10 +16,10 @@ bool RRStageOpeningPair(RRRangeState &s,const RRSettings &cfg,RROpeningPair &pai
  if(pair.reserved || !RRValid(s,cfg) || s.pending.kind!=RR_NONE ||
     s.retire.ticket!=0 || s.entry.ticket!=0 || s.opposite.ticket!=0 ||
     s.cycle.active_order==0 || s.cycle.position_id==0 || s.position_ticket==0 ||
-    !RCValidSide(s.cycle.side) || !RCBoundedPositive(s.initial_sl))return false;
+    !RCValidSide(s.cycle.side) || !RCBoundedPositive(RROppositeAnchor(s)))return false;
  const bool sl_required=s.phase==RR_PROTECT;
- if(sl_required ? s.live_sl==s.initial_sl :
-    (s.phase!=RR_ARM_REVERSE || s.live_sl!=s.initial_sl)) return false;
+ if(sl_required ? (s.opposite_anchor_ticks!=0 || s.live_sl==s.initial_sl) :
+    (s.phase!=RR_ARM_REVERSE || (s.opposite_anchor_ticks==0 && s.live_sl!=s.initial_sl))) return false;
  const int slot=RCReverseSlot(s.cycle);
  if(slot==0 || s.action_serial>ULONG_MAX-(sl_required?2:1))return false;
 
@@ -36,7 +36,7 @@ bool RRStageOpeningPair(RRRangeState &s,const RRSettings &cfg,RROpeningPair &pai
     p.sl.serial=++serial;
  }
  p.reverse.kind=RR_REVERSE;
- if(!RRMakeEntry(cfg,-s.cycle.side,s.initial_sl,slot,p.reverse))return false;
+ if(!RRMakeEntry(cfg,-s.cycle.side,RROppositeAnchor(s),slot,p.reverse))return false;
  p.reverse.scope=s.scope;p.reverse.generation=s.cycle.generation;p.reverse.range_id=s.cycle.range_id;
  p.reverse.serial=++serial;
  // Block all regular actions/closures while the opening pair is outstanding.
@@ -54,13 +54,13 @@ bool RROpeningBound(const RRRangeState &s,const RROpeningPair &p) {
     p.reverse.kind!=RR_REVERSE || p.reverse.scope!=s.scope ||
     p.reverse.generation!=s.cycle.generation || p.reverse.range_id!=s.cycle.range_id ||
     p.reverse.serial==0 || p.reverse.serial!=s.action_serial ||
-    p.reverse.side!=-s.cycle.side || p.reverse.entry_ticks!=s.initial_sl ||
+    p.reverse.side!=-s.cycle.side || p.reverse.entry_ticks!=RROppositeAnchor(s) ||
     !RCBoundedPositive(p.reverse.entry_ticks) || !RCBoundedPositive(p.reverse.sl_ticks) ||
     !RCBoundedPositive(p.reverse.volume_steps) || p.reverse.stage!=0 ||
     p.reverse.order_ticket!=0 || p.reverse.position_id!=0 || p.reverse.position_ticket!=0 ||
     p.reverse.tp_ticks!=0 || (p.reverse_verified!=(p.reverse_ticket!=0)))return false;
  if(p.sl_required) {
-    return s.phase==RR_PROTECT && s.live_sl!=s.initial_sl &&
+    return s.phase==RR_PROTECT && s.opposite_anchor_ticks==0 && s.live_sl!=s.initial_sl &&
            p.sl.kind==RR_INITIAL_SL && RRActionEqual(s.pending,p.sl) &&
            p.sl.scope==s.scope && p.sl.generation==s.cycle.generation &&
            p.sl.range_id==s.cycle.range_id && p.sl.serial>0 &&
@@ -70,7 +70,7 @@ bool RROpeningBound(const RRRangeState &s,const RROpeningPair &p) {
            p.sl.sl_ticks==s.initial_sl && p.sl.tp_ticks==s.live_tp &&
            p.sl.stage==0 && p.sl.entry_ticks==0 && p.sl.volume_steps==0;
  }
- return s.phase==RR_ARM_REVERSE && s.live_sl==s.initial_sl &&
+ return s.phase==RR_ARM_REVERSE && (s.opposite_anchor_ticks!=0 || s.live_sl==s.initial_sl) &&
         p.sl.kind==RR_NONE && p.sl_verified && RRActionEqual(s.pending,p.reverse);
 }
 

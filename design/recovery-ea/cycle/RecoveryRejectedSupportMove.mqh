@@ -14,7 +14,8 @@ enum RRRejectedMoveResult { RR_REJECTED_MOVE_UNRESOLVED=0, RR_REJECTED_MOVE_NEW_
 
 // A definitive MODIFY rejection never permits cancellation/recreation of the old
 // order. If the independently proven original later fills, adopt its already
-// attached SL, not a replacement calculated from relative fill distance.
+// attached SL unchanged. In actual-entry mode the next opposite anchor is
+// independent of this position SL; the legacy fixture keeps the attached anchor.
 RRRejectedMoveResult RRAdvanceRejectedSupportMove(RRRangeState &s,const RRSettings &cfg,
       RRSupportRotation &rotation,const RRRejectedSupportMove &e,RROpeningPair &new_opposite) {
  if(new_opposite.reserved || !RRValid(s,cfg) || !RRSupportRotationBound(s,rotation) ||
@@ -44,9 +45,11 @@ RRRejectedMoveResult RRAdvanceRejectedSupportMove(RRRangeState &s,const RRSettin
  n.opposite=rotation.previous;RRClearKnown(n.retire);RRClearAction(n.pending);
  if(!RRApplySessionClose(n,e.predecessor_close) ||
     !RRObserveFill(n,cfg,e.successor)) return RR_REJECTED_MOVE_UNRESOLVED;
- n.initial_sl=e.successor.sl_ticks; // exclusively this documented exception
+ n.initial_sl=e.successor.sl_ticks;
  n.live_sl=e.successor.sl_ticks;
- RRAfterProtection(n);
+ if(rotation.actual_entry_only) {
+    if(!RRAfterActualEntryNoSL(n,cfg))return RR_REJECTED_MOVE_UNRESOLVED;
+ } else RRAfterProtection(n);
  if(RCReverseSlot(n.cycle)==0) {
     if(n.phase!=RR_ACTIVE)return RR_REJECTED_MOVE_UNRESOLVED;
     s=n;rotation.reserved=false;
@@ -55,7 +58,7 @@ RRRejectedMoveResult RRAdvanceRejectedSupportMove(RRRangeState &s,const RRSettin
  RROpeningPair pair;
  pair.reserved=false;
  if(!RRStageOpeningPair(n,cfg,pair) || pair.sl_required ||
-    pair.reverse.entry_ticks!=e.successor.sl_ticks) return RR_REJECTED_MOVE_UNRESOLVED;
+    pair.reverse.entry_ticks!=RROppositeAnchor(n)) return RR_REJECTED_MOVE_UNRESOLVED;
  s=n;rotation.reserved=false;new_opposite=pair;
  return RR_REJECTED_MOVE_NEW_OPPOSITE;
 }

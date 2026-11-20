@@ -12,7 +12,8 @@ struct RecoveryPrimaryOpenResult {
 
 // Called after the independent verifier reports have arrived. Read exact
 // evidence, commit the opening pair in the current session, then submit its
-// SL correction (if needed) and opposite STOP without waiting for SL ACK.
+// opposite STOP at the configured distance from the actual fill. The live
+// position's SL is observed, never changed merely to align the new trigger.
 bool RecoveryOpenVerifiedPrimary(
     const RecoveryPrimaryFillBinding &binding,const RecoverySessionLifecycle &session,
     const RecoverySessionContext &live,const RecoverySessionIntentScope &scope,
@@ -40,11 +41,9 @@ bool RecoveryOpenVerifiedPrimary(
    RROpeningPair pair=opening;
    RRAlternationLedger chain=ledger;
    if(!RecoveryStagePrimaryOpening(next,cfg,binding,fill,pair,chain))return false;
-   if(!RecoveryBuildSessionIntentKey(scope,pair.reverse,binding.price_tick,binding.volume_step,out.reverse_key) ||
-      !RecoveryIntentContextOK(out.reverse_key) ||
-      (pair.sl.kind!=RR_NONE &&
-       (!RecoveryBuildSessionIntentKey(scope,pair.sl,binding.price_tick,binding.volume_step,out.sl_key) ||
-        !RecoveryIntentContextOK(out.sl_key)))) return false;
+   if(pair.sl_required || pair.sl.kind!=RR_NONE ||
+      !RecoveryBuildSessionIntentKey(scope,pair.reverse,binding.price_tick,binding.volume_step,out.reverse_key) ||
+      !RecoveryIntentContextOK(out.reverse_key)) return false;
    range=next;opening=pair;ledger=chain;
    out.disposition=RecoveryDispatchOpeningPair(range,opening,out.sl_key,out.reverse_key,
                            binding.price_tick,binding.volume_step,out.receipts);

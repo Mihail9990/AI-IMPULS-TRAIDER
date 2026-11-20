@@ -1,16 +1,9 @@
 <!-- Include once in the authenticated settings panel; call wireSupportSettings. -->
 <form class="support-settings" aria-label="Перенос стоп-лосса RECOVERY">
   <label>
-    <input name="support_first_enabled" type="checkbox" checked>
-    Включить первый перенос SL
-  </label>
-  <label>
-    Порог первого переноса
-    <input name="support_first" type="text" inputmode="decimal" value="0.25">
-  </label>
-  <label>
     Порог переноса SL на цену входа
-    <input name="support_second" type="text" inputmode="decimal" value="0.40">
+    <input name="support_threshold" type="text" inputmode="decimal" value="0.40"
+           autocomplete="off" required>
   </label>
   <button type="submit">Сохранить</button>
 </form>

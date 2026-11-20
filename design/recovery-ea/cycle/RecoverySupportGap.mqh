@@ -9,7 +9,7 @@ struct RRSupportGap {
  ulong scope, position_ticket;
  RCRange before;
  int support_stage;
- long support_level,tp,initial_level;
+ long support_level,tp,initial_level,opposite_anchor;
  RRKnownOrder opposite;
  RCCloseCheckpoint close;
  RRFilled fill;
@@ -21,21 +21,24 @@ bool RRSupportGapBound(const RRRangeState &s,const RRSupportGap &g) {
         RCCPSameRange(g.before,s.cycle) && s.phase==RR_ACTIVE &&
         s.pending.kind==RR_NONE && s.support_stage>=1 && s.support_stage<=2 &&
         s.support_stage==g.support_stage && s.live_sl==g.support_level && s.live_tp==g.tp &&
-        s.initial_sl==g.initial_level && s.entry.ticket==0 && s.retire.ticket==0&&s.reentry_slot==0 &&
+        s.initial_sl==g.initial_level &&
+        RROppositeAnchor(s)==g.opposite_anchor && s.entry.ticket==0 && s.retire.ticket==0&&s.reentry_slot==0 &&
         RRKnownEqual(s.opposite,g.opposite);
 }
 bool RRStartSupportGap(const RRRangeState &s,RRSupportGap &out) {
  if(out.reserved || s.scope==0 || s.position_ticket==0 || s.cycle.position_id==0 ||
     s.cycle.active_order==0 || !RCValidSide(s.cycle.side) ||
     s.phase!=RR_ACTIVE || s.pending.kind!=RR_NONE || s.support_stage<1 || s.support_stage>2 ||
+    (s.opposite_anchor_ticks!=0 && (s.support_stage!=2 || s.live_sl!=s.cycle.actual_entry_ticks)) ||
     s.entry.ticket!=0 || s.retire.ticket!=0 || s.reentry_slot!=0 ||
     !RCBoundedPositive(s.live_sl) || !RCBoundedPositive(s.initial_sl) ||
     (s.live_sl-s.initial_sl)*s.cycle.side<=0 || s.opposite.ticket==0 ||
-    s.opposite.side!=-s.cycle.side || s.opposite.entry_ticks!=s.initial_sl ||
+    s.opposite.side!=-s.cycle.side || s.opposite.entry_ticks!=RROppositeAnchor(s) ||
     !RCBoundedPositive(s.opposite.sl_ticks) || !RCBoundedPositive(s.opposite.volume_steps))return false;
  out.reserved=true;out.have_close=false;out.have_fill=false;out.scope=s.scope;
  out.before=s.cycle;out.support_stage=s.support_stage;out.support_level=s.live_sl;
- out.tp=s.live_tp;out.initial_level=s.initial_sl;out.position_ticket=s.position_ticket;out.opposite=s.opposite;
+ out.tp=s.live_tp;out.initial_level=s.initial_sl;out.opposite_anchor=RROppositeAnchor(s);
+ out.position_ticket=s.position_ticket;out.opposite=s.opposite;
  return true;
 }
 bool RRStageSupportGapClose(const RRRangeState &s,RRSupportGap &g,const RCCloseCheckpoint &close) {
@@ -91,6 +94,14 @@ RRSupportGapResult RRAdvanceSupportGap(RRRangeState &s,const RRSettings &cfg,RRS
  if(!RRApplySessionClose(n,g.close) || n.phase!=RR_ARM_REENTRY ||
     !RRObserveFill(n,cfg,g.fill) || n.retire.ticket!=0 || n.reentry_slot!=0)
     return RR_GAP_UNRESOLVED;
+ if(cfg.support_first_ticks==0) {
+    // With no survivor (the exact fixed STOP has already filled), stage
+    // the next opposite from the new fill. Its attached SL is not moved.
+    if(g.support_stage!=2 || g.support_level!=g.before.actual_entry_ticks)
+       return RR_GAP_UNRESOLVED;
+    n.initial_sl=g.fill.sl_ticks;
+    if(!RRAfterActualEntryNoSL(n,cfg))return RR_GAP_UNRESOLVED;
+ }
  const bool final=RCReverseSlot(n.cycle)==0;
  if(final) {
     if(n.phase==RR_PROTECT) {

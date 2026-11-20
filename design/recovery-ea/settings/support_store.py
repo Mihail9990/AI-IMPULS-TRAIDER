@@ -42,8 +42,7 @@ def unique_json_pairs(pairs):
 
 
 def _fields(settings):
-    return {k: getattr(settings, k) for k in
-            ("support_first", "support_second", "support_first_enabled")}
+    return {"support_threshold": settings.support_threshold}
 
 
 class SupportStore:
@@ -83,24 +82,28 @@ class SupportStore:
                 raise ValueError("oversized file")
             doc = json.loads(payload.decode("utf-8"), object_pairs_hook=unique_json_pairs)
             if (not isinstance(doc, dict) or set(doc) != {"version", "revision", "settings"}
-                    or type(doc["version"]) is not int or doc["version"] != 1
+                    or type(doc["version"]) is not int
                     or type(doc["revision"]) is not int or doc["revision"] <= 0
-                    or not isinstance(doc["settings"], dict)
-                    or set(doc["settings"]) != set(_fields(SupportSettings()))):
+                    or not isinstance(doc["settings"], dict)):
                 raise ValueError("invalid settings file")
-            settings = SupportSettings(**doc["settings"])
-            # Check persisted types and numeric values without tying the file to
-            # today's market metadata. The real symbol grid is checked on use.
-            for name in ("support_first", "support_second"):
-                _positive_decimal(getattr(settings, name), name)
-            if type(settings.support_first_enabled) is not bool:
-                raise ValueError("invalid enabled state")
-            return SettingsSnapshot(doc["revision"], settings)
+            values = doc["settings"]
+            if doc["version"] == 2 and values.keys() == {"support_threshold"}:
+                threshold = values["support_threshold"]
+            elif doc["version"] == 1 and values.keys() == {
+                "support_first", "support_second", "support_first_enabled"
+            }:
+                # Retain the prior breakeven preference only; the removed
+                # first-stage fields no longer contribute to any projection.
+                threshold = values["support_second"]
+            else:
+                raise ValueError("invalid settings file format")
+            _positive_decimal(threshold, "support_threshold")
+            return SettingsSnapshot(doc["revision"], SupportSettings(threshold))
         except (TypeError, ValueError, UnicodeError, RecursionError) as exc:
             raise SettingsUnavailable("saved settings are invalid") from exc
 
     def _write(self, snapshot):
-        payload = {"version": 1, "revision": snapshot.revision,
+        payload = {"version": 2, "revision": snapshot.revision,
                    "settings": _fields(snapshot.settings)}
         temporary = None
         try:
@@ -136,7 +139,7 @@ class SupportStore:
 
     def save(self, body):
         if not isinstance(body, dict) or set(body) != {
-            "revision", "support_first", "support_second", "support_first_enabled"
+            "revision", "support_threshold"
         } or type(body["revision"]) is not int or body["revision"] < 0:
             raise ValueError("invalid settings edit")
         with self._lock:
@@ -148,8 +151,7 @@ class SupportStore:
                 raise SettingsConflict("settings revision changed")
             candidate = validate_support_edit(
                 {k: v for k, v in body.items() if k != "revision"},
-                generation_active=False, symbol_tick_size=context.symbol_tick_size,
-                current=current.settings)
+                generation_active=False, symbol_tick_size=context.symbol_tick_size)
             updated = current if candidate == current.settings else SettingsSnapshot(
                 current.revision + 1, candidate)
             if updated is not current:

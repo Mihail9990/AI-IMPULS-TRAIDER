@@ -22,9 +22,10 @@ int main() {
   assert(plan.next.ledger.strategy_slot==2&&plan.next.ledger.confirmed_full_sl_count==0);
   assert(!plan.next.ledger.positions[0].exit_recorded);
   const auto action=plan.next.opening.reverse;
-  assert(action.side==side&&action.entry_ticks==f.fill.sl_ticks);
-  assert(action.sl_ticks==action.entry_ticks-side*80);
-  assert(action.entry_ticks!=f.fill.entry.actual_entry_ticks+side*80);
+  assert(action.side==side&&action.entry_ticks==f.fill.entry.actual_entry_ticks+side*80);
+  assert(action.sl_ticks==f.fill.entry.actual_entry_ticks);
+  assert(action.entry_ticks!=f.fill.sl_ticks);
+  assert(plan.next.range.live_sl==f.fill.sl_ticks&&plan.next.range.initial_sl==f.executed_order.sl_ticks);
   assert(!RecoveryAlternatingDispatchView(current,42,action,view));
   auto stale=current;stale.revision++;
   assert(!RecoveryAlternatingPlanCurrent(stale,plan));

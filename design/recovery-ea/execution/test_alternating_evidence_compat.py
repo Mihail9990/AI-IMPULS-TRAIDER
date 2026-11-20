@@ -80,7 +80,8 @@ class AlternatingEvidenceCompat(unittest.TestCase):
           (erow(),hrows([D.replace("SELL\t0","SELL\t1")]),irows()),
           (erow(),hrows(),irows([])),
           (erow(),hrows(),irows([P], [O])),
-          (erow(),hrows(),irows([P.replace(SL,PRICE)])),
+          (erow(),hrows(),irows([P.replace(SL,"4000.1050000000000000")])),
+          (erow(),hrows(),irows([P[:-len(ZERO)]+SL])),
           (erow(),hrows(),irows([P.replace(f"\t{TICKET}\t", "\t83\t")])),
           (erow(),hrows(),irows([P.replace("\t700\t", "\t701\t")])),
           (erow(),hrows(seq=2),irows()),
@@ -115,6 +116,29 @@ int main() {{
            obs.predecessor_inventory_complete && !obs.predecessor_present && obs.fill.entry.planned_steps==2);
     assert(apply({json.dumps(erow())},{json.dumps(hrows([d1,d2]))},{json.dumps(irows([P,OLD]))}));
     assert(obs.predecessor_present && obs.predecessor_position_id==82 && obs.predecessor_remaining_steps==1);
+    assert(apply({json.dumps(erow())},{json.dumps(hrows())},{json.dumps(irows([P.replace(SL,PRICE)]))}));
+    assert(obs.fill.sl_ticks==399930 && obs.executed_order.sl_ticks==400010);
+    assert(apply({json.dumps(erow())},{json.dumps(hrows())},{json.dumps(irows([P.replace(SL,ZERO)]))}));
+    assert(obs.fill.sl_ticks==0 && obs.executed_order.sl_ticks==400010);
+    s.opposite_anchor_ticks=399930;s.initial_sl=399950;
+    assert(apply({json.dumps(erow())},{json.dumps(hrows())},{json.dumps(irows([P.replace(SL,ZERO)]))}));
+    assert(obs.executed_order.entry_ticks==399930 && obs.fill.sl_ticks==0);
+    s.opposite_anchor_ticks=399931;
+    assert(!apply({json.dumps(erow())},{json.dumps(hrows())},{json.dumps(irows())}));
+    s.opposite_anchor_ticks=0;s.initial_sl=399930;
+    s.support_stage=2;s.live_sl=400000;s.pending.kind=RR_SUPPORT_SL;
+    assert(apply({json.dumps(erow())},{json.dumps(hrows())},{json.dumps(irows())}));
+    assert(!obs.predecessor_present && obs.fill.entry.independently_verified);
+    assert(apply({json.dumps(erow())},{json.dumps(hrows())},{json.dumps(irows([P,OLD]))}));
+    assert(obs.predecessor_present && obs.predecessor_position_id==82);
+    s.pending.kind=RR_CANCEL;
+    assert(!apply({json.dumps(erow())},{json.dumps(hrows())},{json.dumps(irows())}));
+    s.pending.kind=RR_NONE;s.opposite_anchor_ticks=399930;
+    s.entry.ticket=999;
+    assert(!apply({json.dumps(erow())},{json.dumps(hrows())},{json.dumps(irows())}));
+    s.entry.ticket=0;s.reentry_slot=3;
+    assert(!apply({json.dumps(erow())},{json.dumps(hrows())},{json.dumps(irows())}));
+    s.reentry_slot=0;s.support_stage=0;s.opposite_anchor_ticks=0;
     {neg}
     b.verify_after=2;
     assert(!apply({json.dumps(erow())},{json.dumps(hrows())},{json.dumps(irows())}));

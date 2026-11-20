@@ -27,7 +27,7 @@ static RRRangeState staged(const RRSettings &cfg,int side,RRSupportRotation &p,i
  s.opposite={202,-side,400000-side*80,400000,cfg.lot_steps[count+1]};
  auto original=s.opposite;
  assert(RRStageSupportRotation(s,cfg,fill(s,s.entry,600,s.entry.entry_ticks+side*5,original.ticket),original,p));
- assert(p.sl_required&&p.move_required&&p.reserved);
+ assert(p.sl_required==(cfg.support_first_ticks>0)&&p.move_required&&p.reserved);
  return s;
 }
 static RCCloseCheckpoint closed(const RRRangeState &s,int reason=RC_SL) {
@@ -86,4 +86,15 @@ int main() {
  e={p.move,true,p.previous,closed(s,RC_MANUAL),fill(s,p.previous,601,p.previous.entry_ticks-15,0)};
  assert(RRAdvanceRejectedSupportMove(s,cfg,p,e,next)==RR_REJECTED_MOVE_NEW_OPPOSITE);
  assert(s.cycle.full_sl_count==4&&!next.sl_required);
+ auto single=cfg;single.support_first_ticks=0;single.support_offset_ticks=0;
+ p={};s=staged(single,-1,p);next={};
+ assert(p.actual_entry_only&&!p.sl_required);
+ const auto unedited=p.previous;
+ const long actual=unedited.entry_ticks+unedited.side*13;
+ e={p.move,true,unedited,closed(s),fill(s,unedited,602,actual,0)};
+ assert(RRAdvanceRejectedSupportMove(s,single,p,e,next)==RR_REJECTED_MOVE_NEW_OPPOSITE);
+ assert(!p.reserved&&!next.sl_required&&s.cycle.full_sl_count==5);
+ assert(s.live_sl==unedited.sl_ticks&&s.initial_sl==unedited.sl_ticks);
+ assert(next.reverse.entry_ticks==actual-unedited.side*80&&next.reverse.sl_ticks==actual);
+
 }

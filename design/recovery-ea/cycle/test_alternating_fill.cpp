@@ -69,16 +69,20 @@ int main() {
   assert(RRAdvanceAlternatingFill(s,cfg,opening,ledger,bad)==RR_ALT_UNRESOLVED);
   bad=f;bad.predecessor_position_id++;
   assert(RRAdvanceAlternatingFill(s,cfg,opening,ledger,bad)==RR_ALT_UNRESOLVED);
-  bad=f;bad.fill.sl_ticks=0;
+  bad=f;bad.fill.sl_ticks=-1;
   assert(RRAdvanceAlternatingFill(s,cfg,opening,ledger,bad)==RR_ALT_UNRESOLVED);
+  f.fill.sl_ticks=0; // A missing/non-confirmed broker SL does not move the next trigger.
   assert(RRAdvanceAlternatingFill(s,cfg,opening,ledger,f)==RR_ALT_NEXT_OPPOSITE);
   assert(ledger.strategy_slot==2&&ledger.confirmed_full_sl_count==0);
   assert(ledger.positions[0].detached&&!ledger.positions[0].exit_recorded);
   assert(ledger.positions[0].pending_at_handoff.kind==RR_INITIAL_SL&&ledger.positions[0].opening_at_handoff.reserved);
   assert(ledger.positions[0].observed_open_at_handoff&&ledger.positions[0].observed_remaining_at_handoff==1);
   assert(!opening.sl_required&&opening.reverse.side==start_side);
-  assert(opening.reverse.entry_ticks==f.fill.sl_ticks&&opening.reverse.sl_ticks==f.fill.sl_ticks-start_side*80);
-  assert(opening.reverse.entry_ticks!=f.fill.entry.actual_entry_ticks+start_side*80);
+  assert(s.initial_sl==f.executed_order.sl_ticks && s.live_sl==0);
+  assert(opening.reverse.entry_ticks==f.fill.entry.actual_entry_ticks+start_side*80);
+  assert(opening.reverse.sl_ticks==f.fill.entry.actual_entry_ticks);
+  assert(s.opposite_anchor_ticks==opening.reverse.entry_ticks && RROppositeAnchor(s)==opening.reverse.entry_ticks);
+  assert(opening.reverse.entry_ticks!=f.executed_order.sl_ticks);
   assert(RRAdvanceAlternatingFill(s,cfg,opening,ledger,f)==RR_ALT_UNRESOLVED);
   auto closed=closure(ledger,0);
   auto wrong=closed;wrong.proof.exit_stop_ticks++;
@@ -92,19 +96,42 @@ int main() {
   // Distinct current book route with exact positive effect and fixed anchor.
   assert(RRConfirmOpeningPair(s,opening,{opening.reverse,true,52})==RR_PAIR_CONFIRMED);
   f=evidence(s,opening,52,9007199254741002ULL,s.opposite.entry_ticks+5);
+  {
+    // A independently verified closure can arrive before the new filled
+    // reverse. Updating its accounting must not tear down range ownership.
+    auto already_closed=s;
+    auto next_opening=opening;
+    auto on_close_first=ledger;
+    assert(RRRecordAlternatingClose(on_close_first,closure(on_close_first,1))==RR_ALT_CLOSE_APPLIED);
+    assert(on_close_first.confirmed_full_sl_count==2);
+    assert(already_closed.cycle.position_id==s.cycle.position_id);
+    auto prove_fill=f;
+    prove_fill.predecessor_inventory_complete=true;
+    prove_fill.predecessor_present=false;
+    assert(RRAdvanceAlternatingFill(already_closed,cfg,next_opening,on_close_first,prove_fill)==RR_ALT_NEXT_OPPOSITE);
+    assert(on_close_first.confirmed_full_sl_count==2);
+    assert(next_opening.reverse.entry_ticks==prove_fill.fill.entry.actual_entry_ticks-prove_fill.fill.entry.side*80);
+  }
   s.support_stage=1;
-  assert(RRAdvanceAlternatingFill(s,cfg,opening,ledger,f)==RR_ALT_UNRESOLVED);
-  s.support_stage=0;s.reentry_slot=2;
+  s.live_sl=s.cycle.actual_entry_ticks;
+  s.pending.kind=RR_SUPPORT_SL; // In-flight unrelated modification must not gate ordinary fill.
+  s.reentry_slot=2;
   assert(RRAdvanceAlternatingFill(s,cfg,opening,ledger,f)==RR_ALT_UNRESOLVED);
   s.reentry_slot=0;
   assert(RRAdvanceAlternatingFill(s,cfg,opening,ledger,f)==RR_ALT_NEXT_OPPOSITE);
   assert(ledger.strategy_slot==3&&ledger.confirmed_full_sl_count==1);
+  assert(ledger.positions[1].pending_at_handoff.kind==RR_SUPPORT_SL);
+  assert(ledger.positions[1].last_confirmed_sl!=ledger.positions[1].planned_sl);
   for(int n=4;n<=24;n++) {
     assert(opening.reverse.volume_steps==cfg.lot_steps[n-1]);
     f=evidence(s,opening,(ulong)(50+n),(ulong)(1000+n),opening.reverse.entry_ticks+3);
     auto result=RRAdvanceAlternatingFill(s,cfg,opening,ledger,f);
-    assert(result==(n==24?RR_ALT_FINAL_PROTECTED:RR_ALT_NEXT_OPPOSITE));
+    assert(result==(n==24?RR_ALT_FINAL_NO_TRIGGER:RR_ALT_NEXT_OPPOSITE));
     assert(ledger.strategy_slot==n&&ledger.confirmed_full_sl_count==1);
+    if(n<24) {
+       assert(opening.reverse.entry_ticks==f.fill.entry.actual_entry_ticks-f.fill.entry.side*80);
+       assert(opening.reverse.sl_ticks==f.fill.entry.actual_entry_ticks);
+    }
   }
   assert(!opening.reserved&&s.phase==RR_ACTIVE&&RCReverseSlot(s.cycle)==0);
   assert(!RRStageOpeningPair(s,cfg,opening));

@@ -25,7 +25,7 @@ bool RecoveryAlternatingWanted(const RRRangeState &s,const RROpeningPair &openin
       const RecoveryAlternatingEvidenceBinding &b,RRKnownOrder &wanted) {
  if(s.scope==0 || s.scope!=b.scope || !RCValidSide(s.cycle.side) ||
     s.cycle.position_id==0 || s.cycle.active_order==0 || s.position_ticket==0 ||
-    s.support_stage!=0 || s.entry.ticket!=0 || s.retire.ticket!=0 || s.reentry_slot!=0 ||
+    s.entry.ticket!=0 || s.retire.ticket!=0 || s.reentry_slot!=0 ||
     !RecoveryAlternatingSameSession(b.exact.binding,b.history.binding) ||
     !RecoveryAlternatingSameSession(b.history.binding,b.inventory) ||
     b.exact.binding.nonce==b.history.binding.nonce || b.exact.binding.nonce==b.inventory.nonce ||
@@ -43,11 +43,12 @@ bool RecoveryAlternatingWanted(const RRRangeState &s,const RROpeningPair &openin
     wanted.entry_ticks=b.routed.entry_ticks; wanted.sl_ticks=b.routed.sl_ticks;
     wanted.volume_steps=b.routed.volume_steps;
  } else {
-    if(b.routed.kind!=RR_NONE || s.phase!=RR_ACTIVE || s.pending.kind!=RR_NONE ||
+    if(b.routed.kind!=RR_NONE || s.phase!=RR_ACTIVE ||
+       (s.pending.kind!=RR_NONE && s.pending.kind!=RR_SUPPORT_SL) ||
        s.opposite.ticket!=b.exact.order_ticket) return false;
     wanted=s.opposite;
  }
- return wanted.side==-s.cycle.side && wanted.entry_ticks==s.initial_sl &&
+ return wanted.side==-s.cycle.side && wanted.entry_ticks==RROppositeAnchor(s) &&
         RCBoundedPositive(wanted.entry_ticks) && RCBoundedPositive(wanted.sl_ticks) &&
         RCBoundedPositive(wanted.volume_steps);
 }
@@ -100,17 +101,17 @@ bool RecoveryAlternatingEvidenceFold(const RRRangeState &s,const RROpeningPair &
     !RecoveryAlternatingOrderTerms(f[3],f[4],f[6],f[7],f[8],f[9],f[10],wanted,b)) return false;
 
  ulong successor_ticket=0;
- long entry=0, predecessor_steps=0;
+ long entry=0, observed_sl=0, predecessor_steps=0;
  bool predecessor_present=false;
  for(int i=0;i<inventory.position_count;i++) {
     if(StringSplit(inventory.rows[i],9,f)!=9 || f[0]!="P") return false;
     if(f[1]==new_id) {
-       long vol,sl,tp;
+       long vol,tp;
        if(successor_ticket!=0 || f[2]==old_ticket || !RecoveryAdoptionUnsigned(f[2],successor_ticket) ||
           successor_ticket==0 || f[3]!=magic || f[4]!=side_text ||
           !RecoveryAdoptionUnits(f[5],b.volume_step,false,vol) || vol!=wanted.volume_steps ||
           !RecoveryAdoptionUnits(f[6],b.price_tick,false,entry) ||
-          !RecoveryAdoptionUnits(f[7],b.price_tick,false,sl) || sl!=wanted.sl_ticks ||
+          !RecoveryAdoptionUnits(f[7],b.price_tick,true,observed_sl) ||
           !RecoveryAdoptionUnits(f[8],b.price_tick,true,tp) || tp!=0) return false;
     } else if(f[1]==old_id) {
        if(predecessor_present || f[2]!=old_ticket || f[4]==side_text ||
@@ -149,7 +150,9 @@ bool RecoveryAlternatingEvidenceFold(const RRRangeState &s,const RROpeningPair &
  out.scope=b.scope;
  if(opening.reserved) { out.paired_intent=b.routed;out.paired_order_ticket=wanted.ticket; }
  out.executed_order=wanted;
- out.fill.position_ticket=successor_ticket;out.fill.sl_ticks=wanted.sl_ticks;
+ // The submitted SL is already proved by the E and H rows and belongs
+ // to executed_order. The live position can have a different SL or none.
+ out.fill.position_ticket=successor_ticket;out.fill.sl_ticks=observed_sl;
  out.fill.entry.generation=s.cycle.generation;out.fill.entry.range_id=s.cycle.range_id;
  out.fill.entry.expected_order=wanted.ticket;out.fill.entry.executed_order=wanted.ticket;
  out.fill.entry.position_id=b.history.position_identifier;out.fill.entry.side=wanted.side;

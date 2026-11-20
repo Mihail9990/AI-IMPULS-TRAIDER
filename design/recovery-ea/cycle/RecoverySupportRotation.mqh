@@ -5,6 +5,7 @@
 #define RR_MOVE_SUPPORT_OPPOSITE 7
 struct RRSupportRotation {
  bool reserved,sl_required,sl_verified,move_required,move_verified;
+ bool actual_entry_only; // single break-even mode modifies the survivor only
  ulong active_order,position_id,position_ticket;
  RRKnownOrder previous; // exact unchanged old order before modification
  RRAction sl,move;
@@ -36,7 +37,13 @@ bool RRStageSupportRotation(RRRangeState &s,const RRSettings &cfg,const RRFilled
  const long new_entry=n.initial_sl;
  const long new_order_sl=new_entry-other.side*cfg.initial_sl_ticks;
  if(!RCBoundedPositive(new_entry) || !RCBoundedPositive(new_order_sl))return false;
- p.sl_required=n.live_sl!=new_entry;p.sl_verified=!p.sl_required;
+ p.actual_entry_only=cfg.support_first_ticks==0;
+ if(p.actual_entry_only) {
+    // Keep the filled order's confirmed attached stop exactly as observed.
+    // Only the still-working ticket is recentered around the actual fill.
+    n.initial_sl=fill.sl_ticks;n.opposite_anchor_ticks=new_entry;n.phase=RR_ARM_REVERSE;
+ }
+ p.sl_required=!p.actual_entry_only && n.live_sl!=new_entry;p.sl_verified=!p.sl_required;
  p.move_required=(other.entry_ticks!=new_entry || other.sl_ticks!=new_order_sl);
  p.move_verified=!p.move_required;
  p.reserved=p.sl_required||p.move_required;
@@ -73,6 +80,10 @@ bool RRSupportRotationBound(const RRRangeState &s,const RRSupportRotation &p) {
     p.position_ticket!=s.position_ticket || s.entry.ticket!=0 || s.opposite.ticket!=0 ||
     !RRKnownEqual(s.retire,p.previous) || p.previous.ticket==0 ||
     p.previous.side!=-s.cycle.side || !RCBoundedPositive(p.previous.volume_steps))return false;
+ if(p.actual_entry_only) {
+    if(p.sl_required || !RCBoundedPositive(s.opposite_anchor_ticks) || s.live_sl!=s.initial_sl)
+       return false;
+ } else if(s.opposite_anchor_ticks!=0)return false;
  if(p.sl_required) {
     if(s.phase!=RR_PROTECT || s.live_sl==s.initial_sl || !RRActionEqual(s.pending,p.sl) ||
        p.sl.kind!=RR_INITIAL_SL || p.sl.serial==0 || p.sl.scope!=s.scope ||
@@ -89,14 +100,14 @@ bool RRSupportRotationBound(const RRRangeState &s,const RRSupportRotation &p) {
        p.move.serial==0 || p.move.serial!=s.action_serial ||
        (p.sl_required && p.sl.serial!=p.move.serial-1) ||
        p.move.order_ticket!=p.previous.ticket || p.move.side!=p.previous.side ||
-       p.move.volume_steps!=p.previous.volume_steps || p.move.entry_ticks!=s.initial_sl ||
+       p.move.volume_steps!=p.previous.volume_steps || p.move.entry_ticks!=RROppositeAnchor(s) ||
        p.move.sl_ticks!=s.cycle.actual_entry_ticks ||
        !RCBoundedPositive(p.move.entry_ticks) || !RCBoundedPositive(p.move.sl_ticks) ||
        (p.move.sl_ticks-p.move.entry_ticks)*p.move.side>=0 ||
        p.move.position_id!=0 || p.move.position_ticket!=0 || p.move.tp_ticks!=0 || p.move.stage!=0)
        return false;
  } else if(!p.move_verified || p.move.kind!=RR_NONE || !p.sl_required ||
-           p.sl.serial!=s.action_serial || p.previous.entry_ticks!=s.initial_sl ||
+           p.sl.serial!=s.action_serial || p.previous.entry_ticks!=RROppositeAnchor(s) ||
            p.previous.sl_ticks!=s.cycle.actual_entry_ticks)
     return false;
  return true;

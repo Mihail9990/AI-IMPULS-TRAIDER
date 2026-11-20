@@ -37,7 +37,7 @@ RRAlternatingResult RecoveryPreviewAlternating(const RecoveryAlternatingState &c
 // Check the current session revision before accepting a preview. The authenticated, normalized proof never enters the sender.
 bool RecoveryAlternatingPlanCurrent(const RecoveryAlternatingState &current,
                                    const RecoveryAlternatingPlan &plan) {
- return (plan.result==RR_ALT_NEXT_OPPOSITE || plan.result==RR_ALT_FINAL_PROTECTED) &&
+ return (plan.result==RR_ALT_NEXT_OPPOSITE || plan.result==RR_ALT_FINAL_NO_TRIGGER) &&
         plan.base_revision>0 && plan.base_revision<ULONG_MAX &&
         current.revision==plan.base_revision && plan.next.revision==plan.base_revision+1 &&
         current.range.scope==plan.scope && current.range.cycle.generation==plan.generation &&
@@ -56,7 +56,8 @@ bool RecoveryAlternatingDispatchView(const RecoveryAlternatingState &committed,
     const ulong outbox_revision,const RRAction &outbox_action,RRRangeState &shadow) {
  if(outbox_revision==0 || outbox_revision!=committed.revision ||
     !RRAltBound(committed.range,committed.ledger) || committed.opening.sl_required ||
-    outbox_action.kind!=RR_REVERSE || outbox_action.entry_ticks!=committed.range.live_sl)
+    committed.range.opposite_anchor_ticks==0 || outbox_action.kind!=RR_REVERSE ||
+    outbox_action.entry_ticks!=RROppositeAnchor(committed.range))
     return false;
  return RROpeningRequestState(committed.range,committed.opening,outbox_action,shadow);
 }

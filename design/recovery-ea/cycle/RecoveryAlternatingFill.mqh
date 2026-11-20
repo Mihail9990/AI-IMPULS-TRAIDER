@@ -32,7 +32,8 @@ struct RRAlternatingObservation {
  ulong predecessor_position_id;
  long predecessor_remaining_steps;
 };
-enum RRAlternatingResult { RR_ALT_UNRESOLVED=0,RR_ALT_NEXT_OPPOSITE=1,RR_ALT_FINAL_PROTECTED=2 };
+enum RRAlternatingResult { RR_ALT_UNRESOLVED=0,RR_ALT_NEXT_OPPOSITE=1,RR_ALT_FINAL_NO_TRIGGER=2,
+                            RR_ALT_FINAL_PROTECTED=RR_ALT_FINAL_NO_TRIGGER }; // compatibility alias, not evidence of protection
 enum RRAlternatingCloseResult { RR_ALT_CLOSE_UNRESOLVED=0,RR_ALT_CLOSE_APPLIED=1,
                                RR_ALT_CLOSE_DUPLICATE=2 };
 
@@ -69,15 +70,15 @@ bool RRAltBound(const RRRangeState &s,const RRAlternationLedger &a) {
 RRAlternatingResult RRAdvanceAlternatingFill(RRRangeState &s,const RRSettings &cfg,
        RROpeningPair &opening,RRAlternationLedger &ledger,const RRAlternatingObservation &e) {
  if(!RRValid(s,cfg) || !RRAltBound(s,ledger) || e.scope!=s.scope || ledger.strategy_slot>=24 ||
-    ledger.position_count>=24 || s.support_stage!=0 || s.retire.ticket!=0 ||
+    ledger.position_count>=24 || s.retire.ticket!=0 ||
     s.entry.ticket!=0 || s.reentry_slot!=0 || !e.fill.independently_verified ||
     !e.fill.entry.independently_verified || !e.fill.entry.history_complete ||
     !e.fill.entry.remainder_reconciled || e.fill.working_other_ticket!=0 ||
     e.fill.position_ticket==0 || e.fill.tp_ticks!=0 ||
     e.executed_order.ticket==0 || e.executed_order.ticket!=e.fill.entry.executed_order ||
     e.executed_order.ticket!=e.fill.entry.expected_order || e.executed_order.side!=-s.cycle.side ||
-    e.executed_order.side!=e.fill.entry.side || e.executed_order.entry_ticks!=s.initial_sl ||
-    e.executed_order.sl_ticks!=e.fill.sl_ticks || !RCBoundedPositive(e.fill.sl_ticks) ||
+    e.executed_order.side!=e.fill.entry.side || e.executed_order.entry_ticks!=RROppositeAnchor(s) ||
+    !RCBoundedPositive(e.executed_order.sl_ticks) || e.fill.sl_ticks<0 || e.fill.sl_ticks>RC_MAX_UNITS ||
     e.fill.entry.planned_steps!=e.executed_order.volume_steps ||
     e.fill.entry.filled_steps!=e.executed_order.volume_steps)return RR_ALT_UNRESOLVED;
  for(int i=0;i<ledger.position_count;i++)
@@ -94,7 +95,7 @@ RRAlternatingResult RRAdvanceAlternatingFill(RRRangeState &s,const RRSettings &c
        opening.reverse.entry_ticks!=e.executed_order.entry_ticks ||
        opening.reverse.sl_ticks!=e.executed_order.sl_ticks ||
        opening.reverse.volume_steps!=e.executed_order.volume_steps)return RR_ALT_UNRESOLVED;
- } else if(s.phase!=RR_ACTIVE || s.pending.kind!=RR_NONE ||
+ } else if(s.phase!=RR_ACTIVE || (s.pending.kind!=RR_NONE && s.pending.kind!=RR_SUPPORT_SL) ||
            !RRKnownEqual(s.opposite,e.executed_order))return RR_ALT_UNRESOLVED;
 
  RRRangeState n=s;
@@ -105,15 +106,16 @@ RRAlternatingResult RRAdvanceAlternatingFill(RRRangeState &s,const RRSettings &c
  if(!RCApplyEntry(n.cycle,e.fill.entry))return RR_ALT_UNRESOLVED;
  RRClearKnown(n.opposite);RRClearAction(n.pending);
  n.position_ticket=e.fill.position_ticket;n.support_stage=0;n.live_tp=0;
- n.live_sl=e.fill.sl_ticks;n.initial_sl=e.fill.sl_ticks;
- RRAfterProtection(n);
+ // Historical attachment and current broker SL are different facts.
+ n.initial_sl=e.executed_order.sl_ticks;n.live_sl=e.fill.sl_ticks;n.opposite_anchor_ticks=0;
+ if(!RRAfterActualEntryNoSL(n,cfg))return RR_ALT_UNRESOLVED;
 
  RROpeningPair follow;
  follow.reserved=false;
  const bool final=RCReverseSlot(n.cycle)==0;
  if(final) { if(n.phase!=RR_ACTIVE)return RR_ALT_UNRESOLVED; }
  else if(!RRStageOpeningPair(n,cfg,follow) || follow.sl_required ||
-         follow.reverse.entry_ticks!=e.fill.sl_ticks)return RR_ALT_UNRESOLVED;
+         follow.reverse.entry_ticks!=RROppositeAnchor(n))return RR_ALT_UNRESOLVED;
 
  int at=ledger.position_count-1;
  ledger.positions[at].last_confirmed_sl=s.live_sl;
@@ -130,7 +132,7 @@ RRAlternatingResult RRAdvanceAlternatingFill(RRRangeState &s,const RRSettings &c
  s=n;
  if(final)opening.reserved=false;
  else opening=follow;
- return final?RR_ALT_FINAL_PROTECTED:RR_ALT_NEXT_OPPOSITE;
+ return final?RR_ALT_FINAL_NO_TRIGGER:RR_ALT_NEXT_OPPOSITE;
 }
 
 // Optional history may arrive before or after strategy advancement. It affects

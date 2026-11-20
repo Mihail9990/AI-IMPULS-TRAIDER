@@ -53,7 +53,7 @@ bool RecoveryIntentContextOK(const RecoveryIntentKey& k) {
 int sends=0;
 RecoveryPairSendState RecoveryContinueOpeningPair(const RRRangeState& r,const RROpeningPair& p,
  const RecoveryIntentKey& k,double,double,RecoveryDispatchResult& out) {
- assert(RecoveryIntentContextOK(k)&&RROpeningBound(r,p)&&p.reverse.entry_ticks==r.live_sl);
+ assert(RecoveryIntentContextOK(k)&&RROpeningBound(r,p)&&p.reverse.entry_ticks==RROppositeAnchor(r));
  ++sends;out.status=1;return RPS_AWAIT_VERIFIER;
 }
 """
@@ -102,7 +102,7 @@ int main(){
    usable_hash=true;
    assert(RecoveryApplyVerifiedAlternating(ctx,s,pending,cfg,proof,.01,.01,result));
    assert(result.transition==RR_ALT_NEXT_OPPOSITE && result.dispatch==RPS_AWAIT_VERIFIER && sends==1);
-   assert(s.revision==8&&pending.action.entry_ticks==proof.fill.sl_ticks&&pending.action.side==side);
+   assert(s.revision==8&&pending.action.entry_ticks==proof.fill.entry.actual_entry_ticks+side*80&&pending.action.side==side);
    auto changed=pending.action;changed.sl_ticks++;
    RecoveryIntentKey changed_key,other_session,other_grid;
    assert(RecoveryBuildSessionIntentKey(ctx,changed,.01,.01,changed_key));
