@@ -1,6 +1,6 @@
 #property strict
-#property version "0.11"
-#include "RecoveryPriceStage.mqh"
+#property version "0.12"
+#include "RecoveryPriceCatchup.mqh"
 // Third EA, reads one observed position and the quote, then writes a hint to
 // the main EA's local mailbox. No orders, web commands or position mutations.
 input long ExpectedLogin=0;
@@ -21,8 +21,12 @@ struct PriceSubscription {
    bool active;
    PriceQuery query;
    RecoveryPricePeak peak;
+   long anchor, opened;
+   ulong cursor;
+   double volume;
 };
 PriceSubscription Subs[4];
+int CatchupSlot=0;
 bool PriceHex(const string token) {
    if(StringLen(token)!=32) return false;
    for(int i=0;i<32;i++)
@@ -111,7 +115,7 @@ bool PriceLoad(const string name,PriceQuery &query,const bool follow=false,const
    query.next_stage=follow ? (int)StringToInteger(f[14]) : 0;
    return true;
 }
-bool PricePosition(const PriceQuery &q,double &entry) {
+bool PricePositionLineage(const PriceQuery &q,double &entry,long &opened,double &volume) {
    long id,ticket,side;
    string symbol;
    if(!PriceSession() || !PositionSelectByTicket(q.ticket) ||
@@ -121,17 +125,34 @@ bool PricePosition(const PriceQuery &q,double &entry) {
       !PositionGetInteger(POSITION_TYPE,side) ||
       side!=(q.side==1 ? POSITION_TYPE_BUY : POSITION_TYPE_SELL) ||
       !PositionGetDouble(POSITION_PRICE_OPEN,entry) || !RecoveryPricePositive(entry) ||
-      PriceWire(entry)!=q.actual_entry) return false;
+      PriceWire(entry)!=q.actual_entry ||
+      !PositionGetInteger(POSITION_TIME_MSC,opened) || opened<=0 ||
+      !PositionGetDouble(POSITION_VOLUME,volume) || !RecoveryPricePositive(volume)) return false;
    return PriceSession();
 }
 int PriceSample(const PriceQuery &q,double &selected) {
-   double entry,check; MqlTick tick;
+   double entry,check,volume,check_volume; long opened,check_opened; MqlTick tick;
    selected=0.0;
-   if(!PricePosition(q,entry) || !SymbolInfoTick(ExpectedSymbol,tick) ||
-      !PricePosition(q,check) || check!=entry) return -1;
+   if(!PricePositionLineage(q,entry,opened,volume) || !SymbolInfoTick(ExpectedSymbol,tick) ||
+      !PricePositionLineage(q,check,check_opened,check_volume) ||
+      check!=entry || check_opened!=opened || check_volume!=volume) return -1;
    const int stage=RecoveryPriceStage(q.side,entry,tick.bid,tick.ask,StringToDouble(q.first),StringToDouble(q.second));
    if(stage>=0) selected=q.side==1 ? tick.bid : tick.ask;
    return stage;
+}
+bool PriceActivePosition(const int slot,double &entry) {
+   long opened; double volume;
+   return PricePositionLineage(Subs[slot].query,entry,opened,volume) &&
+          opened==Subs[slot].opened && volume==Subs[slot].volume;
+}
+bool PriceInitFollow(const int slot,const PriceQuery &q) {
+   MqlTick current; double entry,volume,check,check_volume; long opened,check_opened;
+   if(!PricePositionLineage(q,entry,opened,volume) || !SymbolInfoTick(ExpectedSymbol,current) ||
+      !PricePositionLineage(q,check,check_opened,check_volume) ||
+      entry!=check || opened!=check_opened || volume!=check_volume ||
+      !RecoveryPriceAnchor(opened,current.time_msc,Subs[slot].anchor,Subs[slot].cursor)) return false;
+   Subs[slot].opened=opened; Subs[slot].volume=volume;
+   return true;
 }
 bool PriceWrite(const PriceQuery &q,const int stage,const double selected) {
    if(!PriceSession()) return false;
@@ -172,13 +193,39 @@ bool PriceSame(const PriceQuery &a,const PriceQuery &b) {
 void PriceCapture() {
    for(int i=0;i<4;i++) {
       if(!Subs[i].active) continue;
-      double selected;
-      const int stage=PriceSample(Subs[i].query,selected);
-      RecoveryPriceAccumulate(Subs[i].peak,Subs[i].query.side,stage,selected);
+      double entry,check; MqlTick tick;
+      if(!PriceActivePosition(i,entry) || !SymbolInfoTick(ExpectedSymbol,tick) ||
+         tick.time_msc<=Subs[i].anchor || !PriceActivePosition(i,check) || check!=entry) continue;
+      const int side=Subs[i].query.side;
+      const int stage=RecoveryPriceStage(side,entry,tick.bid,tick.ask,
+                                       StringToDouble(Subs[i].query.first),StringToDouble(Subs[i].query.second));
+      RecoveryPriceAccumulate(Subs[i].peak,side,stage,side==1 ? tick.bid : tick.ask);
+   }
+}
+void PriceCatchupOne() {
+   // Bound terminal work to one history call per watcher event; the trading EA
+   // never waits for CopyTicks or calls it on its fill/opening path.
+   for(int attempt=0;attempt<4;attempt++) {
+      const int i=CatchupSlot;
+      CatchupSlot=(CatchupSlot+1)%4;
+      if(!Subs[i].active) continue;
+      double entry,check; MqlTick current;
+      if(!PriceActivePosition(i,entry) || !SymbolInfoTick(ExpectedSymbol,current) ||
+         current.time_msc<=Subs[i].anchor || (ulong)current.time_msc<Subs[i].cursor) continue;
+      MqlTick ticks[];
+      ResetLastError();
+      const int n=CopyTicks(ExpectedSymbol,ticks,COPY_TICKS_ALL,Subs[i].cursor,(uint)RECOVERY_PRICE_TICK_CAP);
+      const bool synchronized=GetLastError()==0;
+      if(n>0 && PriceActivePosition(i,check) && check==entry)
+         RecoveryPriceCatchupFold(ticks,n,synchronized,Subs[i].query.side,entry,
+            StringToDouble(Subs[i].query.first),StringToDouble(Subs[i].query.second),
+            Subs[i].anchor,current.time_msc,Subs[i].cursor,Subs[i].peak);
+      return;
    }
 }
 void OnTick() {
-   PriceCapture(); // A later retrace cannot lower a captured peak.
+   PriceCapture();
+   PriceCatchupOne();
 }
 void PriceFollowService() {
    for(int i=0;i<4;i++) {
@@ -188,7 +235,9 @@ void PriceFollowService() {
          Subs[i].active=false;
          continue;
       }
+      double exact_entry;
       if(RecoveryPriceReached(Subs[i].peak,Subs[i].query.next_stage) &&
+         PriceActivePosition(i,exact_entry) &&
          PriceWrite(Subs[i].query,Subs[i].peak.stage,Subs[i].peak.selected))
          Subs[i].active=false;
    }
@@ -208,6 +257,7 @@ void PriceFollowScan() {
          for(int i=0;i<4;i++) if(Subs[i].active && Subs[i].query.nonce==q.nonce) work=false;
          if(work && PriceLoad(q.nonce+".drop",drop,true,true) && PriceSame(q,drop)) work=false;
       }
+      if(work && !PriceInitFollow(slot,q)) work=false;
       if(work) {
          Subs[slot].query.nonce=q.nonce; Subs[slot].query.generation=q.generation;
          Subs[slot].query.actual_entry=q.actual_entry; Subs[slot].query.first=q.first; Subs[slot].query.second=q.second;
@@ -225,7 +275,8 @@ void PriceFollowScan() {
 void OnTimer() {
    if(!PriceSession()) { PriceCloseSearch(); return; }
    PriceFollowScan();
-   PriceCapture(); // initial sample even when MT5 has delivered no new tick
+   PriceCapture();
+   PriceCatchupOne();
    PriceFollowService();
    if(ScanHandle==INVALID_HANDLE) {
       ScanHandle=FileFindFirst(PriceBox+"\\*.watch",ScanName);
