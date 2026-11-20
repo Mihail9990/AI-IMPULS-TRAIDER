@@ -178,8 +178,50 @@ class TestHandoff(unittest.TestCase):
         winner = ('manual_wait' if results[0].status_code == 202 else 'manual_cancel')
         self.assertEqual(json.loads(self.command_file.read_text())['operation'], winner)
 
+    def test_configure_ranges_exact_envelope_and_status(self):
+        p = {'ranges': [{'range_id': 2, 'side': 'SELL', 'price': '3999.850'}]}
+        result = self.submit('configure_ranges', payload=p)
+        self.assertEqual(result.status_code, 202)
+        self.assertEqual(result.json()['status'], 'unknown')
+        command = json.loads(self.command_file.read_text())
+        self.assertEqual(command['payload'], p)
+        self.assertEqual(command['operation'], 'configure_ranges')
+        sha = command.pop('content_sha256')
+        self.assertEqual(digest(command), sha)
+        self.receipt('accepted')
+        self.assertEqual(self.submit('configure_ranges', payload=p).json()['status'], 'accepted')
+        self.assertEqual(self.poll().json()['status'], 'accepted')
+        for delta in ({'side': 'BUY'}, {'price': '3999.85'}, {'range_id': 1}):
+            changed = {'ranges': [dict(p['ranges'][0], **delta)]}
+            self.assertEqual(self.submit('configure_ranges', payload=changed).status_code, 409)
+
+    def test_configure_ranges_requires_confirmation_and_exact_payload(self):
+        r1 = {'range_id': 1, 'side': 'BUY', 'price': '4000.0'}
+        r2 = {'range_id': 2, 'side': 'SELL', 'price': '3999.85'}
+        p = {'ranges': [r1, r2]}
+        anonymous = TestClient(create_handoff_app(TOKEN, self.channel))
+        self.assertEqual(anonymous.post(f'{API}/configure_ranges', json=dict(self.req, payload=p)).status_code, 401)
+        self.assertEqual(self.submit('configure_ranges', confirmed=False, payload=p).status_code, 422)
+        self.assertEqual(self.submit('configure_ranges', payload={'ranges': [r1, r1]}).status_code, 422)
+        raw = json.dumps(dict(self.req, payload=p)).replace('"side": "BUY"', '"side":"BUY","side":"SELL"')
+        self.assertEqual(self.client.post(f'{API}/configure_ranges', content=raw).status_code, 422)
+        self.assertFalse(self.command_file.exists())
+        self.assertEqual(self.submit('configure_ranges', payload=p).status_code, 202)
+        self.assertEqual(json.loads(self.command_file.read_text())['payload'], p)
+
+    def test_invalid_range_payload_not_reported_as_published(self):
+        p = {'ranges': [{'range_id': 1, 'side': 'BUY', 'price': '4000.00'}]}
+        self.submit('configure_ranges', payload=p)
+        command = json.loads(self.command_file.read_text())
+        command['payload']['ranges'][0]['side'] = 'buy'
+        del command['content_sha256']
+        command['content_sha256'] = digest(command)
+        self.command_file.write_text(json.dumps(command))
+        self.assertEqual(self.poll().json()['reason'], 'command_unverified')
+
     def test_unsupported_and_invalid_commands(self):
-        self.assertEqual(self.submit('configure_ranges').status_code, 404)
+        self.assertEqual(self.submit('configure_ranges').status_code, 422)
+        self.assertEqual(self.submit('market').status_code, 404)
         self.assertEqual(self.submit(confirmed=1).status_code, 422)
         self.assertEqual(self.submit(request_id='insecure').status_code, 422)
         self.assertEqual(self.submit(payload={}).status_code, 422)

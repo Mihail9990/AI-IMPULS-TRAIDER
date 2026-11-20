@@ -14,6 +14,7 @@
 #include "../execution/RecoveryAlternatingFillHint.mqh"
 #include "../execution/RecoveryOwnerEvidence.mqh"
 #include "../execution/RecoveryOrdinaryEventLoop.mqh"
+#include "../execution/RecoveryPanelSessionApply.mqh"
 #include "../execution/RecoverySupportRotationDispatch.mqh"
 #include "../execution/RecoveryExactOrderEffect.mqh"
 #include "../execution/RecoveryPositionEffect.mqh"

@@ -42,8 +42,8 @@ Command fields (all required, no extras): version, scope_id, boot_id, context_id
 generation_id, command_id, created_at UTC, operation, payload, content_sha256.
 Time is diagnostic, not a command expiry or permission check. Validate live context,
 boot and strategy generation. Numeric strategy prices will be decimal strings with
-symbol digit validation when configure_ranges is specified. That command currently
-fails closed in Python, not guessed or partially implemented.
+symbol tick validation for configure_ranges. The Python sender preserves the input;
+the EA decoder rejects an off-grid value, rather than rounding it.
 
 State contains version, scope_id, boot_id, context_id, generation_id, written_at UTC seconds,
 mode (`ready`, `manual_wait`, `manual_cancel`, `unknown`), plus EA facts.
@@ -81,13 +81,15 @@ cancel a broker order or remove SL. Selection and adoption live in the EA.
 ranges, open positions, or pending broker orders. If adoption already happened, do not
 silently reinterpret it as a close/cancel trade command.
 
-`configure_ranges`: RESERVED; unavailable until strategy owner/EA author agree exact
-fields and transitions. Old commands do not arm a new EA session.
+`configure_ranges`: `{ranges:[{range_id:1,side:"BUY",price:"4000.00"}]}` or two
+entries with distinct IDs 1 and 2. Side is explicitly BUY or SELL; price is a
+positive plain decimal string. The current-session adapter stages the first
+STOP(s) from idle. Staging is not broker acceptance. Old sessions are never armed.
 
 ## Remaining release gates
 
-Agree MQL wire/parser, manual command semantics and configure payload; implement EA
-single-writer session integration; actual Windows ACL/reparse validation and atomic
+Connect the verified wire decoder and control adapter to the EA event loop and
+connect the browser form; implement full single-writer session integration; actual Windows ACL/reparse validation and atomic
 IO tests; broker-free lifecycle, fill and cancel race tests;
 independent safety review. Nothing in this folder changes production or authorizes
 live trading. This is a transport prototype, not an EA or completed trading system.

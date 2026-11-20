@@ -10,12 +10,12 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 if __package__:
-    from .channel import Channel, ProtocolError, VERSION, digest, ident
+    from .channel import Channel, ProtocolError, VERSION, digest, ident, validate_payload
 else:
-    from channel import Channel, ProtocolError, VERSION, digest, ident
+    from channel import Channel, ProtocolError, VERSION, digest, ident, validate_payload
 
 
-_PUBLIC = {'manual_wait', 'manual_cancel'}
+_PUBLIC = {'manual_wait', 'manual_cancel', 'configure_ranges'}
 _BOUND = ('boot_id', 'context_id', 'generation_id')
 _POST_FIELDS = frozenset(('request_id', 'expected_boot', 'expected_context',
                           'expected_generation', 'confirmed'))
@@ -40,7 +40,7 @@ def _pairs(items):
     return result
 
 
-async def _post(request: Request):
+async def _post(request: Request, operation: str):
     data = bytearray()
     async for chunk in request.stream():
         if len(data) + len(chunk) > _MAX_BODY:
@@ -48,12 +48,16 @@ async def _post(request: Request):
         data.extend(chunk)
     try:
         body = json.loads(data.decode('utf-8'), object_pairs_hook=_pairs)
-        if not isinstance(body, dict) or body.keys() != _POST_FIELDS:
+        fields = _POST_FIELDS | {'payload'} if operation == 'configure_ranges' else _POST_FIELDS
+        if not isinstance(body, dict) or body.keys() != fields:
             raise ProtocolError('invalid keys')
         if body['confirmed'] is not True:
             raise ProtocolError('confirmation required')
-        return tuple(_uuid(body[name]) for name in
-                     ('request_id', 'expected_boot', 'expected_context', 'expected_generation'))
+        payload = body.get('payload', {})
+        validate_payload(operation, payload)
+        binding = tuple(_uuid(body[name]) for name in
+                        ('request_id', 'expected_boot', 'expected_context', 'expected_generation'))
+        return (*binding, payload)
     except (ValueError, UnicodeError, RecursionError) as exc:
         raise HTTPException(422, 'Invalid EA command or missing confirmation') from exc
 
@@ -71,8 +75,9 @@ def _stored(channel: Channel, request_id: str, boot: str):
             or command['boot_id'] != boot):
         raise ProtocolError('invalid durable command identity')
     if (not isinstance(command['operation'], str) or command['operation'] not in _PUBLIC
-            or command['payload'] != {} or type(command['created_at']) is not int):
+            or type(command['created_at']) is not int):
         raise ProtocolError('invalid durable command content')
+    validate_payload(command['operation'], command['payload'])
     for field in _BOUND:
         _uuid(command[field])
     sha = command['content_sha256']
@@ -152,14 +157,14 @@ def create_handoff_app(token: str, channel: Channel) -> FastAPI:
     async def publish(operation: str, request: Request):
         if operation not in _PUBLIC:
             raise HTTPException(404, 'EA command not available')
-        args = await _post(request)
+        args = await _post(request, operation)
         return await run_in_threadpool(publish_once, operation, *args)
 
-    def publish_once(operation, request_id, boot, context, generation):
+    def publish_once(operation, request_id, boot, context, generation, payload):
         expected_binding = (boot, context, generation)
 
         def same(command):
-            return (command['operation'] == operation
+            return (command['operation'] == operation and command['payload'] == payload
                     and tuple(command[field] for field in _BOUND) == expected_binding)
 
         try:
@@ -174,7 +179,7 @@ def create_handoff_app(token: str, channel: Channel) -> FastAPI:
                 raise HTTPException(409, 'Request ID belongs to another command')
             return _result(channel, request_id, existing)
         try:
-            channel.publish(operation, {}, command_id=request_id,
+            channel.publish(operation, payload, command_id=request_id,
                             expected_boot=boot, expected_context=context,
                             expected_generation=generation, confirmed=True)
         except (OSError, ValueError, TypeError):

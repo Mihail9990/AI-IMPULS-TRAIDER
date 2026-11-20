@@ -65,15 +65,32 @@ def atomic_new(path, value):
         os.unlink(temporary)
 
 
+_PRICE = re.compile(r"(?:0|[1-9][0-9]{0,14})(?:\.[0-9]{1,16})?")
+
+
 def validate_payload(operation, payload):
-    if operation not in OPS or not isinstance(payload, dict): raise ProtocolError('unsupported command')
-    if operation == 'manual_wait':
-        if payload: raise ProtocolError('manual_wait takes no parameters')
-    elif operation == 'manual_cancel':
-        if payload: raise ProtocolError('manual_cancel takes no parameters')
-    else:
-        # Strategy parameters deliberately opaque until EA schema is agreed.
-        raise ProtocolError('configure_ranges reserved, not implemented')
+    if not isinstance(operation, str) or operation not in OPS or not isinstance(payload, dict):
+        raise ProtocolError('unsupported command')
+    if operation in {'manual_wait', 'manual_cancel'}:
+        if payload: raise ProtocolError(f'{operation} takes no parameters')
+        return
+    if payload.keys() != {'ranges'}:
+        raise ProtocolError('configure_ranges requires ranges')
+    ranges = payload['ranges']
+    if not isinstance(ranges, list) or not 1 <= len(ranges) <= 2:
+        raise ProtocolError('provide one or two exact-price triggers')
+    seen = set()
+    for row in ranges:
+        if not isinstance(row, dict) or row.keys() != {'range_id', 'side', 'price'}:
+            raise ProtocolError('each range requires range_id, side and price')
+        range_id, side, price = row['range_id'], row['side'], row['price']
+        if type(range_id) is not int or range_id not in (1, 2) or range_id in seen:
+            raise ProtocolError('each range id must be unique (1 or 2)')
+        if side not in ('BUY', 'SELL'):
+            raise ProtocolError('side must be BUY or SELL')
+        if not isinstance(price, str) or not _PRICE.fullmatch(price) or not re.search('[1-9]', price):
+            raise ProtocolError('price must be a positive plain decimal string')
+        seen.add(range_id)
 
 
 class Channel:

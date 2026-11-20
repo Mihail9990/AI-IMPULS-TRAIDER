@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import uuid
-from channel import Channel, ProtocolError, atomic_new, read_json
+from channel import Channel, ProtocolError, atomic_new, read_json, validate_payload
 
 def uid(): return str(uuid.uuid4())
 
@@ -49,9 +49,34 @@ class Tests(unittest.TestCase):
         self.assertEqual(self.channel.receipt(cmd)['status'],'accepted')
         receipt['boot_id']=uid();path.write_text(json.dumps(receipt))
         with self.assertRaises(ProtocolError): self.channel.receipt(cmd)
-    def test_reserved_configuration_denied(self):
-        with self.assertRaises(ProtocolError):
-            self.channel.publish('configure_ranges',{},command_id=uid(),expected_boot=self.boot,expected_context=self.context,expected_generation=self.generation,confirmed=True)
+    def test_range_config_accepts_boundaries_and_keeps_exact_text(self):
+        ranges = [{'range_id': 2, 'side': 'SELL', 'price': '0.0000000000000001'},
+                  {'range_id': 1, 'side': 'BUY', 'price': '999999999999999.0000000000000000'}]
+        cmd = self.channel.publish('configure_ranges', {'ranges': ranges}, command_id=uid(),
+                                   expected_boot=self.boot, expected_context=self.context,
+                                   expected_generation=self.generation, confirmed=True)
+        self.assertEqual(cmd['payload'], {'ranges': ranges})
+        self.assertEqual(self.channel.command_record(cmd['command_id'], boot_id=self.boot), cmd)
+
+    def test_range_config_bad_price_sides_id_count_and_fields(self):
+        base = {'range_id': 1, 'side': 'BUY', 'price': '4000.00'}
+        for field, values in {
+            'price': (4000, 4000.0, '0.000', '+1', '-1', '1e2', '01', '1.', '.1',
+                      '1,0', '1.0 ', '1234567890123456', '1.23456789012345678', '１'),
+            'side': ('buy', 'BUY_STOP', 'market', '', True, None, ['BUY']),
+            'range_id': (True, 1.0, '1', 0, 3, None),
+        }.items():
+            for value in values:
+                with self.subTest(field=field, value=value):
+                    with self.assertRaises(ProtocolError):
+                        validate_payload('configure_ranges', {'ranges': [dict(base, **{field: value})]})
+        for payload in ({}, {'ranges': []}, {'ranges': [base, base]},
+                        {'ranges': [base, dict(base, range_id=2), base]},
+                        {'ranges': [dict(base, line_id='abc')]},
+                        {'ranges': [base], 'market': True}, {'ranges': {}},
+                        {'ranges': [{k: v for k,v in base.items() if k != 'side'}]}):
+            with self.subTest(payload=payload), self.assertRaises(ProtocolError):
+                validate_payload('configure_ranges', payload)
     def test_cancel_is_only_for_manual_wait(self):
         args=dict(command_id=uid(),expected_boot=self.boot,expected_context=self.context,expected_generation=self.generation,confirmed=True)
         with self.assertRaises(ProtocolError): self.channel.publish('manual_cancel',{'range_ids':[1]},**args)
