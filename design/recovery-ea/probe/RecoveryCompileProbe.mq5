@@ -16,6 +16,8 @@
 #include "../execution/RecoveryOrdinaryEventLoop.mqh"
 #include "../execution/RecoveryPanelSessionApply.mqh"
 #include "../execution/RecoveryPanelMailbox.mqh"
+#include "../execution/RecoveryLiveSession.mqh"
+#include "../execution/RecoveryPrimaryService.mqh"
 #include "../execution/RecoverySupportRotationDispatch.mqh"
 #include "../execution/RecoveryExactOrderEffect.mqh"
 #include "../execution/RecoveryPositionEffect.mqh"
