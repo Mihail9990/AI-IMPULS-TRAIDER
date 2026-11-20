@@ -60,19 +60,21 @@ completed broker effect is inferred. Readers must bind the response to the
 full requested scope, expected chart, new nonce and launch tokens and reject
 malformed or incomplete records. The immutable response can be read directly
 from the terminal by the trading EA and separately by Python without forwarding,
-but an MQL consumer and the runtime wiring are **not** implemented here. Neither
+and the MQL response decoder is in `RecoveryInventoryReader.mqh`. The trading EA
+is **not yet wired** to this request/reply path. Neither
 consumer should delete a response while there is unresolved work.
 
 ## Offline verification
 
 ```console
 cd design/recovery-ea/verifier
-python -m unittest -v test_record.py
+python -m unittest -v test_record.py test_reader_compat.py
 ```
 
 The tests check the strict Python parser using synthetic files and statically
-check that the verifier source has no order mutation calls. These are not
+check that the verifier source has no order mutation calls. A C++ shim tests
+the MQL decoding logic against synthetic records, not terminal file I/O. These are not
 MetaEditor compilation or broker/terminal tests. Before release: compile in
 MetaEditor, run on a separate demo chart, test wrong identity, shutdown/restart,
 multiple chart instances, concurrent inventory changes and Windows file
-visibility, then integrate effect and historical evidence and the MQL reader.
+visibility, then integrate effect and historical evidence and connect the MQL decoder to the trader.
