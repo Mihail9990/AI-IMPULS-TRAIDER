@@ -1051,6 +1051,8 @@ class RecoveryStrategy:
         cause = leg["close"]["cause"]
         if any(state != "canceled" for state, _ in observations.values()):
             return False
+        if cause == "support" and set(observations) == {"reverse", "reentry"}:
+            return self._retire_canceled_support_pair(leg, observations)
         # Canceling an unfilled reverse explicitly ends a stopped-out chain.
         # A still-working reverse or its confirmed execution remains part of that chain.
         final_sl = cause == "full" and leg["rung"] == 24 and not observations
@@ -1076,6 +1078,42 @@ class RecoveryStrategy:
             epoch=uuid4().hex,
         )
         self.save()
+        return True
+
+    def _retire_canceled_support_pair(self, leg, observations):
+        s, b = self.s, self.b
+        checked(s["mode"] == "active" and not s["pending"] and not s["detached"]
+                and not leg.get("rung_parent") and not self.unresolved
+                and not s.get("interrupted_move"), "prior_exposure_still_open")
+        checked(not b.positions and not b.orders, "prior_exposure_still_open")
+        reverse = observations["reverse"][1]
+        reentry = observations["reentry"][1]
+        checked(reverse.ticket != reentry.ticket, "counterorder_identity")
+        for kind, order, side in (("reverse", reverse, opposite(leg["side"])),
+                                  ("reentry", reentry, leg["side"])):
+            item = leg["orders"][kind]
+            receipt = self._record(item["key"])
+            checked(receipt and receipt[1] == "accepted" and int(receipt[2]) == order.ticket
+                    and order.ticket == item["ticket"] and item["side"] == side,
+                    "unconfirmed_cleanup_owner")
+            request = json.loads(receipt[0])
+            checked(request["action"] == b.api.TRADE_ACTION_PENDING and request["symbol"] == b.symbol
+                    and request["magic"] == b.magic and request["type"] == order.type
+                    and units(request["volume"], b.step) == item["volume"]
+                    and 0 < order.time_setup_msc <= order.time_done_msc, "unconfirmed_cleanup_owner")
+        # _observe has verified both exact, wholly unfilled cancellations against
+        # independent order history. Confirm the exact position and a final flat inventory.
+        close = b.closed(leg, self._record_exit)
+        checked(close == leg["close"], "closed_evidence_changed")
+        b.refresh()
+        checked(not b.positions and not b.orders, "prior_exposure_still_open")
+        epoch = uuid4().hex
+        ready = dict(s, mode="ready", armed=False, leg=None, pending=None, epoch=epoch,
+                     floor=max(close["time"], reverse.time_done_msc, reentry.time_done_msc))
+        ready["last_support_pair_retirement"] = [
+            s["epoch"], leg["position_id"], reverse.ticket, reentry.ticket, epoch
+        ]
+        self.save(ready)
         return True
 
     def _cancel_closed_counter(self, leg, item):

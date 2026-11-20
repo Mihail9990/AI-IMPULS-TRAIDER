@@ -502,6 +502,104 @@ class StrategyTest(unittest.TestCase):
         self.tick()
         self.assertEqual(self.e.snapshot()["mode"], "manual_wait")
 
+    def _support_pair(self):
+        pos, reverse = self.adopt(1)
+        self.helper.breakeven(pos)
+        self.tick()
+        self.api.closep(pos, self.api.DEAL_REASON_SL, 100.03)
+        self.tick(3)
+        reentry = next(o for o in self.owned() if o.ticket != reverse.ticket)
+        self.assertEqual(self.e.s["leg"]["close"]["cause"], "support")
+        return pos, reverse, reentry
+
+    def _assert_pair_retired(self, pos, reverse, reentry, epoch, requests):
+        state = self.e.s
+        self.assertEqual((state["mode"], state["armed"], state["leg"], state["pending"], state["detached"]),
+                         ("ready", False, None, None, []))
+        self.assertNotEqual(state["epoch"], epoch)
+        self.assertEqual(state["last_support_pair_retirement"],
+                         [epoch, pos.identifier, reverse.ticket, reentry.ticket, state["epoch"]])
+        self.assertEqual(state["floor"], max(reverse.time_done_msc, reentry.time_done_msc))
+        self.assertEqual(len(self.api.requests), requests)
+        current = state["epoch"]
+        self.tick(2)
+        self.assertEqual(self.e.s["epoch"], current)
+        self.assertEqual(len(self.api.requests), requests)
+
+    def test_support_pair_canceled_reverse_first_stays_running_ready(self):
+        pos, reverse, reentry = self._support_pair()
+        epoch = self.e.s["epoch"]
+        count = len(self.api.requests)
+        self.api.cancel(reverse.ticket)
+        self.tick(2)
+        self.assertEqual(self.e.s["mode"], "active")
+        self.assertIn(reentry.ticket, self.api.o)
+        self.assertEqual(len(self.api.requests), count)
+        self.api.cancel(reentry.ticket)
+        self.tick(2)
+        self._assert_pair_retired(pos, reverse, reentry, epoch, count)
+        self.assertTrue(self.e.running)
+        self.api.market()
+        self.tick()
+        self.assertIsNone(self.e.s["leg"])
+        self.assertEqual(len(self.api.requests), count)
+
+    def test_support_pair_canceled_reentry_first_recovers_on_paused_restart(self):
+        pos, reverse, reentry = self._support_pair()
+        epoch = self.e.s["epoch"]
+        count = len(self.api.requests)
+        self.api.cancel(reentry.ticket)
+        self.tick()
+        self.assertIn(reverse.ticket, self.api.o)
+        self.e.close()
+        self.api.cancel(reverse.ticket)
+        self.helper.disagree = True
+        self.open()
+        self.assertEqual(self.e.s["epoch"], epoch)
+        self.helper.disagree = False
+        self.tick(2)
+        self._assert_pair_retired(pos, reverse, reentry, epoch, count)
+        self.assertFalse(self.e.running)
+
+    def test_support_pair_requires_exact_position_both_orders_and_empty_inventory(self):
+        pos, reverse, reentry = self._support_pair()
+        epoch = self.e.s["epoch"]
+        count = len(self.api.requests)
+        for o in reverse, reentry:
+            self.api.cancel(o.ticket)
+        for o in reverse, reentry:
+            del self.api.h[o.ticket]
+            self.tick()
+            self.assertEqual(self.e.s["epoch"], epoch)
+            self.api.h[o.ticket] = o
+            o.volume_current = 0
+            self.tick()
+            self.assertEqual(self.e.s["epoch"], epoch)
+            o.volume_current = o.volume_initial
+        self.helper.complete = False
+        self.tick()
+        self.assertEqual(self.e.s["epoch"], epoch)
+        self.helper.complete = True
+        foreign = self.api.pending(self.api.ORDER_TYPE_BUY_LIMIT, 80)
+        self.tick()
+        self.assertEqual(self.e.s["epoch"], epoch)
+        self.assertIn(foreign.ticket, self.api.o)
+        self.api.cancel(foreign.ticket)
+        self.tick()
+        self._assert_pair_retired(pos, reverse, reentry, epoch, count)
+
+    def test_canceled_support_alternative_cannot_retire_a_live_fill(self):
+        pos, reverse, reentry = self._support_pair()
+        epoch = self.e.s["epoch"]
+        count = len(self.api.requests)
+        self.api.cancel(reverse.ticket)
+        survivor = self.api.fill(reentry.ticket)
+        self.tick(2)
+        self.assertEqual(self.e.s["epoch"], epoch)
+        self.assertEqual(self.e.s["mode"], "active")
+        self.assertIn(survivor.ticket, self.api.p)
+        self.assertEqual(len(self.api.requests), count)
+
     def test_repeated_manual_exits_cleanup_only_own_trigger_and_adopt_early_next_market(self):
         pos, stop = self.adopt()
         unrelated = self.api.pending(self.api.ORDER_TYPE_SELL_STOP, 75)

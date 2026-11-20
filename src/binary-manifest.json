@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "build": "98fe241ccd57a411",
+  "build": "a58dcb94c49068e0",
   "files": {
     "app/control_host.py": "565fa90ed17bd8c96c3c0c38a933cc1be6153c9faf9b9d0f0033cad7593839ab",
     "app/control_process.py": "95aad911e277af7c7494c7039c6e4a6a9955133bad1153cee88ff7b480db829c",
@@ -10,7 +10,7 @@
     "app/recovery_book.py": "000be265d30d1f11221d36ea8a7e05d383d7adcd2cdc7e7881f266ed3d8a68bc",
     "app/recovery_desktop.pyw": "bc95d5d0b1832a9bad05f9399b323275afaa1a1a9577b984d771fe6d600068dd",
     "app/recovery_helpers.py": "51d8e34033f1e8fa1f5be032fd7cf0f0fc82d7d13537b884aadf66af38cc95a6",
-    "app/recovery_strategy.py": "1d420c07b06b9c5796829528de66d29f6dab1844f236469a1c3051364216b23b",
+    "app/recovery_strategy.py": "7e900bc76bc548b0b61200ff4791869bfb9eff6cdefdd4657600f6242d18db0e",
     "app/trade_wakeup.py": "392f45cf3184fc187c0ba556df3eb881464d536133e4531dc66ac35ef940a8f0",
     "helpers/RecoveryPythonSL.ex5": "ac936031c2e0f7ef411565d1592950ac80eaf607a5ad8cac9d2dc0f979319b02",
     "helpers/RecoveryPythonVerifier.ex5": "52a7fd31c8d5898bbe456be6807c8fa39e8675c077d95db96d520c878288e8d9",
@@ -21,6 +21,6 @@
     "Install.cmd": "8a6ee7a6f824bf41bec577e1e33d1b3eb84bec82cf7b5e83d8d7006e8cd61c4e",
     "install.py": "8daae2bde8aee4a2d1cf5be14b0c4f6794c71f1b62531f9f0c3d97b5292d371f",
     "package_spec.py": "2d5076f5e5e540c3942d9b49c048e876779d54a9e8816537763d6648bcee8394",
-    "README_RU.txt": "9537bebc998309230ff65a48a69aa570868b818a2249bd21d640a08792d44e70"
+    "README_RU.txt": "9e0f5358d6de66a2a1508081ec824efc18512b201bfdbbbf06f6159319901909"
   }
 }
