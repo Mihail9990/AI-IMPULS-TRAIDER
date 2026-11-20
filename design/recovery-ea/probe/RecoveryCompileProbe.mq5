@@ -5,6 +5,7 @@
 #include "../execution/RecoveryActionRequest.mqh"
 #include "../execution/RecoveryDispatch.mqh"
 #include "../execution/RecoveryOpeningDispatch.mqh"
+#include "../execution/RecoveryAlternatingDispatch.mqh"
 #include "../execution/RecoverySupportRotationDispatch.mqh"
 #include "../execution/RecoveryExactOrderEffect.mqh"
 #include "../execution/RecoveryPositionEffect.mqh"
