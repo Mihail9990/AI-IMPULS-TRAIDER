@@ -11,7 +11,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from local_settings import DEFAULT_SETTINGS, validate_settings
-from recovery_book import Broker, Wait, checked, units
+from recovery_book import Broker, CheckRejected, Wait, checked, units
 from recovery_helpers import HelperUnavailable
 
 
@@ -44,6 +44,10 @@ class RecoveryStrategy:
             self.db.execute(
                 "CREATE TABLE IF NOT EXISTS confirmed_exits(position TEXT PRIMARY KEY, evidence TEXT NOT NULL)"
             )
+            self.db.execute(
+                "CREATE TABLE IF NOT EXISTS modify_receipts(id TEXT PRIMARY KEY, retcode INTEGER NOT NULL,"
+                " received REAL NOT NULL, quote TEXT NOT NULL, phase TEXT NOT NULL)"
+            )
             row = self.db.execute("SELECT wire FROM owner_state WHERE k=1").fetchone()
             binding = [int(account), server, symbol, int(magic), helpers.scope]
             if row:
@@ -72,6 +76,7 @@ class RecoveryStrategy:
             self.bank = []
             self.distance = self.threshold = 0
             self.unresolved = False
+            self.move_wait = ""
             self.foreign = False
             self.run_id = self.s.setdefault("lease_id", uuid4().hex)
             self.save()
@@ -81,10 +86,12 @@ class RecoveryStrategy:
             self.ownership.close()
             raise
 
-    def save(self):
-        wire = json.dumps(self.s, sort_keys=True, separators=(",", ":"))
+    def save(self, state=None):
+        state = self.s if state is None else state
+        wire = json.dumps(state, sort_keys=True, separators=(",", ":"))
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO owner_state(k,wire) VALUES(1,?)", (wire,))
+        self.s = state
 
     def _grid(self, settings):
         b = self.b
@@ -129,7 +136,13 @@ class RecoveryStrategy:
         return self.available and time.monotonic() - self.last_read < 5
 
     def _can_start(self):
-        return not self.running and self._fresh() and not self.unresolved and not self.foreign
+        return (
+            not self.running
+            and self._fresh()
+            and not self.unresolved
+            and not self.foreign
+            and not self.s.get("interrupted_move")
+        )
 
     def _can_pause(self):
         return (
@@ -240,7 +253,7 @@ class RecoveryStrategy:
     def _record(self, key):
         return self.db.execute("SELECT wire,result,ticket FROM actions WHERE id=?", (key,)).fetchone()
 
-    def _effect(self, key, request, guard=None):
+    def _effect(self, key, request, guard=None, move_side=None):
         """Persist intent before broker dispatch. An uncertain call can only be observed."""
         wire = json.dumps(request, sort_keys=True, separators=(",", ":"))
         row = self._record(key)
@@ -248,7 +261,19 @@ class RecoveryStrategy:
             checked(row[0] == wire, "action_identity_changed")
             checked(row[1] == "accepted", "uncertain_broker_action")
             return int(row[2])
-        self.b.preflight(request, guard)
+        quote = self.b.move_quote(request, move_side) if move_side else ""
+        try:
+            self.b.preflight(request, guard)
+        except CheckRejected as exc:
+            if not move_side or exc.retcode != self.b.api.TRADE_RETCODE_INVALID_PRICE:
+                raise
+            with self.db:
+                self.db.execute("INSERT INTO actions VALUES(?,?,?,?)", (key, wire, "rejected_price", "0"))
+                self.db.execute(
+                    "INSERT INTO modify_receipts VALUES(?,?,?,?,?)",
+                    (key, int(exc.retcode), time.time(), quote, "check"),
+                )
+            raise Wait("move_rejection_recorded") from exc
         with self.db:
             self.db.execute("INSERT INTO actions VALUES(?,?,?,?)", (key, wire, "submitted", "0"))
         if guard:
@@ -270,19 +295,130 @@ class RecoveryStrategy:
         ticket = int(result.order or 0) if result is not None else 0
         if request["action"] == self.b.api.TRADE_ACTION_PENDING:
             accepted = accepted and ticket > 0
-        if accepted:
-            with self.db:
+        invalid = (
+            move_side and result is not None and result.retcode == self.b.api.TRADE_RETCODE_INVALID_PRICE
+        )
+        with self.db:
+            if move_side and result is not None:
                 self.db.execute(
-                    "UPDATE actions SET result='accepted',ticket=? WHERE id=?", (str(ticket), key)
+                    "INSERT INTO modify_receipts VALUES(?,?,?,?,?)",
+                    (key, int(result.retcode), time.time(), quote, "send"),
+                )
+            if accepted or invalid:
+                self.db.execute(
+                    "UPDATE actions SET result=?,ticket=? WHERE id=?",
+                    ("accepted" if accepted else "rejected_price", str(ticket), key),
                 )
         self.b.session()
+        if invalid:
+            raise Wait("move_rejection_recorded")
         checked(accepted, "uncertain_broker_action")
         return ticket
+
+    def _move_context(self, key, request):
+        leg = self.s["leg"]
+        item = (leg or {}).get("orders", {}).get("reverse")
+        if item and (item.get("move") or {}).get("key") == key:
+            creation = self._record(item["key"])
+            checked(
+                creation and creation[1] == "accepted" and int(creation[2]) == item["ticket"],
+                "move_binding_changed",
+            )
+            original = json.loads(creation[0])
+            checked(
+                original["action"] == self.b.api.TRADE_ACTION_PENDING
+                and original["symbol"] == self.b.symbol
+                and original["magic"] == self.b.magic
+                and self.b.side(original["type"]) == item["side"]
+                and units(original["volume"], self.b.step) == item["volume"],
+                "move_binding_changed",
+            )
+            return item, False
+        item = self.s["pending"]
+        if (
+            item
+            and request["order"] == item["ticket"]
+            and key == (item.get("move") or {}).get("key", f"{self.s['epoch']}:pending:{item['ticket']}")
+        ):
+            return item, True
+        raise Wait("move_binding_changed")
+
+    def _reconcile_move(self, key, request, prior):
+        b = self.b
+        item, manual = self._move_context(key, request)
+        move = item.get("move") or {"entry": item["entry"], "sl": item["sl"]}
+        checked(
+            (units(request["price"], b.tick), units(request["sl"], b.tick)) == (move["entry"], move["sl"])
+            and units(request["tp"], b.tick) == (item["tp"] if manual else 0),
+            "move_binding_changed",
+        )
+        state, moved, o = b.observe_move(request, item, manual)
+        if state == "working" and not moved:
+            if prior == "submitted":
+                raise Wait("awaiting_move_evidence")
+            return
+        # If a retry was definitively rejected, a final ticket can still prove
+        # its effective geometry. Preserve the actual server receipt separately.
+        result = "observed_target" if moved else "terminal_original"
+        if state == "filled" and not manual:
+            leg = self.s["leg"]
+            item["recovered_fill"] = o.position_id
+            live_ids = {p["position_id"] for p in b.verified_positions.values()}
+            # Once both positions have already disappeared while the MODIFY was
+            # unresolved, ordinary recovery must never create a retrospective STOP.
+            if o.position_id not in live_ids and leg["position_id"] not in live_ids:
+                self.s["interrupted_move"] = dict(key=key, ticket=o.ticket, successor=o.position_id)
+        with self.db:
+            self.db.execute("UPDATE actions SET result=?,ticket=? WHERE id=?", (result, str(o.ticket), key))
+            self.save()
+
+    def _modify(self, item, base, order, entry, sl, guard=None):
+        move = item.get("move")
+        if not move:
+            move = item["move"] = dict(key=base, entry=entry, sl=sl)
+            self.save()
+        checked((move["entry"], move["sl"]) == (entry, sl), "action_identity_changed")
+        key = move["key"]
+        request = self.b.modify(order, entry, sl)
+        row = self._record(key)
+        if row and row[1] == "rejected_price":
+            receipt = self.db.execute(
+                "SELECT received,quote FROM modify_receipts WHERE id=?", (key,)
+            ).fetchone()
+            attempt = move.get("attempt", 0)
+            checked(
+                receipt and time.time() - receipt[0] >= min(60, 2 ** min(attempt + 1, 6)),
+                "move_rejected_price",
+            )
+            current = self.b.move_quote(request, item["side"], admissible=True)
+            checked(current and current != receipt[1], "move_rejected_price")
+            move["attempt"] = attempt + 1
+            move["key"] = key = f"{base}:retry:{attempt + 1}"
+            move["retry_from"] = receipt[1]
+            self.save()
+
+        def exact_target():
+            if guard:
+                guard()
+            if move.get("attempt"):
+                current = self.b.move_quote(request, item["side"], admissible=True)
+                checked(current and current != move["retry_from"], "move_rejected_price")
+
+        self._effect(key, request, exact_target, move_side=item["side"])
 
     def _reconcile_intents(self):
         b = self.b
         api = b.api
-        for key, wire in self.db.execute("SELECT id,wire FROM actions WHERE result='submitted'").fetchall():
+        self.move_wait = ""
+        rows = self.db.execute("SELECT id,wire,result FROM actions WHERE result='submitted'").fetchall()
+        leg = self.s["leg"]
+        tracked = (leg or {}).get("orders", {}).get("reverse") or self.s["pending"] or {}
+        move = tracked.get("move")
+        if move:
+            row = self._record(move["key"])
+            if row and row[1] == "rejected_price":
+                rows.append((move["key"], row[0], row[1]))
+        for key, wire, prior in rows:
             q = json.loads(wire)
             ticket = 0
             ok = False
@@ -329,13 +465,10 @@ class RecoveryStrategy:
                     and units(p.tp, b.tick) == units(q["tp"], b.tick)
                 )
             elif q["action"] == api.TRADE_ACTION_MODIFY:
-                o = b.orders.get(q["order"])
-                ok = (
-                    o is not None
-                    and units(o.price_open, b.tick) == units(q["price"], b.tick)
-                    and units(o.sl, b.tick) == units(q["sl"], b.tick)
-                    and units(o.tp, b.tick) == units(q["tp"], b.tick)
-                )
+                try:
+                    self._reconcile_move(key, q, prior)
+                except (Wait, HelperUnavailable) as exc:
+                    self.move_wait = str(exc) if isinstance(exc, Wait) else "awaiting_move_evidence"
             elif q["action"] == api.TRADE_ACTION_REMOVE and q["order"] not in b.orders:
                 item = next(
                     (
@@ -355,8 +488,11 @@ class RecoveryStrategy:
                     self.db.execute(
                         "UPDATE actions SET result='accepted',ticket=? WHERE id=?", (str(ticket), key)
                     )
-        self.unresolved = bool(
-            self.db.execute("SELECT 1 FROM actions WHERE result!='accepted' LIMIT 1").fetchone()
+        self.unresolved = bool(self.move_wait) or bool(
+            self.db.execute(
+                "SELECT 1 FROM actions WHERE result NOT IN "
+                "('accepted','observed_target','terminal_original','rejected_price') LIMIT 1"
+            ).fetchone()
         )
         # A crash can occur after the receipt is committed but before the ticket reaches the cycle.
         leg = self.s["leg"]
@@ -367,7 +503,7 @@ class RecoveryStrategy:
                     item["ticket"] = int(row[2])
                     self.save()
 
-    def _lease(self):
+    def _lease(self, publish=True):
         b = self.b
         rows = []
         status = b.helpers.sl_status()
@@ -425,7 +561,7 @@ class RecoveryStrategy:
                 )
         signature = tuple((p["position_id"], p["ticket"], p["advance_ticks"]) for p in rows)
         now = time.monotonic()
-        if self.running and (signature != self.lease_signature or now - self.last_lease >= 1.0):
+        if self.running and publish and (signature != self.lease_signature or now - self.last_lease >= 1.0):
             b.helpers.register(rows, self.run_id)
             self.last_lease = now
             self.lease_signature = signature
@@ -437,17 +573,28 @@ class RecoveryStrategy:
                 self.b.refresh()
                 self.distance, self.threshold, self.bank = self._grid(self.s["settings"])
                 self._reconcile_intents()
+                hold = self.s.get("interrupted_move")
+                if hold:
+                    self.running = False
+                    self.lease_signature = None
                 self.foreign = self._foreign_managed()
-                self._lease()
+                if not hold:
+                    self._lease(publish=not (self.move_wait and not self.b.positions and not self.b.orders))
                 self.last_read = time.monotonic()
                 self.available = True
-                checked(not self.unresolved, "uncertain_broker_action")
+                checked(not self.unresolved, self.move_wait or "uncertain_broker_action")
                 checked(not self.foreign, "unbound_strategy_exposure")
-                self.reason = ""
-                if self.running:
-                    self._step()
+                if hold:
+                    # The public method takes the same RLock; it performs read-only
+                    # broker reconciliation and a conditional local transaction.
+                    if not self.retire_interrupted_move(self.s["epoch"], hold["ticket"]):
+                        raise Wait("interrupted_move_retirement")
                 else:
-                    self._reconcile_paused_close()
+                    self.reason = ""
+                    if self.running:
+                        self._step()
+                    else:
+                        self._reconcile_paused_close()
             except (Wait, HelperUnavailable) as exc:
                 self.reason = str(exc) if isinstance(exc, Wait) else "helper_observation_unavailable"
                 if self.reason in (
@@ -630,7 +777,7 @@ class RecoveryStrategy:
             )
             current = units(o.sl, b.tick)
             if current == 0:
-                self._effect(f"{s['epoch']}:pending:{o.ticket}", b.modify(o, p["entry"], p["sl"]))
+                self._modify(p, f"{s['epoch']}:pending:{o.ticket}", o, p["entry"], p["sl"])
             else:
                 checked(current == p["sl"], "pending_sl_changed")
             return
@@ -701,6 +848,18 @@ class RecoveryStrategy:
         v = next(
             (r for r in b.verified_positions.values() if r["position_id"] == broker_order.position_id), None
         )
+        if (
+            v is None
+            and leg["ticket"] not in b.positions
+            and item.get("recovered_fill") == broker_order.position_id
+        ):
+            self.s["interrupted_move"] = dict(
+                key=item["move"]["key"], ticket=item["ticket"], successor=broker_order.position_id
+            )
+            self.running = False
+            self.lease_signature = None
+            self.save()
+            raise Wait("interrupted_move_retirement")
         if v is None:
             v = b.retired_fill(broker_order, item)
         else:
@@ -718,7 +877,11 @@ class RecoveryStrategy:
         if not leg.get("close") and leg["ticket"] not in b.positions and not keep_rung:
             nxt["rung_parent"] = leg["position_id"]
         if remaining:
-            nxt["orders"]["reverse"] = remaining
+            # A surviving ticket may have served on earlier legs. Its observed
+            # geometry survives, but the next leg must own a new relocation.
+            nxt["orders"]["reverse"] = {
+                k: v for k, v in remaining.items() if k not in ("move", "recovered_fill")
+            }
             nxt["move_required"] = True
         self.s["leg"] = nxt
         self.save()
@@ -734,6 +897,115 @@ class RecoveryStrategy:
         self._detached()
         observations = {k: self._observe(item) for k, item in leg["orders"].items()}
         self._finish_closed(leg, observations)
+
+    def _interrupted_exit_time(self, leg, item, hold):
+        b = self.b
+        action = self._record(hold["key"])
+        checked(action and action[1] in ("observed_target", "terminal_original"), "awaiting_move_evidence")
+        request = json.loads(action[0])
+        self._move_context(hold["key"], request)
+        state, moved, order = b.observe_move(request, item, False)
+        checked(
+            state == "filled"
+            and order.position_id == hold["successor"]
+            and moved == (action[1] == "observed_target")
+            and order.position_id != leg["position_id"],
+            "awaiting_move_evidence",
+        )
+        parent = b.history_order(leg["anchor"])
+        checked(
+            parent
+            and parent.position_id == leg["position_id"]
+            and parent.magic == leg["magic"] == b.magic
+            and parent.state == b.api.ORDER_STATE_FILLED
+            and parent.volume_current == 0
+            and parent.type in (b.api.ORDER_TYPE_BUY_STOP, b.api.ORDER_TYPE_SELL_STOP)
+            and b.side(parent.type) == leg["side"]
+            and units(parent.volume_initial, b.step) == leg["volume_steps"]
+            and units(parent.sl, b.tick) == leg["initial"],
+            "entry_order_mismatch",
+        )
+        parent_open = b.retired_fill(
+            parent, dict(side=leg["side"], volume=leg["volume_steps"], sl=leg["initial"])
+        )
+        checked(parent_open["entry_ticks"] == leg["entry_ticks"], "entry_order_mismatch")
+        parent_close = b.closed(leg, self._record_exit)
+        child_open = b.retired_fill(order, dict(item, sl=units(order.sl, b.tick)))
+        child = self._leg(child_open, leg["rung"], units(order.sl, b.tick))
+        child_close = b.closed(child, self._record_exit)
+        checked(
+            parent_close and child_close and (not leg["close"] or leg["close"] == parent_close),
+            "closed_evidence_changed",
+        )
+        return max(parent_close["time"], child_close["time"])
+
+    def retire_interrupted_move(self, expected_epoch, expected_ticket):
+        """Explicit paused reconciliation. No broker write or helper lease is issued."""
+        with self.lock:
+            try:
+                s, b = self.s, self.b
+                last = s.get("last_interrupted_retirement")
+                if (
+                    not self.running
+                    and s["mode"] == "ready"
+                    and not s["armed"]
+                    and not s["leg"]
+                    and not s["pending"]
+                    and not s["detached"]
+                    and last == [expected_epoch, expected_ticket, s["epoch"]]
+                ):
+                    b.refresh()
+                    checked(not b.positions and not b.orders, "prior_exposure_still_open")
+                    return True
+                checked(
+                    not self.running
+                    and s["mode"] == "active"
+                    and s["epoch"] == expected_epoch
+                    and not s["pending"]
+                    and not s["detached"],
+                    "interrupted_move_retirement",
+                )
+                leg = s["leg"]
+                checked(
+                    leg
+                    and set(leg["orders"]) == {"reverse"}
+                    and leg.get("move_required")
+                    and leg["orders"]["reverse"]["ticket"] == expected_ticket,
+                    "move_binding_changed",
+                )
+                b.refresh()
+                checked(not b.positions and not b.orders, "prior_exposure_still_open")
+                self._reconcile_intents()
+                checked(not self.unresolved, self.move_wait or "uncertain_broker_action")
+                hold = s.get("interrupted_move") or {}
+                item = leg["orders"]["reverse"]
+                checked(
+                    hold.get("ticket") == expected_ticket
+                    and hold.get("key") == item.get("move", {}).get("key"),
+                    "interrupted_move_retirement",
+                )
+                last_exit = self._interrupted_exit_time(leg, item, hold)
+                b.refresh()
+                checked(not b.orders and not b.positions, "prior_exposure_still_open")
+                # Release the in-memory hold only after the durable retirement commits.
+                ready = dict(s)
+                ready.pop("interrupted_move")
+                ready.update(
+                    leg=None,
+                    pending=None,
+                    armed=False,
+                    mode="ready",
+                    epoch=uuid4().hex,
+                    floor=last_exit,
+                )
+                ready["last_interrupted_retirement"] = [expected_epoch, expected_ticket, ready["epoch"]]
+                self.save(ready)
+                self.lease_signature = None
+                self.reason = ""
+                return True
+            except (Wait, HelperUnavailable) as exc:
+                self.reason = str(exc) if isinstance(exc, Wait) else "awaiting_move_evidence"
+                return False
 
     def _finish_closed(self, leg, observations):
         cause = leg["close"]["cause"]
@@ -903,9 +1175,12 @@ class RecoveryStrategy:
             checked(status == "working", "survivor_not_working")
             if units(o.price_open, b.tick) != entry or units(o.sl, b.tick) != sl:
                 key = f"{s['epoch']}:{leg['position_id']}:move:{o.ticket}"
-                item["move"] = dict(key=key, entry=entry, sl=sl)
-                self.save()
-                self._effect(key, b.modify(o, entry, sl))
+
+                def guard():
+                    b.guard_live(leg)
+                    b.guard_counter(item)
+
+                self._modify(item, key, o, entry, sl, guard)
                 raise Wait("awaiting_survivor_move")
             item.update(entry=entry, sl=sl)
             leg["move_required"] = False

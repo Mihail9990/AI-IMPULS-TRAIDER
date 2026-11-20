@@ -1,16 +1,16 @@
 {
   "format": 1,
-  "build": "1693752a53da9477",
+  "build": "c89c953f211f01bb",
   "files": {
     "app/control_host.py": "565fa90ed17bd8c96c3c0c38a933cc1be6153c9faf9b9d0f0033cad7593839ab",
     "app/control_process.py": "95aad911e277af7c7494c7039c6e4a6a9955133bad1153cee88ff7b480db829c",
     "app/ipc_files.py": "840b82980e04087c96e9edaf48e262ba03af70b256d801f123f116e2f63677ba",
     "app/local_settings.py": "862c1ef0f9ed9295a7a5aa7b0678e5573fd2ce964c451fcf463a14c4a312f617",
     "app/python_supervisor.py": "dc323345d5a6fa0bd764a861810b8b3b3f3308f836b908a2210cb22effa2a4da",
-    "app/recovery_book.py": "ea6f931a8eec3e1089361c9e660e50611c7b9bd7843ded3de2d55550afefa987",
-    "app/recovery_desktop.pyw": "3cea5f48cc6f07c5634dce3a5ef9ab8233c5da9b2ba464344a9849cdfd49efae",
+    "app/recovery_book.py": "98a4c4434ed9e9541ff81da7b4e40f286e39ade6171ac5b8e872ea9cad83380c",
+    "app/recovery_desktop.pyw": "3560fc5e72596a4e5d7a9f6b148cd3bbee93f605cdc1b6d2d2e5b4c99f986fe9",
     "app/recovery_helpers.py": "86927f68bbdad282b34a1c50a12b1587ad3eacfb4220ec414dfd98f85abab89e",
-    "app/recovery_strategy.py": "5bcbd0128d9df21a0842d1fb1767bf4c5365e85bd94cfe8dadc32562037e4508",
+    "app/recovery_strategy.py": "9180a0aa9685da2a7ba7ea293acdfa7c783c8bf80ef8003683a644d673d7ef72",
     "app/trade_wakeup.py": "392f45cf3184fc187c0ba556df3eb881464d536133e4531dc66ac35ef940a8f0",
     "helpers/RecoveryPythonSL.ex5": "d2511d8572f636b71cb48fd30598f0bdac623488a36a775fcf814dcf43621e36",
     "helpers/RecoveryPythonVerifier.ex5": "52a7fd31c8d5898bbe456be6807c8fa39e8675c077d95db96d520c878288e8d9",
@@ -21,6 +21,6 @@
     "Install.cmd": "8a6ee7a6f824bf41bec577e1e33d1b3eb84bec82cf7b5e83d8d7006e8cd61c4e",
     "install.py": "f334ece7cd4b6e85ac337683eb64c348751824490c48ce1d1fbc8032df042034",
     "package_spec.py": "2d5076f5e5e540c3942d9b49c048e876779d54a9e8816537763d6648bcee8394",
-    "README_RU.txt": "53ed451ee52359be99b3dbee730d9ce21922b48408827bac2096d8d4160eba89"
+    "README_RU.txt": "0368e225ecb7d39e2b77200ee9f00680b112c17c12f57d6edfc89d382cea67af"
   }
 }

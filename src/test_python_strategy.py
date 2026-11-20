@@ -32,6 +32,7 @@ class Native:
     ORDER_STATE_FILLED = 4
     TRADE_RETCODE_DONE = 10009
     TRADE_RETCODE_PLACED = 10008
+    TRADE_RETCODE_INVALID_PRICE = 10015
     TRADE_ACTION_PENDING = 5
     TRADE_ACTION_REMOVE = 8
     TRADE_ACTION_MODIFY = 7
@@ -50,6 +51,8 @@ class Native:
         self.lost = False
         self.checkcode = 0
         self.external = True
+        self.quote = N(bid=100.00, ask=100.02)
+        self.move_result = None
 
     def account_info(self):
         return N(login=17, server="test", margin_mode=2, trade_allowed=True, trade_expert=True)
@@ -58,7 +61,18 @@ class Native:
         return N(connected=True, trade_allowed=True, tradeapi_disabled=not self.external)
 
     def symbol_info(self, s):
-        return N(trade_tick_size=0.01, volume_step=0.01, volume_min=0.01, volume_max=5.00)
+        return N(
+            trade_tick_size=0.01,
+            volume_step=0.01,
+            volume_min=0.01,
+            volume_max=5.00,
+            point=0.01,
+            trade_stops_level=2,
+            trade_freeze_level=0,
+        )
+
+    def symbol_info_tick(self, symbol):
+        return self.quote
 
     def next(self):
         self.n += 1
@@ -199,6 +213,8 @@ class Native:
         elif q["action"] == 6:
             self.p[q["position"]].sl = q["sl"]
         elif q["action"] == 7:
+            if self.move_result is not None:
+                return N(retcode=self.move_result, order=0)
             o = self.o[q["order"]]
             o.price_open = q["price"]
             o.sl = q["sl"]
@@ -841,6 +857,208 @@ class StrategyTest(unittest.TestCase):
         self.api.closep(p, 4)
         self.tick()
         self.assertEqual(self.e.s["detached"], [])
+
+    def episode_at_rejected_move(self, legacy=False, lost_after_apply=False, check_reject=False):
+        self.arm()
+        p = self.api.market(0, 3526.43)
+        self.tick(4)
+        for _ in range(6):
+            reverse = self.owned()[0]
+            self.api.closep(p, 4)
+            p = self.api.fill(reverse.ticket)
+            self.tick(4)
+        self.assertEqual(self.e.snapshot()["step"], 7)
+        reverse = self.owned()[0]
+        self.helper.breakeven(p)
+        self.tick()
+        self.api.closep(p, 4)
+        self.tick(3)
+        old = next(o for o in self.owned() if o.ticket != reverse.ticket)
+        self.assertEqual((old.price_open, old.sl, old.volume_initial), (3527.23, 3526.43, 0.02))
+        parent = self.api.fill(reverse.ticket, 3525.02)
+        self.tick()
+        self.api.quote = N(bid=3526.03, ask=3526.05)
+        self.api.move_result = None if lost_after_apply else self.api.TRADE_RETCODE_INVALID_PRICE
+        if check_reject:
+            self.api.checkcode = self.api.TRADE_RETCODE_INVALID_PRICE
+        self.api.lost = lost_after_apply
+        self.tick()
+        key = self.e.s["leg"]["orders"]["reverse"]["move"]["key"]
+        self.assertEqual(self.e._record(key)[1], "submitted" if lost_after_apply else "rejected_price")
+        if legacy:
+            with self.e.db:
+                self.e.db.execute("UPDATE actions SET result='submitted',ticket='0' WHERE id=?", (key,))
+                self.e.db.execute("DELETE FROM modify_receipts WHERE id=?", (key,))
+        return parent, old, key
+
+    def test_exact_incident_paused_retirement_only_after_two_complete_histories(self):
+        parent, survivor, key = self.episode_at_rejected_move(legacy=True)
+        self.api.closep(parent, 4, 3526.52)
+        child = self.api.fill(survivor.ticket, 3527.44)
+        self.api.closep(child, 4, 3526.45)
+        self.e.close()
+        writes = len(self.api.requests)
+        self.helper.complete = False
+        self.open()
+        self.assertFalse(self.e.running)
+        epoch = self.e.s["epoch"]
+        self.assertFalse(self.e.control("start"))
+        self.assertFalse(self.e.retire_interrupted_move(epoch, survivor.ticket))
+        self.assertEqual(self.e._record(key)[1], "terminal_original")
+        self.helper.complete = True
+        self.assertFalse(self.e.retire_interrupted_move("other", survivor.ticket))
+        self.assertFalse(self.e.retire_interrupted_move(epoch, survivor.ticket + 1))
+        foreign = self.api.pending(2, 3500)
+        self.assertFalse(self.e.retire_interrupted_move(epoch, survivor.ticket))
+        self.api.cancel(foreign.ticket)
+        import sqlite3
+
+        self.e.db.execute("""CREATE TRIGGER fail_retirement BEFORE INSERT ON owner_state
+            WHEN json_extract(NEW.wire,'$.mode')='ready' BEGIN SELECT RAISE(ABORT,'test rollback'); END""")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.e.retire_interrupted_move(epoch, survivor.ticket)
+        self.assertEqual(self.e.s["epoch"], epoch)
+        self.assertEqual(self.e.s["interrupted_move"]["ticket"], survivor.ticket)
+        self.e.db.execute("DROP TRIGGER fail_retirement")
+        self.assertTrue(self.e.retire_interrupted_move(epoch, survivor.ticket))
+        result = self.e.tick()
+        self.assertNotEqual(result["strategy_epoch"], epoch)
+        self.assertFalse(result["running"] or result["market_rearm_enabled"])
+        self.assertEqual(result["mode"], "ready")
+        self.assertTrue(self.e.retire_interrupted_move(epoch, survivor.ticket))
+        self.assertEqual(len(self.api.requests), writes)
+        for pid in (parent.identifier, child.identifier):
+            self.assertTrue(
+                self.e.db.execute(
+                    "SELECT evidence FROM confirmed_exits WHERE position=?", (str(pid),)
+                ).fetchone()
+            )
+
+    def test_invalid_price_retry_needs_new_admissible_quote_and_preserves_ticket(self):
+        from unittest.mock import patch
+
+        parent, old, key = self.episode_at_rejected_move()
+        feedback = self.e.db.execute(
+            "SELECT retcode,received,quote FROM modify_receipts WHERE id=?", (key,)
+        ).fetchone()
+        self.assertEqual(feedback[0], 10015)
+        self.assertEqual(self.e.reason, "move_rejection_recorded")
+        writes = len(self.api.requests)
+        self.tick(3)
+        self.assertEqual(self.e.reason, "move_rejected_price")
+        with patch("recovery_strategy.time.time", return_value=feedback[1] + 10):
+            self.tick(2)
+            self.api.quote = N(bid=3525.80, ask=3525.83)
+            self.tick(2)
+            self.assertEqual(len(self.api.requests), writes)
+            self.api.move_result = None
+            self.api.quote = N(bid=3525.60, ask=3525.62)
+            self.tick(3)
+        self.assertEqual(len(self.api.requests), writes + 1)
+        self.assertEqual((old.price_open, old.sl, old.volume_current), (3525.82, 3525.02, 0.02))
+        self.assertIn(old.ticket, self.api.o)
+        self.assertEqual(self.e._record(key)[1], "rejected_price")
+
+    def test_checked_invalid_price_never_sent_and_audited_separately(self):
+        parent, old, key = self.episode_at_rejected_move(check_reject=True)
+        self.assertEqual(
+            self.e.db.execute("SELECT retcode,phase FROM modify_receipts WHERE id=?", (key,)).fetchone(),
+            (10015, "check"),
+        )
+        self.assertFalse(
+            any(
+                q["action"] == self.api.TRADE_ACTION_MODIFY and q["order"] == old.ticket
+                for q in self.api.requests
+            )
+        )
+        self.tick(3)
+        self.assertEqual(self.e.reason, "move_rejected_price")
+
+    def test_second_support_reuses_survivor_with_a_new_move_identity(self):
+        parent, old, key = self.episode_at_rejected_move(lost_after_apply=True)
+        self.tick(3)
+        self.helper.breakeven(parent)
+        self.tick()
+        self.api.closep(parent, 4)
+        self.tick(3)
+        reentry = next(o for o in self.owned() if o.ticket != old.ticket)
+        new = self.api.fill(reentry.ticket, 3524.10)
+        self.tick(4)
+        self.assertEqual(self.e.snapshot()["position_ticket"], new.ticket)
+        self.assertEqual(len(self.owned()), 1)
+        self.assertEqual((old.price_open, old.sl, old.volume_current), (3524.90, 3524.10, 0.02))
+        self.assertNotEqual(self.e.s["leg"]["orders"]["reverse"]["move"]["key"], key)
+
+    def test_partial_or_different_geometry_cannot_retire_full_interrupted_cycle(self):
+        parent, old, key = self.episode_at_rejected_move(legacy=True)
+        self.api.closep(parent, 4)
+        child = self.api.fill(old.ticket, 3527.44)
+        self.api.closep(child, 4)
+        counts = len(self.api.requests)
+        old.sl = 3526.44
+        self.tick(2)
+        self.assertEqual(self.e._record(key)[1], "submitted")
+        old.sl = 3526.43
+        entry = next(d for d in self.api.d if d.position_id == child.identifier and d.entry == 0)
+        entry.volume = 0.01
+        self.tick(2)
+        self.assertEqual(self.e._record(key)[1], "submitted")
+        entry.volume = 0.02
+        self.helper.complete = False
+        self.tick(2)
+        self.assertFalse(self.e.running)
+        self.assertEqual(self.e.reason, "interrupted_move_retirement")
+        self.assertFalse(self.e.control("start"))
+        self.assertEqual(len(self.api.requests), counts)
+
+        def no_lease(*args):
+            self.fail("flat historical retirement published a trading lease")
+
+        self.helper.register = no_lease
+        self.api.order_check = self.api.order_send = no_lease
+        self.helper.complete = True
+        self.tick(2)
+        self.assertEqual(self.e.snapshot()["mode"], "ready")
+        self.assertFalse(self.e.running or self.e.s["armed"])
+        self.assertIsNone(self.e.s["leg"])
+        self.assertEqual(len(self.api.requests), counts)
+
+    def test_old_unacknowledged_move_never_retries_and_exact_cancel_can_resolve(self):
+        parent, old, key = self.episode_at_rejected_move(legacy=True)
+        self.api.quote = N(bid=3525.60, ask=3525.62)
+        writes = len(self.api.requests)
+        self.tick(5)
+        self.assertEqual(self.e.reason, "awaiting_move_evidence")
+        self.assertEqual(len(self.api.requests), writes)
+        self.api.cancel(old.ticket)
+        self.helper.disagree = True
+        self.tick(2)
+        self.assertEqual(self.e._record(key)[1], "submitted")
+        self.helper.disagree = False
+        self.tick()
+        self.assertEqual(self.e._record(key)[1], "terminal_original")
+        self.assertEqual(self.e.reason, "counterorder_canceled")
+        self.assertEqual(len(self.api.requests), writes)
+
+    def test_lost_modify_ack_with_observed_target_is_not_repeated(self):
+        parent, old, key = self.episode_at_rejected_move(lost_after_apply=True)
+        writes = len(self.api.requests)
+        self.tick(3)
+        self.assertEqual(self.e._record(key)[1], "observed_target")
+        self.assertEqual(len(self.api.requests), writes)
+        self.assertFalse(self.e.s["leg"]["move_required"])
+
+    def test_old_geometry_fill_with_live_successor_advances_once(self):
+        parent, old, key = self.episode_at_rejected_move(legacy=True)
+        self.api.closep(parent, 4, 3526.52)
+        child = self.api.fill(old.ticket, 3527.44)
+        self.tick(4)
+        self.assertEqual(self.e.snapshot()["position_ticket"], child.ticket)
+        self.assertEqual(self.e.snapshot()["step"], 8)
+        self.assertEqual(self.e._record(key)[1], "terminal_original")
+        opposite = self.owned()
+        self.assertEqual(len(opposite), 1)
+        self.assertEqual((opposite[0].volume_initial, opposite[0].price_open), (0.03, 3526.64))
 
 
 if __name__ == "__main__":

@@ -26,10 +26,15 @@ REASONS = {"not_available": "Команда недоступна в текуще
            "symbol_not_available": "Символ недоступен в MT5.",
            "trading_permission": "MT5 не подтвердил разрешение на торговлю.",
            "helper_observation_unavailable": "Ожидаю показания помощников на двух графиках MT5.",
-           "uncertain_broker_action": "Результат операции в MT5 ещё не подтверждён.",
+           "uncertain_broker_action": "Исход запроса к брокеру пока неизвестен. RECOVERY сверяет данные MT5.",
            "awaiting_predecessor_stop_classification": "Ожидаю подтверждение причины выхода предыдущей позиции.",
            "awaiting_stop": "Ожидаю подтверждение STOP в MT5.",
-           "awaiting_survivor_move": "Ожидаю подтверждение изменения оставшегося ордера.",
+           "awaiting_survivor_move": "Проверяю новую цену и SL встречного STOP в MT5.",
+           "move_rejected_price": "Брокер отклонил новую цену. Встречный STOP выставлен по прежней цене. RECOVERY ждёт подходящей котировки.",
+           "move_rejection_recorded": "Брокер отклонил изменение STOP. Проверяю текущее состояние ордера в MT5.",
+           "move_binding_changed": "Проверяю, относится ли запрос на изменение к этому STOP.",
+           "awaiting_move_evidence": "RECOVERY сверяет параметры STOP и историю по его тикету в MT5. Результат изменения или исполнения пока не подтверждён.",
+           "interrupted_move_retirement": "Прежняя позиция и встречный STOP больше не открыты в MT5. Новый вход приостановлен. RECOVERY сверяет закрытие цепочки по истории ордеров и сделок.",
            "counterorder_canceled": "Встречный ордер отменён.",
            "counterorder_history_unresolved": "Ожидаю историю встречного ордера.",
            "missing_active_binding": "Проверяется принадлежность позиции текущему циклу.",
@@ -273,13 +278,15 @@ class Desktop:
             self.connection.set(f"Python — {python}     MT5 — {mt5}")
             self.identity.set("    ".join(f"{label} {state.get(key) or '—'}" for key, label in (
                 ("account", "Счёт"), ("server", "Сервер"), ("symbol", "Символ"))))
-            self.mode.set(MODES[state["mode"]])
+            retiring = state["mode"] == "active" and state.get("reason") == "interrupted_move_retirement"
+            self.mode.set("Сверка завершения цикла" if retiring else MODES[state["mode"]])
             notes = []
             if state["mode"] == "active":
                 if state.get("step") not in (None, "", "0"):
                     notes.append("Ступень " + state["step"] + " из 24.")
                 notes.append("Повторное рыночное ожидание " + ("включено." if state["market_rearm_enabled"] else "отключено."))
-                for field, label in (("position_ticket", "Позиция"), ("opposite_ticket", "Встречный ордер")):
+                for field, label in (("position_ticket", "Прежняя позиция" if retiring else "Позиция"),
+                                     ("opposite_ticket", "Прежний встречный ордер" if retiring else "Встречный ордер")):
                     if state.get(field) not in (None, "", "0"):
                         notes.append(f"{label} №{state[field]}.")
                 if state.get("support_applied"):
@@ -290,7 +297,11 @@ class Desktop:
                 notes.append("После ручного закрытия позиции и отмены встречного ордера ожидание возобновится."
                              if state["market_rearm_enabled"] else "Повторное ожидание отключено.")
             if state.get("reason") and state["reason"] not in {"ok", "ready", "none"}:
-                notes.append(REASONS.get(state["reason"], state["reason"]))
+                reason = state["reason"]
+                if reason == "move_rejected_price" and state["mode"] == "pending_wait":
+                    notes.append("Брокер отклонил изменение ручного STOP. Ордер выставлен с прежними параметрами. RECOVERY ждёт подходящей котировки.")
+                else:
+                    notes.append(REASONS.get(reason, reason))
             self.details.set(" ".join(notes))
         for action, button in self.buttons.items():
             usable = allowed(state, action) if state else action == "start"

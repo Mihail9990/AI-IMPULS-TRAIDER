@@ -54,6 +54,17 @@ class SmallDesktopTests(unittest.TestCase):
             for field in (*ui.fields,ui.save_btn):
                 visible(field,ui.editor)
             self.assertEqual(len(ui.fields),26)
+            strategy.data.update(mode="active", running=True, can_start=False, step=7,
+                                 position_ticket=1122334455, opposite_ticket=2233445566)
+            for reason in ("move_rejected_price", "awaiting_move_evidence", "interrupted_move_retirement"):
+                strategy.data["reason"] = reason
+                host.poll(strategy)
+                ui.state = ui.client.status()
+                ui.render()
+                root.update_idletasks()
+                self.assertIn(gui.REASONS[reason], ui.details.get())
+                for button in (*ui.buttons.values(), ui.settings_btn):
+                    visible(button, root)
             # Real desktop scope is a test TEMP directory. No requests were sent.
             self.assertEqual(list(host.commands.glob("*.json")),[])
             for window in (root,ui.editor):

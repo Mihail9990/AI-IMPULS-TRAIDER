@@ -7,6 +7,12 @@ class Wait(RuntimeError):
     """The requested observation is not yet complete."""
 
 
+class CheckRejected(Wait):
+    def __init__(self, retcode):
+        super().__init__("order_check_rejected")
+        self.retcode = retcode
+
+
 def checked(ok, reason):
     if not ok:
         raise Wait(reason)
@@ -459,6 +465,130 @@ class Broker:
             magic=self.magic,
         )
 
+    def move_quote(self, request, side, *, admissible=False):
+        quote = self.api.symbol_info_tick(self.symbol)
+        if not quote:
+            return ""
+        market = Decimal(str(quote.ask if side == "BUY" else quote.bid))
+        if not market.is_finite() or market <= 0:
+            return ""
+        if admissible:
+            info = self.api.symbol_info(self.symbol)
+            old = self.orders.get(request["order"])
+            if not info or not old:
+                return ""
+            point = Decimal(str(info.point))
+            minimum = point * info.trade_stops_level
+            freeze = point * info.trade_freeze_level
+            entry, sl = Decimal(str(request["price"])), Decimal(str(request["sl"]))
+            direction = 1 if side == "BUY" else -1
+            distance = direction * (entry - market)
+            if (
+                distance <= 0
+                or distance < minimum
+                or direction * (entry - sl) < minimum
+                or (
+                    freeze > 0
+                    and (direction * (Decimal(str(old.price_open)) - market) <= freeze or distance <= freeze)
+                )
+            ):
+                return ""
+        return str(market.normalize())
+
+    def observe_move(self, request, item, manual):
+        ticket = item["ticket"]
+        magic = 0 if manual else self.magic
+        checked(
+            request["order"] == ticket
+            and request["symbol"] == self.symbol
+            and request["magic"] == self.magic,
+            "move_binding_changed",
+        )
+        live = self.orders.get(ticket)
+        o = live or self.history_order(ticket)
+        checked(o is not None, "awaiting_move_evidence")
+        kind = self.api.ORDER_TYPE_BUY_STOP if item["side"] == "BUY" else self.api.ORDER_TYPE_SELL_STOP
+        checked(
+            (
+                o.symbol,
+                o.ticket,
+                o.magic,
+                o.type,
+                units(o.volume_initial, self.step),
+                units(o.tp, self.tick),
+                units(o.price_stoplimit, self.tick),
+            )
+            == (self.symbol, ticket, magic, kind, item["volume"], units(request["tp"], self.tick), 0)
+            and (not manual or self.human(o.reason)),
+            "counterorder_identity",
+        )
+        original = item.get("original_sl", 0) if manual else item["sl"]
+        geometry = (units(o.price_open, self.tick), units(o.sl, self.tick))
+        target = (units(request["price"], self.tick), units(request["sl"], self.tick))
+        moved = geometry == target
+        checked(moved or geometry == (item["entry"], original), "counterorder_geometry_changed")
+        remaining = units(o.volume_current, self.step)
+        if live:
+            checked(
+                o.state == self.api.ORDER_STATE_PLACED and o.position_id == 0 and remaining == item["volume"],
+                "partial_or_changed_order",
+            )
+            return "working", moved, o
+        if o.state == self.api.ORDER_STATE_CANCELED and o.position_id == 0 and remaining == item["volume"]:
+            return "canceled", moved, o
+        checked(
+            o.state == self.api.ORDER_STATE_FILLED and o.position_id > 0 and remaining == 0,
+            "counterorder_fill_incomplete",
+        )
+        ds = [d for d in self.deals(o.position_id) if d.entry == self.api.DEAL_ENTRY_IN]
+        report = self.helpers.history(o.position_id)
+        checked(
+            (report["login"], report["server"], report["symbol"], report["position_id"])
+            == (self.account, self.server, self.symbol, o.position_id),
+            "history_helper_scope",
+        )
+        entries = [r for r in report["deals"] if r["entry"] == self.api.DEAL_ENTRY_IN]
+        rows = {r["ticket"]: r for r in entries}
+        checked(
+            ds
+            and len(rows) == len(entries)
+            and set(rows) == {d.ticket for d in ds}
+            and sum(units(d.volume, self.step) for d in ds) == item["volume"],
+            "entry_incomplete",
+        )
+        for d in ds:
+            r = rows[d.ticket]
+            checked(
+                d.order == ticket
+                and d.magic == magic
+                and self.side(d.type) == item["side"]
+                and (
+                    d.order,
+                    d.position_id,
+                    d.magic,
+                    d.type,
+                    d.reason,
+                    d.time_msc,
+                    units(d.volume, self.step),
+                    units(d.price, self.tick),
+                )
+                == tuple(
+                    r[k]
+                    for k in (
+                        "order",
+                        "position_id",
+                        "magic",
+                        "type",
+                        "reason",
+                        "time_msc",
+                        "volume_steps",
+                        "price_ticks",
+                    )
+                ),
+                "entry_order_mismatch",
+            )
+        return "filled", moved, o
+
     def protect(self, p, sl):
         return dict(
             action=self.api.TRADE_ACTION_SLTP,
@@ -590,7 +720,8 @@ class Broker:
         if guard:
             guard()
         check = self.api.order_check(request)
-        checked(check is not None and check.retcode == 0, "order_check_rejected")
+        if check is None or check.retcode != 0:
+            raise CheckRejected(check.retcode if check else None)
         self.validate_target(request)
         if guard:
             guard()

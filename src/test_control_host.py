@@ -222,6 +222,30 @@ class MailboxTests(unittest.TestCase):
         ui.edit()
         ui.editor.withdraw()
         self.assertEqual(len(ui.fields),26)
+        self.strategy.data.update(running=True, can_start=False, mode="active", step=7, opposite_ticket=123)
+        for reason, message in (
+            ("move_rejected_price", "Брокер отклонил новую цену"),
+            ("move_rejection_recorded", "Брокер отклонил изменение STOP"),
+            ("move_binding_changed", "относится ли запрос"),
+            ("awaiting_move_evidence", "по его тикету в MT5"),
+            ("interrupted_move_retirement", "Новый вход приостановлен"),
+            ("uncertain_broker_action", "Исход запроса к брокеру пока неизвестен"),
+        ):
+            with self.subTest(reason=reason):
+                self.strategy.data["reason"] = reason
+                self.host.poll(self.strategy)
+                ui.state = self.client.status()
+                ui.render()
+                self.assertIn(message, ui.details.get())
+                self.assertNotIn(reason, ui.details.get())
+                if reason == "interrupted_move_retirement":
+                    self.assertEqual(ui.mode.get(), "Сверка завершения цикла")
+                    self.assertIn("Прежний встречный ордер №123", ui.details.get())
+        self.strategy.data.update(mode="pending_wait", reason="move_rejected_price")
+        self.host.poll(self.strategy)
+        ui.state = self.client.status()
+        ui.render()
+        self.assertIn("изменение ручного STOP", ui.details.get())
         self.assertEqual(self.strategy.calls,[])
         self.assertEqual(list(self.host.commands.glob("*.json")),[])
 
