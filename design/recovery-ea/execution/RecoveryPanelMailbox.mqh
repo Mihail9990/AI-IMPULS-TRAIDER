@@ -103,7 +103,8 @@ bool RecoveryPanelMailboxReceipt(const RecoveryPanelCommandScope &mail,
 bool RecoveryPanelMailboxPoll(RecoveryPanelMailbox &m,const RecoveryPanelCommandScope &mail,
     const RecoverySessionLifecycle &life,const RecoverySessionContext &live,
     const RRSettings &cfg,const double tick,RecoveryPanelApplySession &ram,
-    RecoveryPanelControl &control,RecoveryPanelApplyResult &out,const bool diagnostic=false) {
+    RecoveryPanelControl &control,RecoveryPanelApplyResult &out,const bool diagnostic=false,
+    const bool may_cancel_wait=true) {
  ZeroMemory(out);
  if(!RecoveryPanelMailboxCurrent(mail,life,live)) {RecoveryPanelMailboxClose(m);return false;}
  if(!m.initialized || m.boot_id!=mail.boot_id || m.diagnostic!=diagnostic) {
@@ -126,7 +127,7 @@ bool RecoveryPanelMailboxPoll(RecoveryPanelMailbox &m,const RecoveryPanelCommand
        RecoveryPanelMailboxRead(commands+leaf,wire) && RecoveryPanelMailboxCurrent(mail,life,live)) {
        RecoveryPanelApplyResult result;
        const RecoveryPanelApplyCode code=RecoveryDecodeAndStagePanel(
-         wire,id,mail,life,live,cfg,tick,ram,control,result);
+         wire,id,mail,life,live,cfg,tick,ram,control,result,may_cancel_wait);
        if(code==RECP_STAGED || code==RECP_REJECTED || code==RECP_DUPLICATE) {
           // Receipt failure does not rerun a consumed command. The next pass
           // can recover a missing receipt from RAM and the immutable command.

@@ -20,7 +20,7 @@ struct RecoveryLiveSession{
  RecoverySessionLifecycle lifecycle;
  int mailbox,mail,panel_seen;
 };
-enum {REC_CONTROL_IDLE,REC_CONTROL_RANGES};
+enum {REC_CONTROL_IDLE,REC_CONTROL_RANGES,REC_CONTROL_MANUAL_WAIT,REC_CONTROL_ADOPTED};
 struct TestCycle {ulong position_id,generation,active_order;int range_id;long actual_entry_ticks;};
 struct TestKnown {ulong ticket;};
 struct RRRangeState {TestKnown entry,opposite;TestCycle cycle;ulong scope,position_ticket;long initial_sl,live_sl;int support_stage;};
@@ -105,11 +105,12 @@ void RecoveryStepSupportCloseOwner(RecoverySupportCloseOwner& task,RecoveryRange
 }
 struct RCProtectionFact {ulong scope,generation,position_id,anchor_order;int range_id,stop_class;
                          long stop_ticks;bool confirmed;};
-int support_ticks=0,close_reads=0;
+int support_ticks=0,close_reads=0,manual_watches=0;
 bool closing=false;int close_type=RC_SUPPORT_SL;
 void RecoverySupportRuntimeTimer(RecoverySupportRuntime&,RecoveryEvidenceOwner&,const RecoverySessionLifecycle&,
  const RecoverySessionContext&,const RecoverySessionIntentScope&,const RecoveryInventoryScope&,const string&,
- long watcher,RRRangeState& range,const RRSettings&,double,double){
+ long watcher,RRRangeState& range,const RRSettings&,double,double,bool adopted,ulong magic){
+ if(adopted){assert(magic==0);++manual_watches;}
  assert(watcher==77&&range.cycle.position_id!=0);
  ++support_ticks;range.support_stage=close_type==RC_SUPPORT_SL?2:0;range.live_sl=range.cycle.actual_entry_ticks;
 }
@@ -196,9 +197,80 @@ void RecoveryStepSupportRotationOwner(RecoverySupportRotationOwner& t,RecoveryRa
  if(t.phase==RSRM_SEND)t.phase=RSRM_REQUEST;
  else if(t.phase==RSRM_REQUEST)t.phase=RSRM_DONE;
 }
+struct RecoveryManualChart {bool attempted;};
+enum {RMC_WAIT,RMC_PROOF};
+bool manual_arm=false,manual_cancel=false,manual_attempt=false,manual_proof=false;
+int manual_calls=0;
+bool RecoveryManualChartMayCancel(const RecoveryManualChart& t){return !t.attempted;}
+bool RecoveryManualChartClearWaiting(RecoveryManualChart& t){
+ if(t.attempted)return false;
+ t={};return true;
+}
+int RecoveryManualChartTimer(RecoveryManualChart& t,RecoveryPanelControl& p,bool active,RecoveryEvidenceOwner&,
+ const RecoverySessionLifecycle&,const RecoverySessionContext&,const RecoverySessionIntentScope&,
+ const RecoveryInventoryScope&,const RRSettings&,double,double){
+ assert(p.mode==REC_CONTROL_MANUAL_WAIT&&!active);
+ ++manual_calls;
+ if(manual_attempt)t.attempted=true;
+ if(manual_proof){assert(t.attempted);p.mode=REC_CONTROL_ADOPTED;return RMC_PROOF;}
+ return RMC_WAIT;
+}
+struct RecoveryManualHandoff{bool seeded;RecoveryRangeOwner ordinary;RecoveryPanelControl backing;};
+int manual_handoffs=0,manual_events=0;
+bool RecoveryManualHandoffOrigin(const RecoveryManualHandoff& h,const RRRangeState& r,ulong& m){
+ assert(h.seeded&&r.cycle.position_id==101);m=0;return true;
+}
+bool RecoverySeedManualHandoff(RecoveryManualHandoff& h,const RecoveryManualChart& t,
+ const RecoveryPanelControl& p,const RecoverySessionLifecycle&,const RecoverySessionContext&,
+ const RecoverySessionIntentScope&,const RRSettings& cfg) {
+ assert(t.attempted&&p.mode==REC_CONTROL_ADOPTED&& !p.configured[0]&&!p.configured[1]&&!h.seeded);
+ h.seeded=true;h.ordinary.phase=RRO_ORDINARY;h.ordinary.id=1;
+ h.backing.mode=REC_CONTROL_RANGES;h.backing.settings=cfg;h.backing.configured[0]=true;
+ h.backing.ranges[0].cycle.position_id=101;h.backing.ranges[0].position_ticket=102;
+ ++manual_handoffs;return true;
+}
 struct RecoverySessionAlternatingResult{};
+enum {RSMF_IDLE,RSMF_REQUEST,RSMF_DONE};
+enum {RSG_IDLE,RSG_PROBE,RSG_STAGED,RSG_SENT,RSG_FINAL_STATE};
+struct RecoverySupportMoveFill {int state;};
+struct RecoverySupportGapOwner {int state;};
+bool gap_hint=false,survivor_hint=false;
+int gap_sends=0,survivor_proofs=0;
+bool RecoveryBeginSupportMoveFill(RecoverySupportMoveFill& t,const RecoverySupportRotationOwner&,
+ const RecoveryRangeOwner&,const RecoveryPanelControl&,const RecoverySessionLifecycle&,const RecoverySessionContext&,
+ const RecoverySessionIntentScope&,const RecoveryInventoryScope&,RecoveryEvidenceOwner&){
+ if(!survivor_hint)return false;
+ t.state=RSMF_REQUEST;return true;
+}
+void RecoveryStepSupportMoveFill(RecoverySupportMoveFill& t,RecoverySupportRotationOwner& rot,
+ RecoveryRangeOwner&,RecoveryPanelControl&,const RecoverySessionLifecycle&,const RecoverySessionContext&,
+ const RecoverySessionIntentScope&,const RecoveryInventoryScope&,RecoverySessionAlternatingResult&){
+ assert(t.state==RSMF_REQUEST);++survivor_proofs;t.state=RSMF_DONE;rot.phase=RSRM_DONE;
+}
+bool RecoveryBeginSupportGapOwner(RecoverySupportGapOwner& t,const RecoverySupportCloseOwner& c,
+ const RecoverySupportReentry&,const RecoveryRangeOwner&,const RecoveryPanelControl&,
+ const RecoverySessionLifecycle&,const RecoverySessionContext&,const RecoverySessionIntentScope&,
+ RecoveryEvidenceOwner&,const RecoveryInventoryScope&,double,double){
+ if(!gap_hint||c.phase!=RSCO_STAGED)return false;
+ t.state=RSG_PROBE;return true;
+}
+void RecoveryStepSupportGapOwner(RecoverySupportGapOwner& t,const RecoverySupportCloseOwner&,
+ const RecoverySupportReentry&,RecoveryRangeOwner&,RecoveryPanelControl&,const RecoverySessionLifecycle&,
+ const RecoverySessionContext&,const RecoverySessionIntentScope&,const RecoveryInventoryScope&){
+ assert(t.state==RSG_PROBE);t.state=RSG_STAGED;
+}
+void RecoveryDispatchSupportGapOwner(RecoverySupportGapOwner& t,RecoveryRangeOwner&,const RecoveryPanelControl&,
+ const RecoverySessionLifecycle&,const RecoverySessionContext&,const RecoverySessionIntentScope&){
+ assert(t.state==RSG_STAGED);t.state=RSG_SENT;++gap_sends;
+}
+
 struct RecoveryPanelApplyResult{};
 struct MqlTradeTransaction {int range;};
+bool RecoveryManualHandoffTrade(RecoveryManualHandoff& h,const RecoveryPanelControl& p,
+ const RecoverySessionLifecycle&,const RecoverySessionContext&,const RecoverySessionIntentScope&,
+ const RecoveryInventoryScope&,const MqlTradeTransaction&) {
+ assert(h.seeded&&p.mode==REC_CONTROL_ADOPTED);++manual_events;return true;
+}
 int publishes=0,polls=0,submits=0,primary_reads=0,ordinary_reads=0;
 bool good=true,fail_publish=false,configure=false,two_ranges=true;
 int proof_range=0;
@@ -214,8 +286,10 @@ bool RecoveryLiveSessionPublish(const RecoveryLiveSession&,const RecoverySession
  ++publishes;return true;
 }
 bool RecoveryPanelMailboxPoll(int&,int&,const RecoverySessionLifecycle&,const RecoverySessionContext&,const RRSettings&,
- double tick,int&,RecoveryPanelControl& panel,RecoveryPanelApplyResult&) {
- assert(tick==.01);++polls;
+ double tick,int&,RecoveryPanelControl& panel,RecoveryPanelApplyResult&,bool diagnostic,bool may_cancel) {
+ assert(tick==.01&&!diagnostic);++polls;
+ if(manual_arm){manual_arm=false;panel.mode=REC_CONTROL_MANUAL_WAIT;return true;}
+ if(manual_cancel){manual_cancel=false;if(may_cancel)panel.mode=REC_CONTROL_IDLE;return true;}
  if(!configure)return false;
  configure=false;panel.mode=REC_CONTROL_RANGES;
  panel.configured[0]=true;panel.configured[1]=two_ranges;panel.ranges[0].cycle.position_id=10;panel.ranges[1].cycle.position_id=11;
@@ -328,7 +402,34 @@ int main(){
  assert(RecoveryChartOnTimer(single,live)&&RecoveryChartOnTimer(single,live));
  emit_dual=true;
  assert(RecoveryChartOnTimer(single,live)&&rotation_calls==2&&submits_reentry==2);
+ survivor_hint=true;
+ assert(RecoveryChartOnTimer(single,live)&&survivor_proofs==1&&single.rotation[0].phase==RSRM_DONE);
  RecoveryChartStop(single);
+ survivor_hint=false;gap_hint=true;configure=true;closing=false;emit_dual=false;
+ assert(RecoveryChartStart(single,live,"profile","gap","verifier",2,settings,.01,.02,string(32,'a'),77));
+ assert(RecoveryChartOnTimer(single,live));
+ closing=true;
+ assert(RecoveryChartOnTimer(single,live)&&RecoveryChartOnTimer(single,live));
+ assert(gap_sends==1&&submits_reentry==2);
+ RecoveryChartStop(single);
+ gap_hint=false;
+ RecoveryChartRuntime wait{};
+ assert(RecoveryChartStart(wait,live,"profile","manual","verifier",2,settings,.01,.02,string(32,'a'),77));
+ closing=false;manual_arm=true;
+ assert(RecoveryChartOnTimer(wait,live)&&wait.panel.mode==REC_CONTROL_MANUAL_WAIT&&manual_calls==1);
+ manual_cancel=true;
+ assert(RecoveryChartOnTimer(wait,live)&&wait.panel.mode==REC_CONTROL_IDLE&&manual_calls==1);
+ manual_arm=true;manual_attempt=true;
+ assert(RecoveryChartOnTimer(wait,live)&&wait.manual.attempted&&manual_calls==2);
+ manual_cancel=true;
+ assert(RecoveryChartOnTimer(wait,live)&&wait.panel.mode==REC_CONTROL_MANUAL_WAIT&&manual_calls==3);
+ manual_proof=true;
+ assert(RecoveryChartOnTimer(wait,live)&&wait.panel.mode==REC_CONTROL_ADOPTED&&manual_calls==4);
+ assert(RecoveryChartOnTimer(wait,live)&&manual_calls==4);
+ assert(manual_handoffs==1&&manual_watches==2&&wait.ranges[0].phase==RRO_UNUSED);
+ RecoveryChartOnTrade(wait,live,{1});
+ assert(manual_events==1);
+ RecoveryChartStop(wait);
 }
 """
 class ChartRuntimeCompat(unittest.TestCase):

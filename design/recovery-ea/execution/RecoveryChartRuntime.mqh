@@ -10,10 +10,15 @@
 #include "RecoverySupportReentry.mqh"
 #include "RecoveryDualSupportPump.mqh"
 #include "RecoverySupportRotationOwner.mqh"
+#include "RecoveryManualHandoff.mqh"
+#include "RecoverySupportGapOwner.mqh"
+#include "RecoverySupportMoveFill.mqh"
 
 struct RecoveryChartRuntime {
  RecoveryLiveSession live_session;
  RecoveryPanelControl panel;
+ RecoveryManualChart manual;
+ RecoveryManualHandoff adopted;
  RecoveryEvidenceOwner verifier;
  RecoveryRangeOco oco;
  RecoveryOcoCancel losing_stop;
@@ -27,6 +32,8 @@ struct RecoveryChartRuntime {
  RecoverySupportReentry reentry[2];
  RecoveryDualSupportPump dual[2];
  RecoverySupportRotationOwner rotation[2];
+ RecoverySupportGapOwner gap[2];
+ RecoverySupportMoveFill fast_survivor[2];
  ulong close_position[2];
  string watcher_epoch;
  long watcher_chart;
@@ -42,7 +49,7 @@ struct RecoveryChartRuntime {
 void RecoveryChartStop(RecoveryChartRuntime &chart)
   {
    RecoveryLiveSessionStop(chart.live_session);
-   ZeroMemory(chart.panel);ZeroMemory(chart.verifier);
+   ZeroMemory(chart.panel);ZeroMemory(chart.verifier);ZeroMemory(chart.manual);ZeroMemory(chart.adopted);
    ZeroMemory(chart.oco);ZeroMemory(chart.losing_stop);
    chart.cancel_started=false;chart.cancel_skipped=false;chart.cancel_result=ROC_WAIT;
    for(int i=0;i<2;i++) {
@@ -50,6 +57,7 @@ void RecoveryChartStop(RecoveryChartRuntime &chart)
     ZeroMemory(chart.support[i]);ZeroMemory(chart.close_poll[i]);ZeroMemory(chart.close_proof[i]);
     ZeroMemory(chart.support_exit[i]);ZeroMemory(chart.reentry[i]);
     ZeroMemory(chart.dual[i]);ZeroMemory(chart.rotation[i]);
+    ZeroMemory(chart.gap[i]);ZeroMemory(chart.fast_survivor[i]);
     chart.close_position[i]=0;
     chart.reverse_probe_position[i]=0;
  }
@@ -99,13 +107,14 @@ void RecoveryChartBindings(const RecoveryChartRuntime &chart,const RecoverySessi
 // after a fill hint is queued or is already being processed, do not change
 // its binding underneath it. Missing callbacks are covered by exact polling.
 void RecoveryChartWorkingReverse(RecoveryChartRuntime &chart,const RecoverySessionContext &live,
-    const RecoverySessionIntentScope &scope,const RecoveryInventoryScope &verifier,const int i)
+    const RecoverySessionIntentScope &scope,const RecoveryInventoryScope &verifier,const int i,
+    RecoveryRangeOwner &owner,RecoveryPanelControl &panel)
   {
-   if(!chart.ranges[i].opening.reserved || chart.ranges[i].opening.sl_required ||
-      chart.ranges[i].next_exact_ticket==0 ||
-      chart.ranges[i].ordinary.hint.state==RFH_QUEUED ||
-      chart.ranges[i].ordinary.pump.state!=RAP_UNUSED) return;
-   const ulong position=chart.panel.ranges[i].cycle.position_id;
+   if(!owner.opening.reserved || owner.opening.sl_required ||
+      owner.next_exact_ticket==0 ||
+      owner.ordinary.hint.state==RFH_QUEUED ||
+      owner.ordinary.pump.state!=RAP_UNUSED) return;
+   const ulong position=panel.ranges[i].cycle.position_id;
    if(position==0)return;
    if(chart.reverse_probe_position[i]!=position)
      {
@@ -114,22 +123,22 @@ void RecoveryChartWorkingReverse(RecoveryChartRuntime &chart,const RecoverySessi
    if(chart.reverse_probe[i].state==RWR_IDLE)
      {
       RecoveryIntentKey key;
-      if(!RecoveryBuildSessionIntentKey(scope,chart.ranges[i].opening.reverse,chart.tick,chart.step,key))
+      if(!RecoveryBuildSessionIntentKey(scope,owner.opening.reverse,chart.tick,chart.step,key))
          return;
       RecoveryExactReportScope request;
-      request.binding=verifier;request.order_ticket=chart.ranges[i].next_exact_ticket;
+      request.binding=verifier;request.order_ticket=owner.next_exact_ticket;
       const string identity=scope.executor_epoch+":"+key.id+":"+(string)request.order_ticket;
       request.binding.nonce=RecoveryOwnerNonce("working-exact",identity);
       const string tag=RecoveryOwnerNonce("working-publisher",identity);
       if(!RecoveryBeginWorkingReverse(chart.reverse_probe[i],chart.live_session.lifecycle,live,
-           scope,chart.panel.ranges[i],chart.ranges[i].opening,key,request,0,tag,chart.tick,chart.step))
+           scope,panel.ranges[i],owner.opening,key,request,0,tag,chart.tick,chart.step))
          return;
      }
    if(RecoveryStepWorkingReverse(chart.reverse_probe[i],chart.live_session.lifecycle,live,scope,
-           chart.panel.ranges[i],chart.ranges[i].opening)==RWR_ACTIVE)
+           panel.ranges[i],owner.opening)==RWR_ACTIVE)
      {
-      RecoveryOrdinaryEventReset(chart.ranges[i].ordinary);
-      chart.ranges[i].armed_position=0;
+      RecoveryOrdinaryEventReset(owner.ordinary);
+      owner.armed_position=0;
      }
   }
 
@@ -176,13 +185,15 @@ void RecoveryChartCloseFact(const RRRangeState &range,const int stop_class,
   }
 
 void RecoveryChartSupportTimer(RecoveryChartRuntime &chart,const RecoverySessionContext &live,
-    const RecoverySessionIntentScope &scope,const RecoveryInventoryScope &verifier,const int i)
+    const RecoverySessionIntentScope &scope,const RecoveryInventoryScope &verifier,const int i,
+    RecoveryRangeOwner &owner,RecoveryPanelControl &panel,
+    const bool adopted_exact=false,const ulong adopted_magic=0)
   {
    if(chart.watcher_chart!=0 && chart.watcher_epoch!="")
       RecoverySupportRuntimeTimer(chart.support[i],chart.verifier,chart.live_session.lifecycle,
         live,scope,verifier,chart.watcher_epoch,chart.watcher_chart,
-        chart.panel.ranges[i],chart.panel.settings,chart.tick,chart.step);
-   const RRRangeState range=chart.panel.ranges[i];
+        panel.ranges[i],panel.settings,chart.tick,chart.step,adopted_exact,adopted_magic);
+   const RRRangeState range=panel.ranges[i];
    if(range.cycle.position_id==0 || range.position_ticket==0)return;
    if(chart.close_position[i]!=range.cycle.position_id)
      {
@@ -190,10 +201,11 @@ void RecoveryChartSupportTimer(RecoveryChartRuntime &chart,const RecoverySession
       ZeroMemory(chart.close_poll[i]);ZeroMemory(chart.close_proof[i]);
       ZeroMemory(chart.support_exit[i]);ZeroMemory(chart.reentry[i]);
       ZeroMemory(chart.dual[i]);ZeroMemory(chart.rotation[i]);
+      ZeroMemory(chart.gap[i]);ZeroMemory(chart.fast_survivor[i]);
      }
    if(chart.close_poll[i].state==RCP_IDLE &&
       !RecoveryBeginRangeClosePoll(chart.close_poll[i],chart.verifier,chart.live_session.lifecycle,
-           live,verifier,range,chart.panel.settings,chart.tick,chart.step))return;
+           live,verifier,range,panel.settings,chart.tick,chart.step))return;
    if(chart.close_poll[i].state==RCP_UNRESOLVED)return;
    if(chart.close_poll[i].state==RCP_DONE)
      {
@@ -201,11 +213,11 @@ void RecoveryChartSupportTimer(RecoveryChartRuntime &chart,const RecoverySession
       if(RCClassifyClose(verified.before,verified.proof)==RC_SUPPORT_SL)
         {
          if(chart.support_exit[i].phase==RSCO_IDLE &&
-            !RecoveryBeginSupportCloseOwner(chart.support_exit[i],chart.ranges[i],chart.panel,
+            !RecoveryBeginSupportCloseOwner(chart.support_exit[i],owner,panel,
                     chart.live_session.lifecycle,live,scope,chart.verifier,verified,
                     chart.close_poll[i].verified_sequence,chart.tick,chart.step))return;
          if(chart.support_exit[i].phase==RSCO_REQUEST || chart.support_exit[i].phase==RSCO_READ)
-            RecoveryStepSupportCloseOwner(chart.support_exit[i],chart.ranges[i],chart.panel,
+            RecoveryStepSupportCloseOwner(chart.support_exit[i],owner,panel,
                             chart.live_session.lifecycle,live,scope,verifier);
         }
       return;
@@ -215,40 +227,63 @@ void RecoveryChartSupportTimer(RecoveryChartRuntime &chart,const RecoverySession
    RecoveryChartCloseFact(range,RC_SUPPORT_LEVEL,
       range.support_stage==2 && range.live_sl==range.cycle.actual_entry_ticks ? range.live_sl : 0,facts[1]);
    const RecoveryClosePollResult closed=RecoveryRangeClosePollStep(chart.close_poll[i],
-      chart.live_session.lifecycle,live,range,chart.panel.settings,facts,chart.close_proof[i]);
-   if(closed==RCP_PROOF && chart.ranges[i].revision<ULONG_MAX &&
+      chart.live_session.lifecycle,live,range,panel.settings,facts,chart.close_proof[i]);
+   if(closed==RCP_PROOF && owner.revision<ULONG_MAX &&
       RCClassifyClose(chart.close_proof[i].before,chart.close_proof[i].proof)==RC_FULL_SL &&
-      RRRecordAlternatingClose(chart.ranges[i].ledger,chart.close_proof[i])==RR_ALT_CLOSE_APPLIED)
-      ++chart.ranges[i].revision;
+      RRRecordAlternatingClose(owner.ledger,chart.close_proof[i])==RR_ALT_CLOSE_APPLIED)
+      ++owner.revision;
   }
 
 // The support exit owns the two specific tickets until one exact fill
 // is proved and the survivor is verified at its new geometry.
 bool RecoveryChartSupportReentryTimer(RecoveryChartRuntime &chart,const RecoverySessionContext &live,
-    const RecoverySessionIntentScope &scope,const RecoveryInventoryScope &verifier,const int i)
+    const RecoverySessionIntentScope &scope,const RecoveryInventoryScope &verifier,const int i,
+    RecoveryRangeOwner &owner,RecoveryPanelControl &panel)
   {
    if(chart.rotation[i].phase==RSRM_DONE)return false;
    if(chart.rotation[i].phase!=RSRM_IDLE)
      {
-      RecoveryStepSupportRotationOwner(chart.rotation[i],chart.ranges[i],chart.panel,
+      if(chart.fast_survivor[i].state==RSMF_IDLE)
+         RecoveryBeginSupportMoveFill(chart.fast_survivor[i],chart.rotation[i],owner,panel,
+                chart.live_session.lifecycle,live,scope,verifier,chart.verifier);
+      if(chart.fast_survivor[i].state!=RSMF_IDLE)
+        {
+         RecoverySessionAlternatingResult next;
+         RecoveryStepSupportMoveFill(chart.fast_survivor[i],chart.rotation[i],owner,panel,
+                              chart.live_session.lifecycle,live,scope,verifier,next);
+        }
+      else RecoveryStepSupportRotationOwner(chart.rotation[i],owner,panel,
                                        chart.live_session.lifecycle,live,scope,verifier);
       return true;
      }
+   if(chart.gap[i].state==RSG_SENT || chart.gap[i].state==RSG_FINAL_STATE)return false;
+   if(chart.gap[i].state==RSG_IDLE && chart.support_exit[i].phase!=RSCO_IDLE)
+      RecoveryBeginSupportGapOwner(chart.gap[i],chart.support_exit[i],chart.reentry[i],owner,panel,
+              chart.live_session.lifecycle,live,scope,chart.verifier,verifier,chart.tick,chart.step);
+   if(chart.gap[i].state!=RSG_IDLE)
+     {
+      if(chart.gap[i].state==RSG_PROBE)
+         RecoveryStepSupportGapOwner(chart.gap[i],chart.support_exit[i],chart.reentry[i],owner,panel,
+                              chart.live_session.lifecycle,live,scope,verifier);
+      if(chart.gap[i].state==RSG_STAGED)
+         RecoveryDispatchSupportGapOwner(chart.gap[i],owner,panel,chart.live_session.lifecycle,live,scope);
+      return true;
+     }
    if(chart.support_exit[i].phase==RSCO_STAGED)
-      RecoverySubmitSupportReentry(chart.reentry[i],chart.support_exit[i],chart.ranges[i],chart.panel,
+      RecoverySubmitSupportReentry(chart.reentry[i],chart.support_exit[i],owner,panel,
                                     chart.live_session.lifecycle,live,scope,verifier);
    if(chart.support_exit[i].phase!=RSCO_DISPATCHED)return false;
    if(chart.reentry[i].state==RSRE_RECEIPT)
-      RecoveryBeginSupportReentryVerification(chart.reentry[i],chart.support_exit[i],chart.ranges[i],
-           chart.panel,chart.live_session.lifecycle,live,scope,verifier,chart.verifier);
+      RecoveryBeginSupportReentryVerification(chart.reentry[i],chart.support_exit[i],owner,
+           panel,chart.live_session.lifecycle,live,scope,verifier,chart.verifier);
    if(chart.reentry[i].state==RSRE_REQUEST || chart.reentry[i].state==RSRE_READ)
-      RecoveryStepSupportReentry(chart.reentry[i],chart.support_exit[i],chart.ranges[i],chart.panel,
+      RecoveryStepSupportReentry(chart.reentry[i],chart.support_exit[i],owner,panel,
                                  chart.live_session.lifecycle,live,scope,verifier);
-   RRRangeState view=chart.panel.ranges[i];
+   RRRangeState view=panel.ranges[i];
    const RecoverySupportCloseOwner close=chart.support_exit[i];
    const ulong ticket=chart.reentry[i].ticket;
    const bool pending=!RRHasSupportAlternatives(view);
-   if(pending && !RecoveryDualPendingReentryView(chart.panel.ranges[i],chart.panel.settings,scope,close.reentry,
+   if(pending && !RecoveryDualPendingReentryView(panel.ranges[i],panel.settings,scope,close.reentry,
                                                 close.key,ticket,chart.tick,chart.step,view))return true;
    if(chart.dual[i].state==RDS_IDLE)
      {
@@ -267,32 +302,50 @@ bool RecoveryChartSupportReentryTimer(RecoveryChartRuntime &chart,const Recovery
       binding.entry.order_ticket=view.entry.ticket;binding.opposite.order_ticket=view.opposite.ticket;
       binding.verify_after=close.working_sequence;
       binding.price_tick=chart.tick;binding.volume_step=chart.step;
-      if(!RecoveryBeginDualSupport(chart.dual[i],view,chart.panel.settings,binding))return true;
+      if(!RecoveryBeginDualSupport(chart.dual[i],view,panel.settings,binding))return true;
       chart.verifier.serial=serial;
      }
    if(chart.dual[i].state==RDS_DONE || chart.dual[i].state==RDS_STOP)return true;
    RRFilled filled;
    RRKnownOrder survivor;
-   if(RecoveryStepDualSupport(chart.dual[i],view,chart.panel.settings,filled,survivor)!=RDS_PROOF)
+   if(RecoveryStepDualSupport(chart.dual[i],view,panel.settings,filled,survivor)!=RDS_PROOF)
       return true;
-   const RRRangeState prior=chart.panel.ranges[i];
+   const RRRangeState prior=panel.ranges[i];
    if(pending)
      {
       RREffect effect;
-      if(!RecoveryDualPendingReentryEffect(chart.dual[i],prior,chart.panel.settings,scope,close.reentry,
+      if(!RecoveryDualPendingReentryEffect(chart.dual[i],prior,panel.settings,scope,close.reentry,
                                  close.key,ticket,effect) ||
-         !RRConfirm(chart.panel.ranges[i],effect))return true;
+         !RRConfirm(panel.ranges[i],effect))return true;
      }
-   if(!RecoveryBeginSupportRotationOwner(chart.rotation[i],chart.ranges[i],chart.panel,
+   if(!RecoveryBeginSupportRotationOwner(chart.rotation[i],owner,panel,
           chart.live_session.lifecycle,live,scope,chart.verifier,verifier,filled,survivor,
           chart.dual[i].verified_sequence,chart.tick,chart.step))
      {
-      if(pending)chart.panel.ranges[i]=prior;
+      if(pending)panel.ranges[i]=prior;
       return true;
      }
-   RecoveryStepSupportRotationOwner(chart.rotation[i],chart.ranges[i],chart.panel,
+   RecoveryStepSupportRotationOwner(chart.rotation[i],owner,panel,
                                     chart.live_session.lifecycle,live,scope,verifier);
    return true;
+  }
+
+void RecoveryChartOrdinaryTimer(RecoveryChartRuntime &chart,const RecoverySessionContext &live,
+    const RecoverySessionIntentScope &scope,const RecoveryInventoryScope &verifier,const int i,
+    RecoveryRangeOwner &owner,RecoveryPanelControl &panel,const bool manual=false)
+  {
+   if(owner.phase!=RRO_ORDINARY ||
+      RecoveryChartSupportReentryTimer(chart,live,scope,verifier,i,owner,panel))return;
+   RecoveryChartWorkingReverse(chart,live,scope,verifier,i,owner,panel);
+   RecoveryRangeOwnerArmOrdinary(owner,panel,chart.live_session.lifecycle,
+                   live,scope,chart.verifier,0,chart.tick,chart.step);
+   RecoverySessionAlternatingResult event_result;
+   RecoveryRangeOwnerOrdinaryTimer(owner,panel,chart.live_session.lifecycle,live,scope,verifier,event_result);
+   ulong magic=0;
+   const bool exact=manual && RecoveryManualHandoffOrigin(chart.adopted,panel.ranges[i],magic);
+   RecoveryChartSupportTimer(chart,live,scope,verifier,i,owner,panel,exact,magic);
+   if(chart.support_exit[i].phase==RSCO_STAGED)
+      RecoveryChartSupportReentryTimer(chart,live,scope,verifier,i,owner,panel);
   }
 
 void RecoveryChartRangeTimer(RecoveryChartRuntime &chart,const RecoverySessionContext &live,
@@ -318,19 +371,7 @@ void RecoveryChartRangeTimer(RecoveryChartRuntime &chart,const RecoverySessionCo
       RecoveryRangeOwnerDispatchClaimedPrimary(chart.ranges[i],chart.panel,chart.live_session.lifecycle,
                                                live,scope,chart.oco);
      }
-   if(chart.ranges[i].phase==RRO_ORDINARY)
-     {
-      if(RecoveryChartSupportReentryTimer(chart,live,scope,verifier,i))return;
-      RecoveryChartWorkingReverse(chart,live,scope,verifier,i);
-      RecoveryRangeOwnerArmOrdinary(chart.ranges[i],chart.panel,chart.live_session.lifecycle,
-                        live,scope,chart.verifier,0,chart.tick,chart.step);
-      RecoverySessionAlternatingResult event_result;
-      RecoveryRangeOwnerOrdinaryTimer(chart.ranges[i],chart.panel,chart.live_session.lifecycle,
-                                      live,scope,verifier,event_result);
-      RecoveryChartSupportTimer(chart,live,scope,verifier,i);
-      if(chart.support_exit[i].phase==RSCO_STAGED)
-         RecoveryChartSupportReentryTimer(chart,live,scope,verifier,i);
-     }
+   RecoveryChartOrdinaryTimer(chart,live,scope,verifier,i,chart.ranges[i],chart.panel);
   }
 
 // Called by the trading chart's timer, only after explicit user start.
@@ -340,13 +381,33 @@ bool RecoveryChartOnTimer(RecoveryChartRuntime &chart,const RecoverySessionConte
    RecoveryPanelApplyResult action;
    if(RecoveryPanelMailboxPoll(chart.live_session.mailbox,chart.live_session.mail,
           chart.live_session.lifecycle,live,chart.settings,chart.tick,
-          chart.live_session.panel_seen,chart.panel,action))
+          chart.live_session.panel_seen,chart.panel,action,false,
+          RecoveryManualChartMayCancel(chart.manual)))
       chart.publish_needed=true;
-   if(chart.publish_needed &&
-      RecoveryLiveSessionPublish(chart.live_session,live,chart.panel.mode))chart.publish_needed=false;
-   if(chart.panel.mode!=REC_CONTROL_RANGES)return true;
    RecoverySessionIntentScope scope;RecoveryInventoryScope verifier;
    RecoveryChartBindings(chart,live,scope,verifier);
+   if(chart.panel.mode==REC_CONTROL_MANUAL_WAIT)
+     {
+      const bool recovery_active=chart.oco.winner_range_id!=0 ||
+           chart.ranges[0].phase!=RRO_UNUSED || chart.ranges[1].phase!=RRO_UNUSED;
+      if(RecoveryManualChartTimer(chart.manual,chart.panel,recovery_active,chart.verifier,
+          chart.live_session.lifecycle,live,scope,verifier,chart.settings,chart.tick,chart.step)==RMC_PROOF)
+         chart.publish_needed=true;
+     }
+   else if(chart.panel.mode==REC_CONTROL_IDLE)
+      RecoveryManualChartClearWaiting(chart.manual);
+   if(chart.publish_needed &&
+      RecoveryLiveSessionPublish(chart.live_session,live,chart.panel.mode))chart.publish_needed=false;
+   if(chart.panel.mode==REC_CONTROL_ADOPTED)
+     {
+      if(!chart.adopted.seeded)
+         RecoverySeedManualHandoff(chart.adopted,chart.manual,chart.panel,
+                                   chart.live_session.lifecycle,live,scope,chart.settings);
+      if(chart.adopted.seeded)
+         RecoveryChartOrdinaryTimer(chart,live,scope,verifier,0,chart.adopted.ordinary,chart.adopted.backing,true);
+      return true; // public panel still shows no configured ranges
+     }
+   if(chart.panel.mode!=REC_CONTROL_RANGES)return true;
    for(int id=1;id<=2;id++)
       if(RecoveryLiveSessionCurrent(chart.live_session,live))
          RecoveryChartRangeTimer(chart,live,scope,verifier,id);
@@ -358,9 +419,15 @@ bool RecoveryChartOnTimer(RecoveryChartRuntime &chart,const RecoverySessionConte
 void RecoveryChartOnTrade(RecoveryChartRuntime &chart,const RecoverySessionContext &live,
                          const MqlTradeTransaction &event)
   {
-   if(!RecoveryLiveSessionCurrent(chart.live_session,live) || chart.panel.mode!=REC_CONTROL_RANGES)return;
+   if(!RecoveryLiveSessionCurrent(chart.live_session,live))return;
    RecoverySessionIntentScope scope;RecoveryInventoryScope verifier;
    RecoveryChartBindings(chart,live,scope,verifier);
+   if(chart.panel.mode==REC_CONTROL_ADOPTED)
+     {
+      RecoveryManualHandoffTrade(chart.adopted,chart.panel,chart.live_session.lifecycle,live,scope,verifier,event);
+      return;
+     }
+   if(chart.panel.mode!=REC_CONTROL_RANGES)return;
    for(int i=0;i<2;i++)
       if(chart.oco.winner_range_id==i+1)
          RecoveryRangeOwnerOrdinaryTrade(chart.ranges[i],chart.panel,chart.live_session.lifecycle,

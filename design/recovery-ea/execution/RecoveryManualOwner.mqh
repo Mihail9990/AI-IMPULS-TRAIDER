@@ -9,7 +9,7 @@ enum RecoveryManualPhase {RMO_UNUSED=0,RMO_PLANNED,RMO_ATTEMPTED,RMO_ADOPTED};
 
 struct RecoveryManualCandidate {
  RecoveryInventoryScope request;
- ulong sequence,position_id,position_ticket;
+ ulong sequence,position_id,position_ticket,position_magic;
  int side;
  long entry_ticks,volume_steps,sl_ticks,tp_ticks;
  string entry_wire;
@@ -57,6 +57,7 @@ bool RecoveryManualCandidateFold(const RecoveryInventorySnapshot &inventory,
  if(StringSplit(inventory.rows[0],9,f)!=9 || !RecoveryInvPosition(f) ||
     !RecoveryAdoptionUnsigned(f[1],found.position_id) || found.position_id==0 ||
     !RecoveryAdoptionUnsigned(f[2],found.position_ticket) || found.position_ticket==0 ||
+    !RecoveryAdoptionUnsigned(f[3],found.position_magic) ||
     !RecoveryAdoptionUnits(f[5],step,false,found.volume_steps) ||
     !RecoveryAdoptionUnits(f[6],tick,false,found.entry_ticks) ||
     !RecoveryAdoptionUnits(f[7],tick,true,found.sl_ticks) ||
@@ -193,6 +194,11 @@ RecoveryAdoptionResult RecoveryConfirmManualOpening(RecoveryManualOwner &owner,
     return RA_UNRESOLVED;
  const RecoveryAdoptionResult result=RecoveryFoldAdoptionInventory(inventory,request,owner.check,owner.intent);
  if(result!=RA_CONFIRMED)return result;
+ string fields[];
+ ulong magic;
+ if(StringSplit(inventory.rows[0],9,fields)!=9 ||
+    !RecoveryAdoptionUnsigned(fields[3],magic) || magic!=owner.candidate.position_magic)
+    return RA_UNRESOLVED;
 
  RRRangeState next=owner.range;
  RROpeningPair pair=owner.opening;

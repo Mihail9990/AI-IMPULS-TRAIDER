@@ -49,7 +49,8 @@ bool RecoverySupportRuntimeTarget(const RecoverySupportRuntime &t,const RRRangeS
 // Local exact read is only a scheduling precondition. No RR state is changed
 // and no position modification is verified by this check.
 bool RecoverySupportLocalPosition(const RRRangeState &range,const RecoverySessionContext &live,
-    const double tick,const double step,const long expected_sl,ulong &magic,string &entry_wire) {
+    const double tick,const double step,const long expected_sl,const ulong expected_magic,
+    ulong &magic,string &entry_wire) {
  magic=0;entry_wire="";
  long actual_id,actual_ticket,type,signed_magic;
  string symbol;
@@ -61,7 +62,7 @@ bool RecoverySupportLocalPosition(const RRRangeState &range,const RecoverySessio
     !PositionGetInteger(POSITION_TICKET,actual_ticket) || (ulong)actual_ticket!=range.position_ticket ||
     !PositionGetInteger(POSITION_TYPE,type) ||
     type!=(range.cycle.side==1 ? POSITION_TYPE_BUY : POSITION_TYPE_SELL) ||
-    !PositionGetInteger(POSITION_MAGIC,signed_magic) || (ulong)signed_magic!=(ulong)live.magic ||
+    !PositionGetInteger(POSITION_MAGIC,signed_magic) || (ulong)signed_magic!=expected_magic ||
     !PositionGetString(POSITION_SYMBOL,symbol) || symbol!=live.symbol ||
     !PositionGetDouble(POSITION_PRICE_OPEN,price) || !RecoveryDispatchUnits(price,tick,false,range.cycle.actual_entry_ticks) ||
     !PositionGetDouble(POSITION_VOLUME,volume) || !RecoveryDispatchUnits(volume,step,false,range.cycle.filled_steps) ||
@@ -82,7 +83,9 @@ RecoverySupportRuntimeResult RecoverySupportRuntimeTimer(RecoverySupportRuntime 
     RecoveryEvidenceOwner &owner,const RecoverySessionLifecycle &session,
     const RecoverySessionContext &live,const RecoverySessionIntentScope &scope,
     const RecoveryInventoryScope &verifier,const string watcher_epoch,const long watcher_chart,
-    RRRangeState &range,const RRSettings &cfg,const double tick,const double step) {
+    RRRangeState &range,const RRSettings &cfg,const double tick,const double step,
+    const bool adopted_exact=false,const ulong adopted_magic=0) {
+ const ulong expected_magic=adopted_exact ? adopted_magic : (ulong)live.magic;
  if(!RecoverySupportOwnerBound(owner,session,live,scope,verifier,watcher_epoch,watcher_chart) ||
     !RRValid(range,cfg) || scope.scope!=range.scope || scope.generation!=range.cycle.generation ||
     cfg.support_first_ticks!=0 || cfg.support_offset_ticks!=0 ||
@@ -109,7 +112,7 @@ RecoverySupportRuntimeResult RecoverySupportRuntimeTimer(RecoverySupportRuntime 
        return RSR_WAIT;
     ulong magic;
     string entry;
-    if(!RecoverySupportLocalPosition(range,live,tick,step,range.live_sl,magic,entry))return RSR_WAIT;
+    if(!RecoverySupportLocalPosition(range,live,tick,step,range.live_sl,expected_magic,magic,entry))return RSR_WAIT;
     const ulong seq=owner.serial+1;
     const string identity=owner.executor_epoch+"\t"+owner.verifier_epoch+"\t"+watcher_epoch+"\t"+
        (string)watcher_chart+"\t"+(string)range.scope+"\t"+(string)range.cycle.generation+"\t"+
@@ -147,7 +150,7 @@ RecoverySupportRuntimeResult RecoverySupportRuntimeTimer(RecoverySupportRuntime 
 
  if(task.state==RSS_WATCH) {
     ulong before_magic;string before_entry;
-    if(!RecoverySupportLocalPosition(range,live,tick,step,range.live_sl,before_magic,before_entry) ||
+    if(!RecoverySupportLocalPosition(range,live,tick,step,range.live_sl,expected_magic,before_magic,before_entry) ||
        before_magic!=task.proof.prior_position_magic || before_entry!=task.proof.prior_position_entry ||
        !RecoverySubmitSingleSupport(task.service,session,live,scope,range,cfg,tick,step,task.receipt))
        return RSR_WAIT;
@@ -162,7 +165,7 @@ RecoverySupportRuntimeResult RecoverySupportRuntimeTimer(RecoverySupportRuntime 
     // Do not ask the one-shot verifier before the asynchronously submitted
     // target is visible. This does not confirm it; only releases the query.
     ulong actual_magic;string actual_entry;
-    if(!RecoverySupportLocalPosition(range,live,tick,step,task.service.action.sl_ticks,actual_magic,actual_entry) ||
+    if(!RecoverySupportLocalPosition(range,live,tick,step,task.service.action.sl_ticks,expected_magic,actual_magic,actual_entry) ||
        actual_magic!=task.proof.prior_position_magic || actual_entry!=task.proof.prior_position_entry)
        return RSR_WAIT;
     const RecoveryInventoryScope q=task.proof.request;

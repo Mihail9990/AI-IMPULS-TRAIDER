@@ -42,7 +42,7 @@ RecoveryPanelApplyCode RecoveryDecodeAndStagePanel(
     const string wire,const string filename_id,const RecoveryPanelCommandScope &mail,
     const RecoverySessionLifecycle &life,const RecoverySessionContext &live,
     const RRSettings &cfg,const double tick,RecoveryPanelApplySession &ram,
-    RecoveryPanelControl &control,RecoveryPanelApplyResult &out)
+    RecoveryPanelControl &control,RecoveryPanelApplyResult &out,const bool may_cancel_wait=true)
   {
    ZeroMemory(out);
    if(!RecoverySessionCurrent(life,live) || RecoveryPanelBootEpoch(mail.boot_id)!=life.epoch ||
@@ -80,7 +80,8 @@ RecoveryPanelApplyCode RecoveryDecodeAndStagePanel(
    ram.boot_id=mail.boot_id;
    ram.seen[n].command_id=parsed.command_id;
    ram.seen[n].digest=parsed.content_sha256;
-   out.code=RecoveryApplyPanelControl(control,next,cfg)==REC_CONTROL_APPLIED ?
+   out.code=(next.op!=REC_CONTROL_CANCEL || may_cancel_wait) &&
+      RecoveryApplyPanelControl(control,next,cfg)==REC_CONTROL_APPLIED ?
       RECP_STAGED:RECP_REJECTED;
    ram.seen[n].original=out.code;
    return out.code;

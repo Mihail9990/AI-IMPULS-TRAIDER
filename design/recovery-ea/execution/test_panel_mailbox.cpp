@@ -48,14 +48,14 @@ struct RecoveryPanelControl {int state_changes;};
 struct RRSettings {};
 RecoveryPanelApplyCode RecoveryDecodeAndStagePanel(const string &wire,const string &id,const RecoveryPanelCommandScope &,
  const RecoverySessionLifecycle &,const RecoverySessionContext &,const RRSettings &,double,RecoveryPanelApplySession &ram,
- RecoveryPanelControl &ctrl,RecoveryPanelApplyResult &out){
+ RecoveryPanelControl &ctrl,RecoveryPanelApplyResult &out,bool may_cancel_wait){
  out=RecoveryPanelApplyResult{};out.command_id=id;out.digest=string(64,'a');
  if(wire=="ranges")out.operation=RPC_CONFIGURE_RANGES;
  else if(wire=="wait")out.operation=RPC_MANUAL_WAIT;
  else if(wire=="reject")out.operation=RPC_MANUAL_CANCEL;
  else return RECP_INVALID;
  if(ram.seen.count(id)){out.original=ram.seen.at(id);return out.code=RECP_DUPLICATE;}
- out.code=wire=="reject"?RECP_REJECTED:RECP_STAGED;
+ out.code=(wire=="reject"||(out.operation==RPC_MANUAL_CANCEL&&!may_cancel_wait))?RECP_REJECTED:RECP_STAGED;
  ram.seen[id]=out.code;
  if(out.code==RECP_STAGED)ctrl.state_changes++;
  return out.code;
