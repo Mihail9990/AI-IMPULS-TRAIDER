@@ -170,7 +170,9 @@ int main(){
  auto other=verifier;other.verifier_chart++;
  assert(RecoveryRangeOwnerPrimaryTimer(owners[0],panel,life,live,scope,other,oco)==RPP_STOPPED&&opening_sends==0);
  primary_ready=true;
- assert(RecoveryRangeOwnerPrimaryTimer(owners[0],panel,life,live,scope,verifier,oco)==RPP_PROOF&&opening_sends==1);
+ assert(RecoveryRangeOwnerPrimaryTimer(owners[0],panel,life,live,scope,verifier,oco)==RPP_PROOF&&opening_sends==0);
+ assert(RecoveryRangeOwnerDispatchClaimedPrimary(owners[0],panel,life,live,scope,oco));
+ assert(!RecoveryRangeOwnerDispatchClaimedPrimary(owners[0],panel,life,live,scope,oco)&&opening_sends==1);
  assert(disk_reads==0&&owners[0].phase==RRO_ORDINARY&&owners[0].next_exact_ticket==201&&owners[0].revision==1);
  assert(panel.ranges[0].cycle.position_id==501&&panel.ranges[1].cycle.position_id==0);
  assert(RecoveryRangeOwnerPrimaryTimer(owners[0],panel,life,live,scope,verifier,oco)==RPP_STOPPED&&opening_sends==1);
@@ -208,7 +210,9 @@ int main(){
  assert(RecoveryRangeOcoMaySubmit(two));
  assert(RecoveryRangeOwnerPrimaryTimer(rr[1],both,life,live,scope,verifier,two)==RPP_PROOF);
  assert(two.winner_range_id==2&&two.winner_order==102&&two.winner_position==502);
- assert(rr[1].first_proof.entry.executed_order==102&&opening_sends==1&&primary_steps==1);
+ assert(rr[1].first_proof.entry.executed_order==102&&opening_sends==0&&primary_steps==1);
+ assert(!RecoveryRangeOwnerDispatchClaimedPrimary(rr[0],both,life,live,scope,two));
+ assert(RecoveryRangeOwnerDispatchClaimedPrimary(rr[1],both,life,live,scope,two));
  assert(RecoveryRangeOwnerPrimaryTimer(rr[0],both,life,live,scope,verifier,two)==RPP_STOPPED);
  assert(RecoveryRangeOwnerPrimaryTimer(rr[1],both,life,live,scope,verifier,two)==RPP_STOPPED);
  assert(opening_sends==1&&primary_steps==1&&rr[0].phase==RRO_PRIMARY_PENDING);
@@ -231,8 +235,11 @@ int main(){
     assert(RecoveryRangeOwnerBindPrimary(hp[i],hold,life,live,scope,v,0,.01,.01));
  }
  journal.erase(hp[0].primary.key.id);
- assert(RecoveryRangeOwnerPrimaryTimer(hp[0],hold,life,live,scope,verifier,claimed)==RPP_STOPPED);
+ assert(RecoveryRangeOwnerPrimaryTimer(hp[0],hold,life,live,scope,verifier,claimed)==RPP_PROOF);
  assert(claimed.winner_range_id==1&&hp[0].phase==RRO_PRIMARY_CLAIMED);
+ assert(!RecoveryRangeOwnerDispatchClaimedPrimary(hp[0],hold,life,live,scope,claimed));
+ assert(hp[0].phase==RRO_PRIMARY_DISPATCH_ATTEMPTED);
+ assert(!RecoveryRangeOwnerDispatchClaimedPrimary(hp[0],hold,life,live,scope,claimed));
  assert(hp[0].first_proof.entry.executed_order==101);
  assert(RecoveryRangeOwnerPrimaryTimer(hp[1],hold,life,live,scope,verifier,claimed)==RPP_STOPPED);
  assert(primary_steps==1&&opening_sends==0);

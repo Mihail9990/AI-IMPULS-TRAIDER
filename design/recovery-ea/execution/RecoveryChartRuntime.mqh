@@ -12,7 +12,7 @@ struct RecoveryChartRuntime {
  RecoveryRangeOco oco;
  RecoveryOcoCancel losing_stop;
  RecoveryOcoCancelResult cancel_result;
- bool cancel_started;
+ bool cancel_started,cancel_skipped;
  RecoveryRangeOwner ranges[2];
  RecoveryWorkingReverse reverse_probe[2];
  ulong reverse_probe_position[2];
@@ -28,7 +28,7 @@ void RecoveryChartStop(RecoveryChartRuntime &chart)
    RecoveryLiveSessionStop(chart.live_session);
    ZeroMemory(chart.panel);ZeroMemory(chart.verifier);
    ZeroMemory(chart.oco);ZeroMemory(chart.losing_stop);
-   chart.cancel_started=false;chart.cancel_result=ROC_WAIT;
+   chart.cancel_started=false;chart.cancel_skipped=false;chart.cancel_result=ROC_WAIT;
    for(int i=0;i<2;i++) {
     ZeroMemory(chart.ranges[i]);ZeroMemory(chart.reverse_probe[i]);
     chart.reverse_probe_position[i]=0;
@@ -114,10 +114,11 @@ void RecoveryChartOcoTimer(RecoveryChartRuntime &chart,const RecoverySessionCont
    const RecoverySessionIntentScope &scope,const RecoveryInventoryScope &verifier)
   {
    const int winner=chart.oco.winner_range_id;
-   if(winner<1 || winner>2)return;
+   if(winner<1 || winner>2 || chart.cancel_skipped)return;
    const int win=winner-1,other=2-winner;
    if(!chart.panel.configured[other] || chart.ranges[other].primary.ticket==0 ||
-      chart.ranges[win].first_proof.entry.executed_order==0) return;
+      chart.ranges[win].first_proof.entry.executed_order==0)
+     {chart.cancel_skipped=true;return;}
    if(!chart.cancel_started)
      {
       RecoveryExactReportScope q;
@@ -128,7 +129,8 @@ void RecoveryChartOcoTimer(RecoveryChartRuntime &chart,const RecoverySessionCont
       const string tag=RecoveryOwnerNonce("loser-cancel-publisher",identity);
       if(!RecoveryBeginOcoCancel(chart.losing_stop,chart.live_session.lifecycle,live,scope,chart.panel,
            winner,chart.ranges[win].primary_pump.binding,chart.ranges[win].first_proof,
-           other+1,chart.ranges[other].primary,q,0,tag,chart.tick,chart.step))return;
+           other+1,chart.ranges[other].primary,q,0,tag,chart.tick,chart.step))
+        {chart.cancel_skipped=true;return;}
       chart.cancel_started=true;
      }
    if(chart.cancel_result!=ROC_CANCELED && chart.cancel_result!=ROC_UNKNOWN)
@@ -152,6 +154,13 @@ void RecoveryChartRangeTimer(RecoveryChartRuntime &chart,const RecoverySessionCo
                        live,scope,chart.verifier,0,chart.tick,chart.step);
       RecoveryRangeOwnerPrimaryTimer(chart.ranges[i],chart.panel,chart.live_session.lifecycle,
                                      live,scope,verifier,chart.oco);
+     }
+   if(chart.ranges[i].phase==RRO_PRIMARY_CLAIMED)
+     {
+      RecoveryChartOcoTimer(chart,live,scope,verifier);
+      // Do not await any broker or verifier reply to the sibling cancel.
+      RecoveryRangeOwnerDispatchClaimedPrimary(chart.ranges[i],chart.panel,chart.live_session.lifecycle,
+                                               live,scope,chart.oco);
      }
    if(chart.ranges[i].phase==RRO_ORDINARY)
      {

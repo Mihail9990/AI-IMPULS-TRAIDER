@@ -44,7 +44,7 @@ bool RecoveryExactEffectBound(const RRRangeState &v,const RecoveryExactEffectBin
  return b.action.kind==RR_CANCEL && RRActionEqual(v.pending,b.action) &&
         v.entry.ticket==b.request.order_ticket;
 }
-RecoveryDispatchState RecoveryDispatchOnce(const RRRangeState &v,const RRAction &a,const RecoveryIntentKey &key,
+RecoveryDispatchState RecoveryDispatchExactCancelAsync(const RRRangeState &v,const RRAction &a,const RecoveryIntentKey &key,
     double,double,RecoveryDispatchResult &result) {
  assert(v.phase==RR_DRAIN && a.kind==RR_CANCEL && a.order_ticket==loser_ticket &&
         v.entry.ticket==loser_ticket && !v.opposite.ticket && !v.position_ticket &&

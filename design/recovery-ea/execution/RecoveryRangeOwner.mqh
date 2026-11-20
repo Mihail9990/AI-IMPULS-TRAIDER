@@ -7,7 +7,7 @@
 
 enum RecoveryRangeOwnerPhase {
  RRO_UNUSED=0,RRO_PRIMARY_PENDING,RRO_ORDINARY,RRO_FINAL,
- RRO_PRIMARY_CLAIMED
+ RRO_PRIMARY_CLAIMED,RRO_PRIMARY_DISPATCH_ATTEMPTED
 };
 
 // Shared by both ranges in a fresh boot. A winning exact fill is latched
@@ -180,12 +180,28 @@ RecoveryPrimaryPumpResult RecoveryRangeOwnerPrimaryTimer(RecoveryRangeOwner &own
  if(!RecoveryRangeOcoClaim(oco,owner,scope,owner.primary_pump.binding,proof))return RPP_STOPPED;
  owner.first_proof=proof;
  owner.phase=RRO_PRIMARY_CLAIMED;
- if(!RecoveryOpenVerifiedPrimaryProof(owner.primary_pump.binding,session,live,scope,proof,
+ return RPP_PROOF;
+}
+
+// The chart calls this after attempting the sibling cancel, without waiting
+// for a cancellation receipt. It consumes exactly one opening dispatch.
+bool RecoveryRangeOwnerDispatchClaimedPrimary(RecoveryRangeOwner &owner,
+    RecoveryPanelControl &panel,const RecoverySessionLifecycle &session,
+    const RecoverySessionContext &live,const RecoverySessionIntentScope &scope,
+    const RecoveryRangeOco &oco) {
+ if(owner.phase!=RRO_PRIMARY_CLAIMED || !RecoveryRangeOcoWithin(oco,scope) ||
+    !RecoveryRangeOwnerBound(owner,panel,session,live,scope) ||
+    oco.winner_range_id!=owner.range_id || oco.winner_order!=owner.primary.ticket ||
+    oco.winner_order!=owner.first_proof.entry.executed_order ||
+    oco.winner_position!=owner.first_proof.entry.position_id)
+    return false;
+ owner.phase=RRO_PRIMARY_DISPATCH_ATTEMPTED;
+ if(!RecoveryOpenVerifiedPrimaryProof(owner.primary_pump.binding,session,live,scope,owner.first_proof,
             panel.ranges[owner.range_id-1],panel.settings,owner.opening,owner.ledger,owner.first_open))
-    return RPP_STOPPED;
+    return false;
  owner.revision=1;owner.phase=RRO_ORDINARY;
  owner.next_exact_ticket=RecoveryRangeOwnerReceiptTicket(owner.first_open.receipts.reverse);
- return RPP_PROOF; // completion of the first independent fill proof, not reverse effect
+ return true; // staged reverse, not broker proof
 }
 
 void RecoveryRangeOwnerSnapshot(const RecoveryRangeOwner &owner,const RecoveryPanelControl &panel,

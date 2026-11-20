@@ -110,6 +110,17 @@ int main(){
     reset();a={RR_CANCEL,-1,0,0,77,8,0,399930,400000,2};
     own_order=false;assert(call()==RD_NOT_SENT && check_calls==0);
     reset();assert(call()==RD_OUTCOME_UNRESOLVED && send_calls==1);
+    auto cancel_async=[&]{return RecoveryDispatchExactCancelAsync(s,a,k,.01,.01,r);};
+    reset();preflight=false;
+    assert(cancel_async()==RD_OUTCOME_UNRESOLVED && check_calls==0 && send_calls==0 &&
+           async_calls==1 && !r.async_sl_submitted && r.order==0);
+    assert(cancel_async()==RD_EXISTING_INTENT && async_calls==1);
+    reset();own_order=false;
+    assert(cancel_async()==RD_NOT_SENT && async_calls==0 && check_calls==0);
+    reset();acked=false;
+    assert(cancel_async()==RD_RESERVED_NOT_SENT && async_calls==1 && send_calls==0);
+    reset();a={RR_PRIMARY,1,0,0,0,8,0,400000,399930,2};
+    assert(cancel_async()==RD_NOT_SENT && !reserved && async_calls==0 && check_calls==0);
     reset();a={RR_MOVE_SUPPORT_OPPOSITE,-1,0,0,77,8,0,399950,400030,2};
     s.retire={77,-1,399930,400000,2};
     assert(call()==RD_OUTCOME_UNRESOLVED && send_calls==1);

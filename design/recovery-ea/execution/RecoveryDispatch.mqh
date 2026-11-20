@@ -84,9 +84,11 @@ bool RecoveryDispatchTarget(const RecoveryIntentKey &key,const RRRangeState &ran
    return action.kind==RR_PRIMARY || action.kind==RR_REVERSE || action.kind==RR_REENTRY;
   }
 
+enum RecoveryDispatchMode { RDM_SYNC=0,RDM_ASYNC_SL,RDM_ASYNC_CANCEL };
+
 RecoveryDispatchState RecoveryDispatchImpl(const RRRangeState &range,const RRAction &action,
                                            const RecoveryIntentKey &key,const double tick,
-                                           const double step,const bool async_sl_only,RecoveryDispatchResult &out)
+                                           const double step,const RecoveryDispatchMode mode,RecoveryDispatchResult &out)
   {
    ZeroMemory(out);
    out.state=RD_NOT_SENT;
@@ -102,12 +104,15 @@ RecoveryDispatchState RecoveryDispatchImpl(const RRRangeState &range,const RRAct
    if(!RecoveryBuildStagedRequest(range,action,key.symbol,(ulong)key.magic,tick,step,request) ||
       !RecoveryDispatchTarget(key,range,action,tick,step))
       return out.state;
-   if(async_sl_only)
+   if(mode!=RDM_SYNC)
      {
-      // A synchronous trade-server check of SL in this leg would wait on the
-      // server before staging the opposite stop. Still validate locally above.
-      if(request.action!=TRADE_ACTION_SLTP ||
-         (action.kind!=RR_INITIAL_SL && action.kind!=RR_SUPPORT_SL)) return out.state;
+      // These narrow async paths check the exact target locally, so neither
+      // waits for a server-side OrderCheck before the next independent leg.
+      const bool sl=mode==RDM_ASYNC_SL && request.action==TRADE_ACTION_SLTP &&
+                    (action.kind==RR_INITIAL_SL || action.kind==RR_SUPPORT_SL);
+      const bool cancel=mode==RDM_ASYNC_CANCEL && request.action==TRADE_ACTION_REMOVE &&
+                        action.kind==RR_CANCEL;
+      if(!sl && !cancel)return out.state;
      }
    else
      {
@@ -129,11 +134,12 @@ RecoveryDispatchState RecoveryDispatchImpl(const RRRangeState &range,const RRAct
    MqlTradeResult result;
    ZeroMemory(result);
    out.state=RD_OUTCOME_UNRESOLVED;
-   if(async_sl_only)
+   if(mode!=RDM_SYNC)
      {
-      out.async_sl_submitted=OrderSendAsync(request,result);
+      const bool submitted_async=OrderSendAsync(request,result);
+      out.async_sl_submitted=(mode==RDM_ASYNC_SL && submitted_async);
       out.send_retcode=result.retcode;
-      if(!out.async_sl_submitted) out.state=RD_RESERVED_NOT_SENT;
+      if(!submitted_async) out.state=RD_RESERVED_NOT_SENT;
       return out.state;
      }
    const bool submitted=OrderSend(request,result);
@@ -161,13 +167,20 @@ RecoveryDispatchState RecoveryDispatchOnce(const RRRangeState &range,const RRAct
                                            const RecoveryIntentKey &key,const double tick,
                                            const double step,RecoveryDispatchResult &out)
   {
-   return RecoveryDispatchImpl(range,action,key,tick,step,false,out);
+   return RecoveryDispatchImpl(range,action,key,tick,step,RDM_SYNC,out);
   }
 
 RecoveryDispatchState RecoveryDispatchOpeningSLAsync(const RRRangeState &range,const RRAction &action,
                                                       const RecoveryIntentKey &key,const double tick,
                                                       const double step,RecoveryDispatchResult &out)
   {
-   return RecoveryDispatchImpl(range,action,key,tick,step,true,out);
+   return RecoveryDispatchImpl(range,action,key,tick,step,RDM_ASYNC_SL,out);
+  }
+// Exact OCO cancel already identifies the ticket; async response cannot
+// prove cancellation. The independent exact history check still owns that.
+RecoveryDispatchState RecoveryDispatchExactCancelAsync(const RRRangeState &range,const RRAction &action,
+    const RecoveryIntentKey &key,const double tick,const double step,RecoveryDispatchResult &out)
+  {
+   return RecoveryDispatchImpl(range,action,key,tick,step,RDM_ASYNC_CANCEL,out);
   }
 #endif

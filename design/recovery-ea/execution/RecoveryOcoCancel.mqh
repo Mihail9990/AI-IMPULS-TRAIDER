@@ -158,7 +158,7 @@ RecoveryOcoCancelResult RecoveryStepOcoCancel(RecoveryOcoCancel &c,const Recover
     RecoveryIntentKey expected;
     if(!RecoveryBuildSessionIntentKey(scope,action,c.verify.price_tick,c.verify.volume_step,expected) ||
        !RecoveryIntentKeysMatch(expected,c.cancel_key))return ROC_UNKNOWN;
-    if(RecoveryDispatchOnce(view,action,c.cancel_key,c.verify.price_tick,c.verify.volume_step,c.receipt)
+    if(RecoveryDispatchExactCancelAsync(view,action,c.cancel_key,c.verify.price_tick,c.verify.volume_step,c.receipt)
        !=RD_OUTCOME_UNRESOLVED)return ROC_UNKNOWN;
     c.state=ROC_PROBE;return ROC_DISPATCH_CHECKED;
  }

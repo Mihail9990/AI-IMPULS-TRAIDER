@@ -25,7 +25,7 @@ struct TestCycle {ulong position_id;};
 struct TestRange {TestCycle cycle;};
 struct RecoveryPanelControl {int mode;bool configured[2];TestRange ranges[2];};
 struct RecoveryEvidenceOwner {string verifier_epoch;long verifier_chart;};
-enum {RRO_UNUSED,RRO_PRIMARY_PENDING,RRO_ORDINARY,RRO_FINAL};
+enum {RRO_UNUSED,RRO_PRIMARY_PENDING,RRO_ORDINARY,RRO_FINAL,RRO_PRIMARY_CLAIMED};
 struct TestOpening {bool reserved,sl_required;int reverse;};
 struct TestOrdinary {struct Hint{int state;};struct Pump{int state;};Hint hint;Pump pump;};
 struct RecoveryIntentKey {string id;};
@@ -43,8 +43,9 @@ struct RecoverySessionIntentScope {string executor_epoch,server,symbol;long logi
 struct RecoveryInventoryScope {string nonce,executor_epoch,verifier_epoch,server,symbol;long login,magic,generation,verifier_chart;};
 struct RecoveryExactReportScope {RecoveryInventoryScope binding;ulong order_ticket;};
 enum RecoveryOcoCancelResult {ROC_WAIT=0,ROC_REQUESTED,ROC_CANCELED,ROC_UNKNOWN};
-struct RecoveryOcoCancel {int attempts;};
-int canceled=0,cancel_begins=0;
+struct RecoveryOcoCancel {int attempts,steps;};
+int cancel_sends=0,canceled=0,cancel_begins=0,reverse_sends=0;
+bool confirm_cancel=false;
 ulong canceled_ticket=0;
 bool RecoveryBeginOcoCancel(RecoveryOcoCancel& c,const RecoverySessionLifecycle&,const RecoverySessionContext&,
  const RecoverySessionIntentScope&,const RecoveryPanelControl&,int winner,const RecoveryPrimaryFillBinding&,
@@ -56,7 +57,10 @@ bool RecoveryBeginOcoCancel(RecoveryOcoCancel& c,const RecoverySessionLifecycle&
 }
 RecoveryOcoCancelResult RecoveryStepOcoCancel(RecoveryOcoCancel& c,const RecoverySessionLifecycle&,
  const RecoverySessionContext&,const RecoverySessionIntentScope&,const RecoveryPanelControl&){
- assert(c.attempts==1);++canceled;return ROC_CANCELED;
+ assert(c.attempts==1);
+ if(c.steps++==0){++cancel_sends;return ROC_REQUESTED;}
+ if(!confirm_cancel)return ROC_WAIT;
+ ++canceled;return ROC_CANCELED;
 }
 enum {RFH_QUEUED=2,RAP_UNUSED=0,RWR_IDLE=0,RWR_ACTIVE=2};
 struct RecoveryWorkingReverse {int state;};
@@ -111,8 +115,19 @@ void RecoveryRangeOwnerPrimaryTimer(RecoveryRangeOwner& u,RecoveryPanelControl&,
  assert(v.verifier_chart==2&&oco.winner_range_id==0);++primary_reads;
  if(proof_range==u.id) {
   oco.winner_range_id=u.id;oco.winner_order=u.primary.ticket;u.first_proof.entry.executed_order=u.primary.ticket;
-  u.phase=RRO_ORDINARY;u.opening.reserved=true;u.next_exact_ticket=77;
+  u.phase=RRO_PRIMARY_CLAIMED;
  }
+}
+bool RecoveryRangeOwnerDispatchClaimedPrimary(RecoveryRangeOwner& u,RecoveryPanelControl& panel,
+ const RecoverySessionLifecycle&,const RecoverySessionContext&,const RecoverySessionIntentScope&,
+ const RecoveryRangeOco& oco){
+ assert(u.phase==RRO_PRIMARY_CLAIMED&&oco.winner_range_id==u.id);
+ // Simulate an arbitrarily slow synchronous winner broker response by
+ // observing the state when entering send: cancel already submitted,
+ // independent verifier has not responded and need not have.
+ assert(cancel_sends==int(panel.configured[2-u.id])&&canceled==0);
+ ++reverse_sends;u.phase=RRO_ORDINARY;u.opening.reserved=true;u.next_exact_ticket=77;
+ return true;
 }
 bool RecoveryRangeOwnerArmOrdinary(RecoveryRangeOwner&,const RecoveryPanelControl&,const RecoverySessionLifecycle&,
  const RecoverySessionContext&,const RecoverySessionIntentScope&,RecoveryEvidenceOwner&,ulong,double,double){return true;}
@@ -133,7 +148,7 @@ int main(){
  for(int winner : {1,2}) {
    RecoveryChartRuntime chart{};
    good=true;fail_publish=false;configure=false;proof_range=0;
-   publishes=polls=submits=primary_reads=ordinary_reads=working=canceled=cancel_begins=0;
+   publishes=polls=submits=primary_reads=ordinary_reads=working=canceled=cancel_begins=cancel_sends=reverse_sends=0;confirm_cancel=false;
    canceled_ticket=0;
    auto invalid=settings;invalid.support_first_ticks=25;
    assert(!RecoveryChartStart(chart,live,"profile","seed","verifier",2,invalid,.01,.02));
@@ -148,10 +163,11 @@ int main(){
    assert(RecoveryChartOnTimer(chart,live)&&submits==2&&primary_reads==2+winner&&ordinary_reads==1&&working==1);
    assert(!chart.publish_needed&&publishes==2&&chart.oco.winner_range_id==winner);
    const int loser=3-winner;
-   assert(chart.ranges[loser-1].phase==RRO_PRIMARY_PENDING&&!chart.panel.configured[loser-1]);
-   assert(canceled==1&&cancel_begins==1&&canceled_ticket==static_cast<ulong>(50+loser));
+   assert(chart.ranges[loser-1].phase==RRO_PRIMARY_PENDING&&chart.panel.configured[loser-1]);
+   assert(cancel_sends==1&&reverse_sends==1&&canceled==0&&cancel_begins==1&&canceled_ticket==static_cast<ulong>(50+loser));
+   confirm_cancel=true;
    assert(RecoveryChartOnTimer(chart,live)&&primary_reads==2+winner&&ordinary_reads==2);
-   assert(canceled==1&&cancel_begins==1);
+   assert(canceled==1&&cancel_begins==1&&!chart.panel.configured[loser-1]);
    RecoveryChartOnTrade(chart,live,{winner});assert(chart.ranges[winner-1].received==1);
    RecoveryChartOnTrade(chart,live,{loser});assert(chart.ranges[loser-1].received==0);
    good=false;
@@ -162,7 +178,7 @@ int main(){
  }
  RecoveryChartRuntime single{};
  good=true;two_ranges=false;configure=true;proof_range=1;
- canceled=cancel_begins=0;
+ canceled=cancel_begins=cancel_sends=reverse_sends=0;confirm_cancel=false;
  const int before=submits;
  assert(RecoveryChartStart(single,live,"profile","single","verifier",2,settings,.01,.02));
  assert(RecoveryChartOnTimer(single,live));
