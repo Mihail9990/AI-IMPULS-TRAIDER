@@ -12,7 +12,9 @@ import tempfile
 import zipfile
 
 BASE = "design/recovery-ea/"
-DIAGNOSTIC = ("verifier/RecoveryVerifier.mq5", "probe/RecoveryPairProbe.mq5")
+SCHEMA = 2
+SUPPORT = ("verifier/RecoveryVerifier.mq5", "watcher/RecoveryPriceWatcher.mq5")
+DIAGNOSTIC = (*SUPPORT, "probe/RecoveryCompileProbe.mq5")
 PATH_RX = re.compile(r"[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*\.(?:mq5|mqh)")
 RESULT_RX = re.compile(r"^\s*Result:\s*(\d+)\s+errors?,\s*(\d+)\s+warnings?\b", re.I | re.M)
 INCLUDES = re.compile(r'^\s*#\s*include\s*"([^"]+)"', re.M)
@@ -35,8 +37,8 @@ def validated_targets(mode, targets):
         raise ValueError("Invalid target list")
     if mode == "diagnostic" and targets == list(DIAGNOSTIC):
         return targets
-    if mode == "candidate" and len(targets) == 2 and targets[0] == DIAGNOSTIC[0]:
-        p = validated_path(targets[1])
+    if mode == "candidate" and len(targets) == 3 and tuple(targets[:2]) == SUPPORT:
+        p = validated_path(targets[2])
         if p.endswith(".mq5") and p.startswith(("execution/", "runtime/")):
             return targets
     raise ValueError("Unexpected mode or entry points")
@@ -52,7 +54,7 @@ def package(repo, revision, output, trader=None):
     if git(repo, "rev-parse", "--verify", revision+"^{commit}").decode().strip() != revision:
         raise ValueError("Not the requested commit")
     mode = "candidate" if trader else "diagnostic"
-    targets = validated_targets(mode, [DIAGNOSTIC[0], trader] if trader else list(DIAGNOSTIC))
+    targets = validated_targets(mode, [*SUPPORT, trader] if trader else list(DIAGNOSTIC))
     queue = targets[:]
     sources = {}
     while queue:
@@ -74,7 +76,7 @@ def package(repo, revision, output, trader=None):
         for inc in INCLUDES.findall(s):
             normalized = posixpath.normpath(posixpath.join(posixpath.dirname(path), inc.replace("\\", "/")))
             queue.append(validated_path(normalized))
-    manifest = {"schema": 1, "commit": revision, "mode": mode,
+    manifest = {"schema": SCHEMA, "commit": revision, "mode": mode,
                 "targets": targets, "sha256": {p: hashlib.sha256(b).hexdigest() for p,b in sources.items()}}
     # EX5 files, release secrets and working copy changes never enter the archive.
     with open(output, "xb") as f, zipfile.ZipFile(f, "w") as z:
@@ -104,7 +106,7 @@ def read_package(path, expected_commit, expected_archive_sha256):
         if len(names) != len(infos) or "manifest.json" not in names:
             raise ValueError("Duplicate paths or missing manifest")
         manifest=json.loads(z.read("manifest.json"))
-        if set(manifest) != {"schema", "commit", "mode", "targets", "sha256"} or manifest["schema"] != 1 or manifest["commit"] != expected_commit:
+        if set(manifest) != {"schema", "commit", "mode", "targets", "sha256"} or manifest["schema"] != SCHEMA or manifest["commit"] != expected_commit:
             raise ValueError("Invalid manifest or commit")
         targets=validated_targets(manifest["mode"], manifest["targets"])
         hashes=manifest["sha256"]

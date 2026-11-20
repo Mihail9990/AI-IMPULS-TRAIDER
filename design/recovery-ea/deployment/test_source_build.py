@@ -10,8 +10,8 @@ import unittest
 from unittest.mock import Mock, patch
 import zipfile
 
-from source_build import (BASE, DIAGNOSTIC, compile_sources, package, read_package,
-                          file_product_version, result_counts, validated_path)
+from source_build import (BASE, DIAGNOSTIC, SCHEMA, SUPPORT, compile_sources, package, read_package,
+                          file_product_version, result_counts, validated_path, validated_targets)
 
 
 def sha(path):
@@ -29,7 +29,9 @@ class BuildTest(unittest.TestCase):
         self.git("config","user.name","Test")
         self.git("config","user.email","test@example.invalid")
         self.source(DIAGNOSTIC[0],'#include "part.mqh"\n')
-        self.source(DIAGNOSTIC[1],'#include "../verifier/part.mqh"\n')
+        self.source(DIAGNOSTIC[1],'#include "watcher.mqh"\n')
+        self.source(DIAGNOSTIC[2],'#include "../verifier/part.mqh"\n')
+        self.source('watcher/watcher.mqh', '// Price statistics\n')
         self.source("verifier/part.mqh","// Git-committed source\n")
         self.commit=self.checkpoint()
         self.archive=self.root/"a.zip"
@@ -58,7 +60,9 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(sha(self.archive),sha(other))
         m,files=read_package(self.archive,self.commit,sha(other))
         self.assertEqual(m["mode"],"diagnostic")
-        self.assertEqual(set(files),{*DIAGNOSTIC,"verifier/part.mqh"})
+        self.assertEqual(m["schema"],SCHEMA)
+        self.assertEqual(m["targets"],list(DIAGNOSTIC))
+        self.assertEqual(set(files),{*DIAGNOSTIC,"verifier/part.mqh","watcher/watcher.mqh"})
         self.assertIn(b"Git-committed",files["verifier/part.mqh"])
         with self.assertRaisesRegex(ValueError,"ZIP SHA"):
             read_package(self.archive,self.commit,"f"*64)
@@ -71,7 +75,26 @@ class BuildTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             package(self.repo,self.commit,self.archive,trader)
         commit=self.checkpoint()
-        self.assertEqual(package(self.repo,commit,self.archive,trader)["mode"],"candidate")
+        m = package(self.repo,commit,self.archive,trader)
+        self.assertEqual(m["mode"],"candidate")
+        self.assertEqual(m["targets"],[*SUPPORT,trader])
+        _, files = read_package(self.archive, commit, sha(self.archive))
+        self.assertIn(DIAGNOSTIC[1], files)
+        self.assertNotIn(DIAGNOSTIC[2], files)
+
+    def test_old_role_manifests_and_missing_watcher_rejected(self):
+        with self.assertRaises(ValueError):
+            validated_targets("diagnostic", [DIAGNOSTIC[0],"probe/RecoveryPairProbe.mq5"])
+        with self.assertRaises(ValueError):
+            validated_targets("candidate", list(DIAGNOSTIC))
+        with self.assertRaises(ValueError):
+            validated_targets("diagnostic", list(reversed(DIAGNOSTIC)))
+
+        self.source(DIAGNOSTIC[1], "").unlink()
+        without_watcher = self.checkpoint()
+        with self.assertRaisesRegex(ValueError, "RecoveryPriceWatcher"):
+            package(self.repo,without_watcher,self.archive)
+        self.assertFalse(self.archive.exists())
 
     def test_escaped_include_and_reserved_path_rejected(self):
         self.source(DIAGNOSTIC[0],'#include "../../../other.mqh"\n')
@@ -99,7 +122,7 @@ class BuildTest(unittest.TestCase):
             path=Path(re.search(r'/compile:"([^"]+)"',command).group(1))
             self.assertEqual(kwargs["executable"],str(ed))
             self.assertNotIn(str(self.repo),str(path))
-            good=path.name=="RecoveryVerifier.mq5"
+            good=path.name!="RecoveryCompileProbe.mq5"
             path.with_suffix(".log").write_text(f"Result: {0 if good else 1} errors, 0 warnings",encoding="utf-16")
             if good:
                 path.with_suffix(".ex5").write_bytes(b"fake-ex5")
@@ -107,9 +130,9 @@ class BuildTest(unittest.TestCase):
         with patch("source_build.sys.platform","win32"), patch("source_build.file_product_version",return_value=("5.0.0.6308","5.0.0.6307")), patch("source_build.subprocess.run",side_effect=fake):
             output=self.root/"out"
             report=compile_sources(self.archive,self.commit,sha(self.archive),ed,output)
-            self.assertEqual([r["status"] for r in report["targets"]],["compiled","failed"])
-            self.assertEqual(len(list(output.glob("*.ex5"))),1)
-            self.assertEqual(len(list(output.glob("*.log"))),2)
+            self.assertEqual([r["status"] for r in report["targets"]],["compiled","compiled","failed"])
+            self.assertEqual(len(list(output.glob("*.ex5"))),2)
+            self.assertEqual(len(list(output.glob("*.log"))),3)
             payload = (output/"compile-report.json").read_text()
             self.assertNotIn(str(self.root), payload)
             self.assertEqual(json.loads(payload)["status"],"compile_only_not_deployment")
