@@ -18,12 +18,11 @@ struct string : std::string {
  explicit string(unsigned long x): std::string(std::to_string(x)) {}
 };
 using ulong=unsigned long;
-const int ACCOUNT_LOGIN=1,ACCOUNT_SERVER=2,REASON_CHARTCHANGE=3,REASON_ACCOUNT=4,
+const int ACCOUNT_LOGIN=1,ACCOUNT_SERVER=2,REASON_ACCOUNT=4,
           REASON_REMOVE=5,INIT_FAILED=6,INIT_SUCCEEDED=0;
 static long chart_id=100,login=200;
 static string server="Broker";
 string _Symbol="XAUUSD.s";
-int _Period=1;
 bool timer_set=false,timer_allowed=true;
 int timer_attempts=0;
 long ChartID(){return chart_id;}
@@ -41,29 +40,21 @@ template<class... T> void Print(T&&...) {}
 
 int main() {
  RecoverySessionLifecycle life{};
- RecoverySessionContext context{100,200,1,"Broker","XAUUSD.s","config=abc",1};
+ RecoverySessionContext context{100,200,1,"Broker","XAUUSD.s","config=abc"};
  assert(RecoverySessionInit(life,context,true,"epoch1")==RSL_NEW);
  assert(RecoverySessionCurrent(life,context));
- RecoverySessionDeinit(life,true);
- assert(!RecoverySessionCurrent(life,context)&&life.period_reinit);
- auto next=context;next.period=5;
- assert(RecoverySessionInit(life,next,true,"")==RSL_RESUMED);
- assert(life.epoch=="epoch1"&&!RecoverySessionCurrent(life,context)&&RecoverySessionCurrent(life,next));
- RecoverySessionDeinit(life,true);
- assert(RecoverySessionInit(life,next,true,"epoch2")==RSL_NEW); // No period change.
- RecoverySessionDeinit(life,true);
- next.period=15;
+ RecoverySessionReset(life);
+ assert(!RecoverySessionCurrent(life,context)&&life.epoch=="");
+ auto next=context;
+ assert(RecoverySessionInit(life,next,true,"epoch2")==RSL_NEW&&life.epoch=="epoch2");
  assert(RecoverySessionInit(life,next,false,"epoch3")==RSL_INACTIVE);
- assert(!life.active&&!life.period_reinit&&life.epoch=="");
- assert(RecoverySessionInit(life,next,true,"epoch4")==RSL_NEW);
- RecoverySessionDeinit(life,true);
- assert(RecoverySessionInit(life,next,true,"epoch4")==RSL_INACTIVE);
-
- // A change in any scope field kills preservation even if period changes too.
+ assert(!life.active&&life.epoch=="");
+ assert(RecoverySessionInit(life,next,true,"")==RSL_INACTIVE);
+ // Changes in any scope field never authorize the old context.
  for(int i=0;i<6;i++){
    RecoverySessionReset(life);
    assert(RecoverySessionInit(life,context,true,"old")==RSL_NEW);
-   next=context;next.period=5;
+   next=context;
    if(i==0)next.chart++;
    if(i==1)next.login++;
    if(i==2)next.magic++;
@@ -71,7 +62,7 @@ int main() {
    if(i==4)next.symbol="EURUSD";
    if(i==5)next.binding="config=def";
    assert(!RecoverySessionCurrent(life,next));
-   RecoverySessionDeinit(life,true);
+   RecoverySessionReset(life);
    assert(RecoverySessionInit(life,next,true,"new")==RSL_NEW&&life.epoch=="new");
  }
  next=context;next.login=0;
@@ -81,22 +72,19 @@ int main() {
  assert(OnInit()==INIT_SUCCEEDED&&timer_set&&SeenProof==0);
  const string initial=Session.epoch;
  OnTimer();OnTimer();assert(SeenProof==42&&Transitions==1);
- OnDeinit(REASON_CHARTCHANGE);assert(!timer_set&&SeenProof==42);
- _Period=5;
- assert(OnInit()==INIT_SUCCEEDED&&timer_set&&Session.epoch==initial);
- OnTimer(); assert(SeenProof==42&&Transitions==1&&LoggedTimer);
- OnDeinit(REASON_CHARTCHANGE);_Symbol="EURUSD";
+ OnDeinit(REASON_REMOVE);assert(!timer_set&&SeenProof==0);
+ _Symbol="EURUSD";
  assert(OnInit()==INIT_SUCCEEDED&&Session.epoch!=initial&&SeenProof==0);
  const string second=Session.epoch;
  OnTimer();assert(SeenProof==42);
- OnDeinit(REASON_CHARTCHANGE);_Symbol="XAUUSD.s";
+ OnDeinit(REASON_REMOVE);_Symbol="XAUUSD.s";
  assert(OnInit()==INIT_SUCCEEDED&&Session.epoch!=initial&&Session.epoch!=second&&SeenProof==0);
  OnTimer();
  OnDeinit(REASON_ACCOUNT);assert(!timer_set&&SeenProof==0);
  ++login;
  assert(OnInit()==INIT_SUCCEEDED&&timer_set&&Transitions==0);
  OnTimer();
- OnDeinit(REASON_CHARTCHANGE);_Period=15;timer_allowed=false;
+ OnDeinit(REASON_REMOVE);timer_allowed=false;
  assert(OnInit()==INIT_FAILED&&!Session.active&&!timer_set&&SeenProof==0);
  timer_allowed=true;
  assert(OnInit()==INIT_SUCCEEDED&&timer_set&&SeenProof==0);

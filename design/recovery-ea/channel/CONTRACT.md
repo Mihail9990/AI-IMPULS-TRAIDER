@@ -48,8 +48,8 @@ fails closed in Python, not guessed or partially implemented.
 State contains version, scope_id, boot_id, context_id, generation_id, written_at UTC seconds,
 mode (`ready`, `manual_wait`, `manual_cancel`, `unknown`), plus EA facts.
 No heartbeat-age gate. A fresh EA gets a new boot_id and starts from empty RAM.
-Context changes invalidate prior scope. An unchanged-scope timeframe refresh
-is not a fresh instance; see [EA session lifecycle](../execution/SESSION_LIFECYCLE_RU.md).
+Context changes invalidate the prior scope. The working chart has a fixed
+period; see [EA session lifecycle](../execution/SESSION_LIFECYCLE_RU.md).
 
 Receipt echoes version/scope/boot/context/generation/command_id/content_sha256 and has status
 `accepted`, `applied`, `rejected`, or `unknown`, reason code and optional broker fact

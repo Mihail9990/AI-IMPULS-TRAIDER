@@ -113,7 +113,7 @@ int main(){
    assert(RecoveryBuildSessionIntentKey(fresh,pending.action,.01,.01,other_session));
    assert(other_session.id!=result.key.id);
    assert(!RecoveryApplyVerifiedAlternating(ctx,s,pending,cfg,proof,.01,.01,result)&&sends==1);
-   RecoverySessionContext live{7,12,18,"server","XAUUSD.s","configured",1};
+   RecoverySessionContext live{7,12,18,"server","XAUUSD.s","configured"};
    RecoverySessionLifecycle session{};
    assert(RecoverySessionInit(session,live,true,ctx.executor_epoch)==RSL_NEW);
    RecoveryAlternatingPump pump{{{ctx.executor_epoch,ctx.server,ctx.symbol,ctx.login,ctx.magic,

@@ -14,7 +14,7 @@ bool LoggedTimer=false;
 void ReadContext(RecoverySessionContext &c) {
  c.chart=ChartID();c.login=AccountInfoInteger(ACCOUNT_LOGIN);c.magic=ProbeMagic;
  c.server=AccountInfoString(ACCOUNT_SERVER);c.symbol=_Symbol;
- c.binding=BindingSettings;c.period=(int)_Period;
+ c.binding=BindingSettings;
 }
 void ResetProbe() { SeenProof=0;Transitions=0; }
 string NextDiagnosticEpoch() {
@@ -32,20 +32,20 @@ int OnInit() {
  const RecoverySessionInitResult state=RecoverySessionInit(Session,context,timer_ready,
                                                            NextDiagnosticEpoch());
  LoggedTimer=false;
- if(state!=RSL_RESUMED)ResetProbe();
+ ResetProbe();
  if(state==RSL_INACTIVE) {
     EventKillTimer();
     Print("RECOVERY session probe inactive: invalid binding or timer failure");
     return INIT_FAILED;
  }
- PrintFormat("RECOVERY session probe %s epoch=%s proof=%I64u transitions=%I64u",
-             state==RSL_RESUMED?"resumed":"empty",Session.epoch,SeenProof,Transitions);
+ PrintFormat("RECOVERY session probe empty epoch=%s proof=%I64u transitions=%I64u",
+             Session.epoch,SeenProof,Transitions);
  return INIT_SUCCEEDED;
 }
 void OnDeinit(const int reason) {
+ PrintFormat("RECOVERY session probe stopped reason=%d",reason);
  EventKillTimer();
- RecoverySessionDeinit(Session,reason==REASON_CHARTCHANGE);
- if(!Session.period_reinit)ResetProbe();
+ RecoverySessionReset(Session);ResetProbe();
 }
 void OnTimer() {
  RecoverySessionContext live;
@@ -55,7 +55,7 @@ void OnTimer() {
     Print("RECOVERY session probe: binding mismatch; idle");
     return;
  }
- // Replay one synthetic ID on the first timer tick after (re)initialization.
+ // Use one synthetic ID on the first timer tick after initialization.
  if(LoggedTimer)return;
  LoggedTimer=true;
  const ulong simulated_proof=42;
