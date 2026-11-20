@@ -11,7 +11,7 @@ enum RRActionKind { RR_NONE=0, RR_PRIMARY=1, RR_INITIAL_SL=2, RR_REVERSE=3,
 
 struct RRSettings {
  ulong scope,generation;
- long initial_sl_ticks,quarter_ticks,half_ticks;
+ long initial_sl_ticks,support_first_ticks,support_second_ticks,support_offset_ticks;
  long lot_steps[24];          // validated, immutable strategy snapshot for generation
 };
 struct RRKnownOrder {
@@ -61,7 +61,8 @@ void RRClearAction(RRAction &a) {
 }
 bool RRSettingsValid(const RRSettings &cfg) {
  if(cfg.scope==0 || cfg.generation==0 || !RCBoundedPositive(cfg.initial_sl_ticks) ||
-    !RCBoundedPositive(cfg.quarter_ticks) || cfg.half_ticks!=2*cfg.quarter_ticks) return false;
+    !RCBoundedPositive(cfg.support_first_ticks) || !RCBoundedPositive(cfg.support_second_ticks) ||
+    !RCBoundedPositive(cfg.support_offset_ticks) || cfg.support_second_ticks<=cfg.support_first_ticks) return false;
  for(int i=0;i<24;i++) if(!RCBoundedPositive(cfg.lot_steps[i]))return false;
  return true;
 }
@@ -124,7 +125,8 @@ bool RRStage(RRRangeState &s,const RRSettings &cfg,const long bid,const long ask
     }
  } else if(s.phase==RR_ACTIVE) {
     RCStopProposal p;
-    if(!RCProposeSupport(s.cycle,s.live_sl,s.support_stage,bid,ask,cfg.quarter_ticks,cfg.half_ticks,p))
+    if(!RCProposeSupport(s.cycle,s.live_sl,s.support_stage,bid,ask,cfg.support_first_ticks,cfg.support_second_ticks,
+                         cfg.support_offset_ticks,p))
        return false;
     a.kind=RR_SUPPORT_SL;
     if(!RRPositionAction(s,p.target_ticks,p.stage,a))return false;

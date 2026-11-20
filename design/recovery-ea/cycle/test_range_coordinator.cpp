@@ -7,7 +7,7 @@ constexpr auto ULONG_MAX=std::numeric_limits<ulong>::max();
 
 static RRSettings config() {
  RRSettings c{};c.scope=7;c.generation=11;
- c.initial_sl_ticks=70;c.quarter_ticks=25;c.half_ticks=50;
+ c.initial_sl_ticks=70;c.support_first_ticks=25;c.support_second_ticks=40;c.support_offset_ticks=25;
  for(int n=1;n<=24;n++)c.lot_steps[n-1]=RCDefaultLotHundredths(n);
  return c;
 }

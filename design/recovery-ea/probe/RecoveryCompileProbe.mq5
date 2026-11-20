@@ -7,6 +7,8 @@
 #include "../execution/RecoveryOpeningDispatch.mqh"
 #include "../execution/RecoveryExactOrderEffect.mqh"
 #include "../execution/RecoveryPositionEffect.mqh"
+#include "../execution/RecoveryWatchedSupport.mqh"
+#include "../cycle/RecoveryCompletedReverse.mqh"
 #include "../execution/RecoveryAdoptionInventory.mqh"
 #include "../execution/RecoveryIntentRestart.mqh"
 #include "../verifier/RecoveryExactOrderReader.mqh"

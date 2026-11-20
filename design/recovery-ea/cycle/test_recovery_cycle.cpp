@@ -34,14 +34,19 @@ int main() {
  assert(!RCApplyEntry(a,entry(1,31,51)));
  assert(RCApplyEntry(b,entry(2,40,60,-1)));
  RCStopProposal stop{};
- assert(!RCProposeSupport(a,399960,0,400054,400075,25,50,stop)); // wrong side only
- assert(RCProposeSupport(a,399960,0,400055,400076,25,50,stop));
+ assert(!RCProposeSupport(a,399960,0,400054,400075,25,40,25,stop)); // wrong side only
+ assert(RCProposeSupport(a,399960,0,400055,400076,25,40,25,stop));
  assert(stop.stage==1 && stop.target_ticks==400005 && a.full_sl_count==4);
- assert(!RCProposeSupport(a,400005,0,400055,400076,25,50,stop)); // no weakening or reclassification
- assert(RCProposeSupport(a,400005,1,400080,400100,25,50,stop) && stop.stage==2 && stop.target_ticks==400030);
- assert(!RCProposeSupport(b,400100,0,399994,400006,25,50,stop));
- assert(RCProposeSupport(b,400100,0,399994,400005,25,50,stop) && stop.target_ticks==400055);
- assert(RCProposeSupport(b,400055,1,399955,399980,25,50,stop) && stop.target_ticks==400030);
+ assert(!RCProposeSupport(a,400005,0,400055,400076,25,40,25,stop)); // no weakening or reclassification
+ assert(RCProposeSupport(a,400005,1,400070,400090,25,40,25,stop) && stop.stage==2 && stop.target_ticks==400030);
+ assert(!RCProposeSupport(b,400100,0,399994,400006,25,40,25,stop));
+ assert(RCProposeSupport(b,400100,0,399994,400005,25,40,25,stop) && stop.target_ticks==400055);
+ assert(RCProposeSupport(b,400055,1,399965,399990,25,40,25,stop) && stop.target_ticks==400030);
+ assert(!RCProposeSupport(a,400005,1,400069,400090,25,40,25,stop));
+ assert(!RCProposeSupport(b,400055,1,399965,399991,25,40,25,stop));
+ assert(RCProposeSupport(a,399960,0,400060,400080,30,45,25,stop) && stop.stage==1 && stop.target_ticks==400005);
+ assert(RCProposeSupport(a,399960,0,400075,400090,30,45,25,stop) && stop.stage==2 && stop.target_ticks==400030);
+ assert(!RCProposeSupport(a,399960,0,400075,400090,45,45,25,stop));
 
  RCClosePlan out{};
  auto fact=close(a);

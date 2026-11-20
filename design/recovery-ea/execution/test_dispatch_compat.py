@@ -33,7 +33,7 @@ struct RecoveryExactOrderObservation {int source,state,type;ulong position_ident
 template<class T> void ZeroMemory(T& a){a=T{};}
 bool context=true,preflight=true,can_reserve=true,reserved=false,can_record=true,acked=true;
 bool own_order=true,valid_build=true,mutate_after_reserve=false;
-int send_calls=0,check_calls=0,change_sl=0,check_code=0;
+int send_calls=0,async_calls=0,check_calls=0,change_sl=0,check_code=0;
 uint send_code=TRADE_RETCODE_PLACED;
 ulong broker_ticket=9007199254740993ULL,recorded=0;
 bool RecoveryIntentContextOK(const RecoveryIntentKey&){return context;}
@@ -63,8 +63,10 @@ int RecoveryObserveExactOrder(const RecoveryExactOrderScope&,RecoveryExactOrderO
 bool OrderCheck(MqlTradeRequest&,MqlTradeCheckResult &r){++check_calls;r.retcode=check_code;return preflight;}
 bool OrderSend(MqlTradeRequest&,MqlTradeResult &r){
     assert(reserved);++send_calls;r.order=broker_ticket;r.retcode=send_code;return acked;}
+bool OrderSendAsync(MqlTradeRequest&,MqlTradeResult &r){
+    assert(reserved);++async_calls;r.retcode=send_code;return acked;}
 void reset(){context=preflight=can_reserve=can_record=acked=own_order=valid_build=true;
-    reserved=mutate_after_reserve=false;send_calls=check_calls=change_sl=check_code=0;
+    reserved=mutate_after_reserve=false;send_calls=async_calls=check_calls=change_sl=check_code=0;
     send_code=TRADE_RETCODE_PLACED;broker_ticket=9007199254740993ULL;recorded=0;}
 """
 TEST = r"""
@@ -96,6 +98,13 @@ int main(){
     assert(call()==RD_OUTCOME_UNRESOLVED && r.synchronous_sl_ack && recorded==0);
     reset();send_code=TRADE_RETCODE_DONE;acked=false;
     assert(call()==RD_OUTCOME_UNRESOLVED && !r.synchronous_sl_ack);
+    reset();preflight=false;
+    assert(RecoveryDispatchOpeningSLAsync(s,a,k,.01,.01,r)==RD_OUTCOME_UNRESOLVED &&
+           r.async_sl_submitted && check_calls==0 && send_calls==0 && async_calls==1);
+    assert(RecoveryDispatchOpeningSLAsync(s,a,k,.01,.01,r)==RD_EXISTING_INTENT && async_calls==1);
+    reset();acked=false;
+    assert(RecoveryDispatchOpeningSLAsync(s,a,k,.01,.01,r)==RD_RESERVED_NOT_SENT &&
+           !r.async_sl_submitted && check_calls==0 && async_calls==1);
     reset();a={RR_CANCEL,-1,0,0,77,8,0,399930,400000,2};
     own_order=false;assert(call()==RD_NOT_SENT && check_calls==0);
     reset();assert(call()==RD_OUTCOME_UNRESOLVED && send_calls==1);

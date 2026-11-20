@@ -20,7 +20,8 @@ struct RecoveryDispatchResult
    RecoveryDispatchState state;
    uint check_retcode;
    uint send_retcode;
-   bool synchronous_sl_ack; // Allows adjacent leg; never proves observed SL.
+   bool synchronous_sl_ack; // Diagnostic only; never proves observed SL.
+   bool async_sl_submitted;  // Local accepted send, not broker acceptance.
    ulong order;
   };
 
@@ -74,9 +75,9 @@ bool RecoveryDispatchTarget(const RecoveryIntentKey &key,const RRRangeState &ran
    return action.kind==RR_PRIMARY || action.kind==RR_REVERSE || action.kind==RR_REENTRY;
   }
 
-RecoveryDispatchState RecoveryDispatchOnce(const RRRangeState &range,const RRAction &action,
+RecoveryDispatchState RecoveryDispatchImpl(const RRRangeState &range,const RRAction &action,
                                            const RecoveryIntentKey &key,const double tick,
-                                           const double step,RecoveryDispatchResult &out)
+                                           const double step,const bool async_sl_only,RecoveryDispatchResult &out)
   {
    ZeroMemory(out);
    out.state=RD_NOT_SENT;
@@ -92,13 +93,22 @@ RecoveryDispatchState RecoveryDispatchOnce(const RRRangeState &range,const RRAct
    if(!RecoveryBuildStagedRequest(range,action,key.symbol,(ulong)key.magic,tick,step,request) ||
       !RecoveryDispatchTarget(key,range,action,tick,step))
       return out.state;
-   MqlTradeCheckResult check;
-   ZeroMemory(check);
-   const bool checked=OrderCheck(request,check);
-   out.check_retcode=check.retcode;
-   // Common success is zero; do not send after a broker-side rejection.
-   if(!checked || (check.retcode!=0 && check.retcode!=TRADE_RETCODE_DONE))
-      return out.state;
+   if(async_sl_only)
+     {
+      // A synchronous trade-server check of SL in this leg would wait on the
+      // server before staging the opposite stop. Still validate locally above.
+      if(request.action!=TRADE_ACTION_SLTP ||
+         (action.kind!=RR_INITIAL_SL && action.kind!=RR_SUPPORT_SL)) return out.state;
+     }
+   else
+     {
+      MqlTradeCheckResult check;
+      ZeroMemory(check);
+      const bool checked=OrderCheck(request,check);
+      out.check_retcode=check.retcode;
+      if(!checked || (check.retcode!=0 && check.retcode!=TRADE_RETCODE_DONE))
+         return out.state;
+     }
    if(!RecoveryIntentReserve(key))
      {
       out.state=RD_EXISTING_INTENT;
@@ -110,6 +120,13 @@ RecoveryDispatchState RecoveryDispatchOnce(const RRRangeState &range,const RRAct
    MqlTradeResult result;
    ZeroMemory(result);
    out.state=RD_OUTCOME_UNRESOLVED;
+   if(async_sl_only)
+     {
+      out.async_sl_submitted=OrderSendAsync(request,result);
+      out.send_retcode=result.retcode;
+      if(!out.async_sl_submitted) out.state=RD_RESERVED_NOT_SENT;
+      return out.state;
+     }
    const bool submitted=OrderSend(request,result);
    out.send_retcode=result.retcode;
    out.synchronous_sl_ack=(submitted && request.action==TRADE_ACTION_SLTP &&
@@ -125,5 +142,19 @@ RecoveryDispatchState RecoveryDispatchOnce(const RRRangeState &range,const RRAct
       out.state=RD_TICKET_RECORDED;
      }
    return out.state;
+  }
+
+RecoveryDispatchState RecoveryDispatchOnce(const RRRangeState &range,const RRAction &action,
+                                           const RecoveryIntentKey &key,const double tick,
+                                           const double step,RecoveryDispatchResult &out)
+  {
+   return RecoveryDispatchImpl(range,action,key,tick,step,false,out);
+  }
+
+RecoveryDispatchState RecoveryDispatchOpeningSLAsync(const RRRangeState &range,const RRAction &action,
+                                                      const RecoveryIntentKey &key,const double tick,
+                                                      const double step,RecoveryDispatchResult &out)
+  {
+   return RecoveryDispatchImpl(range,action,key,tick,step,true,out);
   }
 #endif

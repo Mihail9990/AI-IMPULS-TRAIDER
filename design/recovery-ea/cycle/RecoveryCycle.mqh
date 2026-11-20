@@ -108,19 +108,19 @@ bool RCApplyEntry(RCRange &r,const RCEntryProof &p) {
 // Exact larger/smaller comparison uses the executable side of the spread.
 // A proposal never changes confirmed protection or changes exit classification.
 bool RCProposeSupport(const RCRange &r,const long current_sl,const int confirmed_stage,
-                      const long bid,const long ask,const long quarter_ticks,
-                      const long half_ticks,RCStopProposal &out) {
+                      const long bid,const long ask,const long first_ticks,
+                      const long second_ticks,const long support_offset_ticks,RCStopProposal &out) {
  out.stage=0;out.target_ticks=0;
  if(RCCurrentSlot(r)==0 || r.active_order==0 || r.position_id==0 ||
     !RCValidSide(r.side) || !RCBoundedPositive(r.actual_entry_ticks) ||
     !RCBoundedPositive(current_sl) || confirmed_stage<0 || confirmed_stage>2 ||
     !RCBoundedPositive(bid) || !RCBoundedPositive(ask) || ask<bid ||
-    !RCBoundedPositive(quarter_ticks) || !RCBoundedPositive(half_ticks) ||
-    half_ticks!=2*quarter_ticks)return false;
+    !RCBoundedPositive(first_ticks) || !RCBoundedPositive(second_ticks) ||
+    !RCBoundedPositive(support_offset_ticks) || second_ticks<=first_ticks)return false;
  long progress=((r.side==1?bid:ask)-r.actual_entry_ticks)*r.side;
- int stage=progress>=half_ticks?2:(progress>=quarter_ticks?1:0);
+ int stage=progress>=second_ticks?2:(progress>=first_ticks?1:0);
  if(stage<=confirmed_stage)return false;
- long target=(stage==2?r.actual_entry_ticks:r.actual_entry_ticks-r.side*quarter_ticks);
+ long target=(stage==2?r.actual_entry_ticks:r.actual_entry_ticks-r.side*support_offset_ticks);
  if(!RCBoundedPositive(target) || (target-current_sl)*r.side<=0)return false;
  out.stage=stage;out.target_ticks=target;
  return true;
